@@ -1,0 +1,37 @@
+{
+  "name": "allowance-kit",
+  "version": "0.1.0",
+  "description": "The missing buyer-side runtime for x402: fund your AI agent once; it pays any x402 API autonomously inside hard policy rails — budgets, per-call caps, velocity circuit breakers, host allowlists, kill switch, audit ledger.",
+  "type": "module",
+  "license": "MIT",
+  "author": "fskroes",
+  "homepage": "https://onewallie.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fskroes/AllowanceKit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fskroes/AllowanceKit/issues"
+  },
+  "keywords": [
+    "x402",
+    "agentic-payments",
+    "ai-agents",
+    "micropayments",
+    "stablecoin",
+    "usdc",
+    "budget",
+    "spend-controls"
+  ],
+  "scripts": {
+    "demo": "rm -rf .allowance && node demo/demo.ts",
+    "dashboard": "node src/cli.ts dashboard",
+    "cli": "node src/cli.ts"
+  },
+  "bin": {
+    "allowance": "./src/cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

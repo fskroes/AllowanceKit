@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AllowanceKit — Agent Spending</title>
+<style>
+  :root { --bg:#0b0f14; --panel:#121820; --line:#1e2833; --text:#e6edf3; --dim:#8b98a5; --green:#2ea86b; --red:#e5534b; --amber:#d29922; --blue:#58a6ff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; padding:28px; max-width:1060px; margin:0 auto; }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:22px; }
+  h1 { font-size:17px; font-weight:600; letter-spacing:.02em; }
+  h1 span { color:var(--dim); font-weight:400; }
+  .kill { border:1px solid var(--line); background:var(--panel); color:var(--text); padding:10px 16px; border-radius:8px; cursor:pointer; font:inherit; }
+  .kill.armed { background:#2a1214; border-color:var(--red); color:#ff8a85; }
+  .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }
+  .card .v { font-size:24px; font-weight:700; }
+  .v.green { color:var(--green);} .v.red{color:var(--red);}
+  .bar { height:6px; background:var(--line); border-radius:99px; overflow:hidden; margin-top:10px; }
+  .bar i { display:block; height:100%; background:var(--green); transition:width .4s ease; }
+  .cols { display:grid; grid-template-columns:340px 1fr; gap:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; min-height:420px; }
+  .panel h2 { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px dashed var(--line); font-size:13px; }
+  .row:last-child { border-bottom:none; }
+  .muted { color:var(--dim); }
+  .ev { display:flex; gap:10px; padding:7px 0; border-bottom:1px solid var(--line); font-size:12.5px; align-items:baseline;}
+  .ev time { color:var(--dim); flex:none; width:74px; }
+  .tag { flex:none; width:96px; font-weight:700; letter-spacing:.03em; }
+  .tag.pay { color:var(--green);} .tag.blk { color:var(--red);} .tag.pol,.tag.top { color:var(--amber);}
+  .detail { color:var(--dim); word-break:break-all; }
+  .pill { display:inline-block; padding:2px 8px; border:1px solid var(--line); border-radius:99px; margin:2px 4px 2px 0; font-size:12px; color:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AllowanceKit <span>— autonomous agent spending, under human control</span></h1>
+  <button class="kill" id="kill">KILL SWITCH: OFF</button>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="k">Allowance remaining</div><div class="v green" id="remaining">$–</div>
+    <div class="bar"><i id="budgetBar" style="width:100%"></i></div></div>
+  <div class="card"><div class="k">Spent to date</div><div class="v" id="spent">$–</div><div class="muted" id="txcount"></div></div>
+  <div class="card"><div class="k">Per-call cap</div><div class="v" id="percall">–</div><div class="muted">payments above are blocked pre-auth</div></div>
+  <div class="card"><div class="k">Velocity breaker</div><div class="v" id="velocity">–</div><div class="muted">rolling-window circuit breaker</div></div>
+</div>
+
+<div class="cols">
+  <div class="panel">
+    <h2>Policy</h2>
+    <div class="row"><span class="muted">agent</span><b id="p-agent"></b></div>
+    <div class="row"><span class="muted">wallet</span><span id="p-addr" class="detail"></span></div>
+    <div class="row"><span class="muted">total budget</span><b id="p-budget"></b></div>
+    <div class="row"><span class="muted">window limit</span><b id="p-window"></b></div>
+    <div class="row"><span class="muted">approval above</span><b id="p-approve"></b></div>
+    <h2 style="margin-top:18px">Allowed hosts</h2>
+    <div id="hosts"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Live ledger — every authorization, payment &amp; block (EU AI Act Art. 26 audit trail)</h2>
+    <div id="events"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let killOn = false;
+
+function usd(micro) {
+  const n = Number(BigInt(micro)) / 1e6;
+  const small = Math.abs(n) > 0 && Math.abs(n) < 0.01;
+  return "$" + (small ? n.toFixed(6) : n.toFixed(2));
+}
+
+async function refresh() {
+  const s = await (await fetch("/api/state")).json();
+  killOn = s.killSwitch;
+  $("remaining").textContent = usd(s.remainingMicro);
+  $("spent").textContent = usd(s.spendTotalMicro);
+  const pct = Math.max(0, Math.min(100, (Number(s.spendTotalMicro) / Number(s.topupsMicro || 1n.toString())) * 100));
+  $("budgetBar").style.width = pct + "%";
+  $("budgetBar").style.background = s.killSwitch ? "var(--red)" : pct > 80 ? "var(--amber)" : "var(--green)";
+  const pays = s.events.filter(e => e.t === "payment").length;
+  const blks = s.events.filter(e => e.t === "blocked").length;
+  $("txcount").textContent = `${pays} payments · ${blks} blocks enforced`;
+  $("percall").textContent = "$" + Number(s.perCallMaxUsd).toFixed(2);
+  $("velocity").textContent = `$${Number(s.windowLimitUsd).toFixed(2)} / ${s.windowSeconds}s`;
+  $("p-agent").textContent = s.agent;
+  $("p-addr").textContent = s.address.slice(0, 12) + "…" + s.address.slice(-6);
+  $("p-budget").textContent = "$" + Number(s.totalBudgetUsd).toFixed(2);
+  $("p-window").textContent = `$${Number(s.windowLimitUsd).toFixed(2)} / ${s.windowSeconds}s`;
+  $("p-approve").textContent = "—" ;
+  $("hosts").innerHTML = s.allowHostSuffixes.map(h => `<span class="pill">${h}</span>`).join("");
+  const btn = $("kill");
+  btn.textContent = "KILL SWITCH: " + (s.killSwitch ? "ON — spending frozen" : "OFF");
+  btn.classList.toggle("armed", s.killSwitch);
+
+  const evs = [...s.events].reverse().slice(0, 60);
+  $("events").innerHTML = evs.map(e => {
+    const t = new Date(e.at).toLocaleTimeString();
+    if (e.t === "topup") return `<div class="ev"><time>${t}</time><span class="tag top">TOPUP</span><span class="detail">${usd(e.amountMicro)} funded by human · balance ${usd(e.balanceAfterMicro)}</span></div>`;
+    if (e.t === "payment") return `<div class="ev"><time>${t}</time><span class="tag pay">PAID</span><span class="detail">${usd(e.amountMicro)} → ${e.host}${new URL(e.url).pathname} <span class="muted">tx ${String(e.txHash).slice(0,10)}…</span></span></div>`;
+    if (e.t === "blocked") return `<div class="ev"><time>${t}</time><span class="tag blk">BLOCKED</span><span class="detail"><b>${e.rule}</b> · ${e.detail} · attempted ${usd(e.attemptedMicro)} @ ${e.host}</span></div>`;
+    if (e.t === "policy_change") return `<div class="ev"><time>${t}</time><span class="tag pol">POLICY</span><span class="detail">${e.field} → ${JSON.stringify(e.value)}</span></div>`;
+    return "";
+  }).join("");
+}
+
+$("kill").onclick = async () => {
+  await fetch("/api/kill", { method: "POST", body: JSON.stringify({ on: !killOn }) });
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 1200);
+</script>
+</body>
+</html>
