@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { PaymentPayload, PaymentRequiredBody, SettleResult } from "./types.ts";
+import type { AcceptsEntry, PaymentPayload, PaymentRequiredBody, SettleResult } from "./types.ts";
 
 export interface PaidResult<T = unknown> {
   ok: boolean;
@@ -12,6 +12,19 @@ export interface PaidResult<T = unknown> {
   error?: string;
 }
 
+export interface UnsignedPayment {
+  x402Version: number;
+  scheme: string;
+  network: string;
+  resource: string;
+  from: string;
+  payTo: string;
+  amount: string;
+  nonce: string;
+  timestamp: number;
+  requirements: AcceptsEntry;
+}
+
 export interface PayContext {
   agentName: string;
   address: string;
@@ -19,6 +32,12 @@ export interface PayContext {
     sign(address: string, unsigned: Omit<PaymentPayload, "signature">): string;
     balance(address: string): bigint;
   };
+  /**
+   * Produces the base64 X-PAYMENT header value. Defaults to the flat
+   * mock-ledger shape; override for real networks (e.g. EIP-3009 signed
+   * x402 v1 payloads via src/live.ts).
+   */
+  encodePayment?(unsigned: UnsignedPayment): Promise<string>;
   authorize(amountMicro: bigint, url: string): Promise<
     | { allowed: true }
     | { allowed: false; rule: string; detail: string; requestId?: string }
@@ -51,7 +70,7 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
   }
 
   const nonce = crypto.randomBytes(16).toString("hex");
-  const unsigned: Omit<PaymentPayload, "signature"> = {
+  const unsigned: UnsignedPayment = {
     x402Version: 1,
     scheme: offer.scheme,
     network: offer.network,
@@ -61,12 +80,15 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
     amount: offer.maxAmountRequired,
     nonce,
     timestamp: Date.now(),
+    requirements: offer,
   };
-  const payload: PaymentPayload = { ...unsigned, signature: ctx.chain.sign(ctx.address, unsigned) };
+  const encoded = ctx.encodePayment
+    ? await ctx.encodePayment(unsigned)
+    : Buffer.from(JSON.stringify({ ...unsigned, signature: ctx.chain.sign(ctx.address, unsigned) })).toString("base64");
 
   const paid = await fetch(url, {
     ...init,
-    headers: { ...(init?.headers ?? {}), "X-PAYMENT": Buffer.from(JSON.stringify(payload)).toString("base64") },
+    headers: { ...(init?.headers ?? {}), "X-PAYMENT": encoded },
   });
 
   const receiptHeader = paid.headers.get("x-payment-response");

@@ -1,6 +1,6 @@
 {
   "name": "allowance-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The missing buyer-side runtime for x402: fund your AI agent once; it pays any x402 API autonomously inside hard policy rails — budgets, per-call caps, velocity circuit breakers, host allowlists, kill switch, audit ledger.",
   "type": "module",
   "license": "MIT",
@@ -24,14 +24,33 @@
     "spend-controls"
   ],
   "scripts": {
-    "demo": "node demo/demo.ts",
-    "dashboard": "node src/cli.ts dashboard",
-    "cli": "node src/cli.ts"
+    "build": "tsc -p tsconfig.json",
+    "demo": "npm run -s build && node demo/demo.ts",
+    "dashboard": "node dist/cli.js dashboard",
+    "cli": "node dist/cli.js",
+    "test": "node --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm run -s test && npm run -s build && node demo/demo.ts"
   },
   "bin": {
-    "allowance": "./src/cli.ts"
+    "allowance": "./dist/cli.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
-    "node": ">=24"
+    "node": ">=20.11"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
   }
 }

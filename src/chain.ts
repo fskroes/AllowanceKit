@@ -1,11 +1,17 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { PaymentPayload, SettleResult, VerifyResult } from "./types.ts";
+import type { AcceptsEntry, DecodedPayment, PaymentPayload, SettleResult, VerifyResult } from "./types.ts";
 
+/**
+ * Settlement rail behind the seller's paymentGate. verify/settle receive the
+ * raw decoded X-PAYMENT object plus the advertised requirements, so any
+ * facilitator (mock ledger, Coinbase CDP, self-hosted) can validate whatever
+ * wire shape the buyer produced.
+ */
 export interface Facilitator {
-  verify(payload: PaymentPayload): Promise<VerifyResult>;
-  settle(payload: PaymentPayload): Promise<SettleResult>;
+  verify(payment: DecodedPayment, requirements: AcceptsEntry): Promise<VerifyResult>;
+  settle(payment: DecodedPayment, requirements: AcceptsEntry): Promise<SettleResult>;
 }
 
 const NETWORK = "mock-ledger";
@@ -71,7 +77,16 @@ export class MockChain implements Facilitator {
     return crypto.createHmac("sha256", secretKey).update(canonical(unsigned)).digest("hex");
   }
 
-  async verify(p: PaymentPayload): Promise<VerifyResult> {
+  private asFlat(p: DecodedPayment): PaymentPayload | null {
+    const required = ["x402Version", "scheme", "network", "resource", "from", "payTo", "amount", "nonce", "timestamp", "signature"];
+    for (const k of required) if (typeof p[k] !== "string" && typeof p[k] !== "number") return null;
+    if (BigInt(String(p.amount)) < 0n) return null;
+    return p as unknown as PaymentPayload;
+  }
+
+  async verify(decoded: DecodedPayment): Promise<VerifyResult> {
+    const p = this.asFlat(decoded);
+    if (!p) return { isValid: false, invalidReason: "payload shape not supported by mock-ledger facilitator" };
     const secretKey = this.keys.get(p.from);
     if (!secretKey) return { isValid: false, invalidReason: "unknown payer account" };
     const expected = crypto.createHmac("sha256", secretKey).update(canonical(p)).digest("hex");
@@ -80,8 +95,10 @@ export class MockChain implements Facilitator {
     return { isValid: true, payer: p.from };
   }
 
-  async settle(p: PaymentPayload): Promise<SettleResult> {
-    const v = await this.verify(p);
+  async settle(decoded: DecodedPayment): Promise<SettleResult> {
+    const p = this.asFlat(decoded);
+    if (!p) return { success: false, error: "payload shape not supported by mock-ledger facilitator", network: NETWORK };
+    const v = await this.verify(decoded);
     if (!v.isValid) return { success: false, error: v.invalidReason ?? "verification failed", network: NETWORK };
     if (this.nonces.has(p.nonce)) return { success: false, error: "nonce replay detected", network: NETWORK };
     this.nonces.add(p.nonce);

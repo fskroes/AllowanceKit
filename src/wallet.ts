@@ -37,18 +37,22 @@ function loadOrCreateIdentity(chain: MockChain, stateDir: string, agentName: str
   return address;
 }
 
-export function createAgent(stateDir: string, agentName = "research-agent"): AgentRuntime {
-  fs.mkdirSync(stateDir, { recursive: true });
-  const chain = new MockChain(path.join(stateDir, "accounts.json"));
-  const ledger = new Ledger(stateDir);
-  const policyStore = new PolicyStore(stateDir);
-  const approvals = new ApprovalStore(stateDir);
-  const address = loadOrCreateIdentity(chain, stateDir, agentName);
+export interface PolicyRailsInput {
+  agentName: string;
+  address: string;
+  chain: PayContext["chain"];
+  ledger: Ledger;
+  policyStore: PolicyStore;
+  approvals: ApprovalStore;
+}
 
-  const ctx: PayContext = {
-    agentName,
-    address,
-    chain,
+/**
+ * The allowance rails — policy evaluation + audit logging — shared by every
+ * agent runtime regardless of settlement rail (mock or real).
+ */
+export function buildPolicyRails(input: PolicyRailsInput): Pick<PayContext, "authorize" | "recordPayment" | "recordBlocked"> {
+  const { agentName, address, chain, ledger, policyStore, approvals } = input;
+  return {
     async authorize(amountMicro, url) {
       const policy = policyStore.load();
       const decision = evaluatePolicy(policy, {
@@ -75,7 +79,7 @@ export function createAgent(stateDir: string, agentName = "research-agent"): Age
         return {
           allowed: false,
           rule: "human_approval_required",
-          detail: `${fmtUsdExact(amountMicro)} ≥ approval threshold $${policy.requireApprovalAboveUsd.toFixed(2)} — request ${req.id} queued; approve with \`node src/cli.ts approve ${req.id}\` or on the dashboard`,
+          detail: `${fmtUsdExact(amountMicro)} ≥ approval threshold $${policy.requireApprovalAboveUsd.toFixed(2)} — request ${req.id} queued; approve with \`allowance approve ${req.id}\` or on the dashboard`,
           requestId: req.id,
         };
       }
@@ -105,6 +109,22 @@ export function createAgent(stateDir: string, agentName = "research-agent"): Age
         attemptedMicro: attemptedMicro.toString(),
       });
     },
+  };
+}
+
+export function createAgent(stateDir: string, agentName = "research-agent"): AgentRuntime {
+  fs.mkdirSync(stateDir, { recursive: true });
+  const chain = new MockChain(path.join(stateDir, "accounts.json"));
+  const ledger = new Ledger(stateDir);
+  const policyStore = new PolicyStore(stateDir);
+  const approvals = new ApprovalStore(stateDir);
+  const address = loadOrCreateIdentity(chain, stateDir, agentName);
+
+  const ctx: PayContext = {
+    agentName,
+    address,
+    chain,
+    ...buildPolicyRails({ agentName, address, chain, ledger, policyStore, approvals }),
   };
 
   return {

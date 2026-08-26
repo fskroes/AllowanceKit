@@ -32,6 +32,29 @@ export interface PaymentPayload {
   signature: string;
 }
 
+export type DecodedPayment = Record<string, unknown>;
+
+export function flatAmount(payment: DecodedPayment): string | null {
+  const direct = payment.amount;
+  if (typeof direct === "string" && /^\d+$/.test(direct)) return direct;
+  const inner = payment.payload as { authorization?: { value?: unknown } } | undefined;
+  const value = inner?.authorization?.value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  return null;
+}
+
+export function payerOf(payment: DecodedPayment): string | null {
+  if (typeof payment.from === "string") return payment.from;
+  const inner = payment.payload as { authorization?: { from?: unknown } } | undefined;
+  return typeof inner?.authorization?.from === "string" ? inner.authorization.from : null;
+}
+
+export function payeeOf(payment: DecodedPayment): string | null {
+  if (typeof payment.payTo === "string") return payment.payTo;
+  const inner = payment.payload as { authorization?: { to?: unknown } } | undefined;
+  return typeof inner?.authorization?.to === "string" ? inner.authorization.to : null;
+}
+
 export interface VerifyResult {
   isValid: boolean;
   invalidReason?: string;

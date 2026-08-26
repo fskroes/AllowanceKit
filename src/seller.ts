@@ -1,13 +1,30 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Facilitator } from "./chain.ts";
-import type { PaymentPayload, PaymentRequiredBody } from "./types.ts";
+import type { AcceptsEntry, DecodedPayment, PaymentRequiredBody } from "./types.ts";
+import { flatAmount, payeeOf } from "./types.ts";
 
 export interface GateOptions {
   priceMicro: bigint;
   description: string;
   payTo: string;
   facilitator: Facilitator;
+  /** e.g. "mock-ledger", "base-sepolia", "base" */
   network?: string;
+}
+
+function advertise(opts: GateOptions, resource: string): AcceptsEntry {
+  return {
+    scheme: "exact",
+    network: opts.network ?? "mock-ledger",
+    maxAmountRequired: opts.priceMicro.toString(),
+    resource,
+    description: opts.description,
+    mimeType: "application/json",
+    payTo: opts.payTo,
+    asset: "USDC",
+    maxTimeoutSeconds: 30,
+    extra: { name: "USDC", version: "1" },
+  };
 }
 
 export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, res: ServerResponse) => void) {
@@ -20,49 +37,41 @@ export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, r
       const body: PaymentRequiredBody = {
         x402Version: 1,
         error: "X-PAYMENT header is required",
-        accepts: [
-          {
-            scheme: "exact",
-            network: opts.network ?? "mock-ledger",
-            maxAmountRequired: opts.priceMicro.toString(),
-            resource,
-            description: opts.description,
-            mimeType: "application/json",
-            payTo: opts.payTo,
-            asset: "USDC",
-            maxTimeoutSeconds: 30,
-            extra: { name: "USDC", version: "1" },
-          },
-        ],
+        accepts: [advertise(opts, resource)],
       };
       res.writeHead(402, { "Content-Type": "application/json", "Accept": "application/json" });
       res.end(JSON.stringify(body, null, 2));
       return;
     }
 
-    let payload: PaymentPayload;
+    let payload: DecodedPayment;
     try {
-      payload = JSON.parse(Buffer.from(header, "base64").toString("utf8")) as PaymentPayload;
+      payload = JSON.parse(Buffer.from(header, "base64").toString("utf8")) as DecodedPayment;
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "malformed X-PAYMENT header" }));
       return;
     }
 
-    if (BigInt(payload.amount) !== opts.priceMicro || payload.payTo !== opts.payTo) {
+    // Local sanity check before hitting the facilitator; works for both the
+    // flat mock shape and the nested x402 v1 EVM shape.
+    const presented = flatAmount(payload);
+    const payee = payeeOf(payload);
+    if (presented === null || BigInt(presented) !== opts.priceMicro || payee !== opts.payTo) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "payment payload does not match advertised price/payee" }));
       return;
     }
 
-    const verification = await opts.facilitator.verify(payload);
+    const requirements = advertise(opts, resource);
+    const verification = await opts.facilitator.verify(payload, requirements);
     if (!verification.isValid) {
       res.writeHead(402, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ x402Version: 1, error: `payment rejected: ${verification.invalidReason}`, accepts: [] }));
       return;
     }
 
-    const settlement = await opts.facilitator.settle(payload);
+    const settlement = await opts.facilitator.settle(payload, requirements);
     if (!settlement.success) {
       res.writeHead(402, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ x402Version: 1, error: `settlement failed: ${settlement.error}`, accepts: [] }));
@@ -70,7 +79,7 @@ export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, r
     }
 
     res.setHeader("X-PAYMENT-RESPONSE", Buffer.from(
-      JSON.stringify({ success: true, network: settlement.network, txHash: settlement.txHash, amountMicro: payload.amount }),
+      JSON.stringify({ success: true, network: settlement.network, txHash: settlement.txHash, amountMicro: presented }),
     ).toString("base64"));
     await handler(req, res);
   };

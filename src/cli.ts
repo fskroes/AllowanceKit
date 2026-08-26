@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
 import { createAgent, decideApproval, allowanceRemaining } from "./wallet.ts";
@@ -8,7 +9,7 @@ const SIMULATED = "SIMULATED FUNDS (built-in mock ledger — no real money moves
 
 async function main(): Promise<void> {
   const [, , cmd, ...args] = process.argv;
-  const stateDir = new URL("../.allowance/", import.meta.url).pathname;
+  const stateDir = path.join(process.cwd(), ".allowance");
 
   switch (cmd) {
     case "init": {
@@ -17,7 +18,7 @@ async function main(): Promise<void> {
       console.log(`${existed ? "existing" : "provisioned"} agent wallet ${rt.address}`);
       console.log(`settlement  ${SIMULATED}`);
       console.log(`policy file ${stateDir}config.json`);
-      console.log(`next: node src/cli.ts topup 5.00`);
+      console.log(`next: allowance topup 5.00`);
       break;
     }
     case "topup": {
@@ -69,16 +70,16 @@ async function main(): Promise<void> {
         break;
       }
       for (const r of pending)
-        console.log(`${r.id}  ${fmtUsdExact(BigInt(r.amountMicro)).padStart(10)}  ${r.host}  requested ${r.at}\n    approve: node src/cli.ts approve ${r.id}`);
+        console.log(`${r.id}  ${fmtUsdExact(BigInt(r.amountMicro)).padStart(10)}  ${r.host}  requested ${r.at}\n    approve: allowance approve ${r.id}`);
       break;
     }
     case "approve":
     case "deny": {
       const id = args[0];
-      if (!id) throw new Error(`usage: ${cmd} <request-id>   (list ids with: node src/cli.ts approvals)`);
+      if (!id) throw new Error(`usage: ${cmd} <request-id>   (list ids with: allowance approvals)`);
       const rt = createAgent(stateDir, "research-agent");
       if (decideApproval(rt, id, cmd === "approve")) console.log(`${cmd === "approve" ? "approved" : "denied"} request ${id}`);
-      else throw new Error(`no pending approval request "${id}" (list ids with: node src/cli.ts approvals)`);
+      else throw new Error(`no pending approval request "${id}" (list ids with: allowance approvals)`);
       break;
     }
     case "audit": {
@@ -97,7 +98,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.log("usage: cli.ts <init|topup <usd>|status|policy [k v]|audit|approvals|approve <id>|deny <id>|dashboard [port]>");
+      console.log("usage: allowance <init|topup <usd>|status|policy [k v]|audit|approvals|approve <id>|deny <id>|dashboard [port]>");
   }
 }
 

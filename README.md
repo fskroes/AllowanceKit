@@ -4,12 +4,24 @@
 
 Landing page: [onewallie.com](https://onewallie.com) · Follow-along tutorial: [onewallie.com/docs.html](https://onewallie.com/docs.html)
 
-```
-npm run demo        # full scripted scenario (no deps, no keys, no network)
-npm run dashboard   # live ledger → http://localhost:4030
+```bash
+npx allowance-kit init          # provision agent wallet (stable identity across commands)
+npx allowance-kit topup 5.00    # fund the allowance once (simulated faucet funds on the mock ledger)
+npx allowance-kit policy perCallMaxUsd 0.50
+npx allowance-kit dashboard     # watch every cent, flip the kill switch, clear approval queue
 ```
 
-Requires Node ≥ 24 (runs TypeScript natively). Zero dependencies.
+Or as a one-import SDK:
+
+```ts
+import { payingFetch, createAgent } from "allowance-kit";
+
+const agent = createAgent(".allowance", "my-agent");
+const res = await payingFetch(agent.ctx, "https://api.example.com/weather?city=lisbon");
+// res.ok · res.body · res.costMicro · res.txHash · res.blockedBy {rule, detail}
+```
+
+Requires Node ≥ 20.11. Zero runtime dependencies.
 
 ---
 
@@ -35,7 +47,7 @@ AllowanceKit is that missing piece: the **allowance layer between the human and 
 
 ## What it does
 
-One-time flow for the human:
+One-time flow for the human (repo checkout):
 
 ```bash
 node src/cli.ts init          # provision agent wallet (stable identity across commands)
@@ -65,12 +77,19 @@ Every decision — paid or blocked, with rule + reason + tx hash — lands in an
 
 ```
 src/
+  index.ts          public API — `import { payingFetch, createAgent } from "allowance-kit"`
   types.ts          x402 wire types (PaymentRequired, PaymentPayload, receipts)
   money.ts          integer micro-dollar math (no float drift)
   chain.ts          settlement + Facilitator interface {verify, settle}
                     MockChain = deterministic local ledger w/ replay protection,
-                    snapshots to disk. Swap for Coinbase CDP facilitator by
+                    snapshots to disk. Swap for a real facilitator by
                     implementing 2 methods — nothing else changes.
+  facilitator-cdp.ts Coinbase CDP facilitator: verify/settle over the x402 v1
+                    facilitator contract with ES256 request-signed JWTs
+                    (node:crypto only). For sellers settling real USDC on Base.
+  live.ts           live-network agent runtime: real x402 v1 EVM payloads
+                    (EIP-3009 TransferWithAuthorization, EIP-712 signed via
+                    optional viem) against any live x402 endpoint.
   seller.ts         paymentGate(): drop-in x402 middleware for any node:http route
   payer.ts          payingFetch(): the agent-side client (two-phase authorization)
   policy.ts         PolicyStore (hot-reloaded JSON) + evaluatePolicy()
@@ -83,9 +102,41 @@ src/
 demo/demo.ts        the full story: happy path → runaway loop → attacks → approval
                     → kill switch. Runs in its own .allowance-demo/ state dir and
                     never touches your funded .allowance/ ledger.
+test/               zero-dependency node --test suite (wire shapes, CDP JWT,
+                    facilitator contract, payer flows)
 ```
 
-The wire format follows x402 v1 exactly (`HTTP 402` + `accepts[]` + base64 `X-PAYMENT` / `X-PAYMENT-RESPONSE` headers), so the seller middleware and client interoperate with real x402 tooling once a real facilitator is plugged in. Settlement here uses a deterministic mock ledger so the product runs anywhere with zero setup and zero funds at risk.
+The wire format follows x402 v1 (`HTTP 402` + `accepts[]` + base64 `X-PAYMENT` / `X-PAYMENT-RESPONSE` headers). Two settlement rails ship:
+
+- **Mock ledger** (default): deterministic, HMAC-signed, replay-protected, all funds simulated — the product runs anywhere with zero setup and zero funds at risk.
+- **Coinbase CDP** (`CdpFacilitator`): real verify/settle through the facilitator most live x402 sellers use. Sellers flip one option:
+
+```ts
+import { paymentGate } from "allowance-kit";
+import { CdpFacilitator } from "allowance-kit";
+
+paymentGate(
+  {
+    priceMicro: 10_000n,               // $0.01 == 10k atomic USDC units
+    description: "Weather lookup",
+    payTo: "0xYourMerchantAddress",
+    network: "base-sepolia",
+    facilitator: new CdpFacilitator(), // reads CDP_API_KEY_ID / CDP_API_KEY_SECRET
+  },
+  handler,
+);
+```
+
+Buyers targeting **live x402 endpoints** use the same allowance rails with an EVM signer:
+
+```ts
+import { payingFetch, createLiveAgent } from "allowance-kit";
+
+const live = await createLiveAgent({ stateDir: ".allowance", privateKey: process.env.AGENT_KEY! });
+const res = await payingFetch(live.ctx, "https://some-live-x402-api.com/data");
+```
+
+Signing requires the optional peer dependency [`viem`](https://viem.sh) (`npm i viem`); everything else stays zero-dep. Policy, approvals, kill switch, and the audit ledger apply identically to simulated and live spending.
 
 ## Demo output (abridged)
 
@@ -124,6 +175,7 @@ The wedge is precise: sellers already have x402 middleware; **nobody owns the mo
 
 ## Honest limitations
 
-- Settlement is a mock ledger (HMAC-signed payloads, nonce replay protection) — **all funds are simulated**; the CLI and dashboard say so at every money touchpoint. Real chain integration = implement `Facilitator.verify/settle`; wire formats already match x402 v1.
-- Single-agent CLI today; multi-agent is a schema change (`agentName` already threads everywhere).
+- Default settlement is a mock ledger (HMAC-signed payloads, nonce replay protection) — **all funds are simulated**; the CLI and dashboard say so at every money touchpoint. Real settlement ships two ways: sellers settle real USDC via `CdpFacilitator`, buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`). Untested against mainnet until first live transaction — treat the first runs as canary.
+- The CLI (`npx allowance-kit`) manages a single agent per state dir today; multi-agent is a schema change (`agentName` already threads everywhere).
 - Approved grants are standing per host+amount (no expiry, no per-grant spend cap yet); the approval notification channel is local (CLI/dashboard) — no webhook/Slack push yet.
+- npm ships compiled `dist/` (ESM + `.d.ts`, built from the TypeScript sources in `src/` with zero runtime deps); repo checkouts run the sources directly on Node ≥ 24.
