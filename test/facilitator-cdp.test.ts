@@ -32,14 +32,14 @@ test("derToRawEs256 converts DER to 64-byte r||s", () => {
 
 test("jwt is ES256-signed with CDP claims and verifiable with its public key", () => {
   const fac = new CdpFacilitator({ apiKeyId: "test-key-id", apiKeySecret: PEM, baseUrl: "https://api.cdp.coinbase.com" });
-  const [h, c, s] = fac.jwt("POST", "/platform/v2/x402/verify").split(".");
+  const [h, c, s] = fac.jwt("POST", "/v2/x402/verify").split(".");
   const header = b64json(h);
   const claims = b64json(c);
   assert.equal(header.alg, "ES256");
   assert.equal(header.kid, "test-key-id");
   assert.ok(typeof header.nonce === "string");
   assert.equal(claims.sub, "test-key-id");
-  assert.deepEqual(claims.uris, ["POST", "api.cdp.coinbase.com/platform/v2/x402/verify"]);
+  assert.equal(claims.uri, "POST api.cdp.coinbase.com/v2/x402/verify");
   assert.ok(Number(claims.exp) > Number(claims.nbf));
   const ok = crypto.verify("sha256", Buffer.from(`${h}.${c}`), { key: publicKey, dsaEncoding: "ieee-p1363" }, Buffer.from(s, "base64url"));
   assert.ok(ok, "jwt signature must verify against public key");
@@ -78,7 +78,7 @@ async function withCaptureServer(action: "verify" | "settle", respond: object, f
 
 test("verify posts x402 v1 contract shape with bearer jwt", async () => {
   await withCaptureServer("verify", { isValid: true, payer: "0xpayer" }, async (cap) => {
-    assert.equal(cap.path, "/platform/v2/x402/verify");
+    assert.equal(cap.path, "/v2/x402/verify");
     assert.match(cap.auth ?? "", /^Bearer ey/);
     assert.equal(cap.body?.x402Version, 1);
     assert.deepEqual(cap.body?.paymentRequirements, reqs);
@@ -88,7 +88,7 @@ test("verify posts x402 v1 contract shape with bearer jwt", async () => {
 
 test("settle maps success/txHash/network and errorReason", async () => {
   await withCaptureServer("settle", { success: true, txHash: "0xtx", network: "base-sepolia" }, async (cap) => {
-    assert.equal(cap.path, "/platform/v2/x402/settle");
+    assert.equal(cap.path, "/v2/x402/settle");
   });
   await withCaptureServer("settle", { success: false, errorReason: "insufficient_funds" }, async () => {});
 });

@@ -76,7 +76,7 @@ export class CdpFacilitator implements Facilitator {
   }
 
   private async call(action: "verify" | "settle", payment: DecodedPayment, requirements: AcceptsEntry): Promise<CdpVerifyResponse & CdpSettleResponse> {
-    const path = `/platform/v2/x402/${action}`;
+    const path = `/v2/x402/${action}`;
     const token = this.jwt("POST", path);
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
@@ -97,10 +97,9 @@ export class CdpFacilitator implements Facilitator {
     const claims = b64url(JSON.stringify({
       sub: this.apiKeyId,
       iss: "cdp",
-      aud: ["cdp-service"],
       nbf: now,
       exp: now + 120,
-      uris: [method.toUpperCase(), `${new URL(this.baseUrl).host}${urlPath}`],
+      uri: `${method.toUpperCase()} ${new URL(this.baseUrl).host}${urlPath}`,
     }));
     const der = crypto.createSign("SHA256").update(`${header}.${claims}`).sign(this.privateKey);
     return `${header}.${claims}.${b64url(derToRawEs256(der))}`;

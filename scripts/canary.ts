@@ -1,0 +1,185 @@
+/**
+ * Canary: proves AllowanceKit works against the real CDP facilitator.
+ *
+ * Phase 1 (always): JWT auth → CDP verify endpoint. Proves ES256 signing
+ *                    and CDP API key are valid.
+ * Phase 2 (if --full): end-to-end: local seller + CDP facilitator + payingFetch
+ *                      against a real CDP-settled payment on Base Sepolia.
+ *
+ * Requirements:
+ *   CDP_API_KEY_ID     — CDP portal API key (ECDSA/P-256)
+ *   CDP_API_KEY_SECRET — PEM private key (from portal download)
+ *   AGENT_PRIVATE_KEY  — hex private key for a Base Sepolia wallet (Phase 2 only)
+ *
+ * Run:
+ *   node --env-file=.env scripts/canary.ts           # auth check only
+ *   node --env-file=.env scripts/canary.ts --full     # auth + end-to-end
+ */
+import crypto from "node:crypto";
+import http from "node:http";
+import { CdpFacilitator } from "../src/facilitator-cdp.ts";
+import { paymentGate } from "../src/seller.ts";
+import { MockChain } from "../src/chain.ts";
+import { payingFetch } from "../src/payer.ts";
+import type { AcceptsEntry } from "../src/types.ts";
+
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const DIM = "\x1b[2m";
+const BOLD = "\x1b[1m";
+const RST = "\x1b[0m";
+
+function ok(msg: string) { console.log(`${GREEN}✓${RST} ${msg}`); }
+function fail(msg: string) { console.error(`${RED}✗ ${msg}${RST}`); process.exit(1); }
+function info(msg: string) { console.log(`${DIM}${msg}${RST}`); }
+
+const PHASE1_ONLY = !process.argv.includes("--full");
+
+async function phase1Verify(): Promise<CdpFacilitator> {
+  console.log(`\n${BOLD}Phase 1${RST} — JWT auth → CDP verify endpoint\n`);
+
+  const fac = new CdpFacilitator(); // reads CDP_API_KEY_ID / CDP_API_KEY_SECRET from env
+  ok(`Facilitator created · keyId=${fac.apiKeyId.slice(0, 8)}…`);
+
+  // Fake x402 v1 payload — signer doesn't matter; CDP will reject it
+  // but a valid HTTP response proves our JWT authenticated successfully.
+  const fakePayload = {
+    x402Version: 1,
+    scheme: "exact",
+    network: "base-sepolia",
+    resource: "https://canary.test/probe",
+    payload: {
+      signature: `0x${crypto.randomBytes(65).toString("hex")}`,
+      authorization: {
+        from: `0x${crypto.randomBytes(20).toString("hex")}`,
+        to: `0x${crypto.randomBytes(20).toString("hex")}`,
+        value: "10000",
+        validAfter: "0",
+        validBefore: String(Math.floor(Date.now() / 1000) + 600),
+        nonce: `0x${crypto.randomBytes(32).toString("hex")}`,
+      },
+    },
+  };
+
+  const reqs: AcceptsEntry = {
+    scheme: "exact",
+    network: "base-sepolia",
+    maxAmountRequired: "10000",
+    resource: "https://canary.test/probe",
+    description: "canary probe",
+    mimeType: "application/json",
+    payTo: `0x${crypto.randomBytes(20).toString("hex")}`,
+    asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  };
+
+  try {
+    const result = await fac.verify(fakePayload, reqs);
+    if (result.isValid) {
+      info("  CDP responded with isValid: true (unexpected for a random payload — something else signed it)");
+    } else {
+      ok(`CDP responded · isValid=false · reason="${result.invalidReason}" — JWT auth succeeded`);
+    }
+    return fac;
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("401") || msg.includes("403") || msg.includes("CDP_API_KEY")) {
+      fail(`CDP rejected our auth: ${msg}\n  → Check CDP_API_KEY_ID / CDP_API_KEY_SECRET (must be ECDSA/P-256)`);
+    }
+    // Network errors or 4xx from payload rejection = auth still worked
+    if (msg.includes("400") || msg.includes("422")) {
+      ok(`CDP responded (HTTP ${msg.includes("400") ? "400" : "422"}) — JWT auth succeeded · payload rejected (expected for random sig)`);
+      return fac;
+    }
+    fail(`Unexpected error calling CDP: ${msg}`);
+  }
+}
+
+async function phase2E2E(fac: CdpFacilitator): Promise<void> {
+  console.log(`\n${BOLD}Phase 2${RST} — end-to-end: local seller + CDP facilitator + payingFetch\n`);
+
+  const agentKey = process.env.AGENT_PRIVATE_KEY;
+  if (!agentKey) fail("AGENT_PRIVATE_KEY not set — needed for end-to-end (Base Sepolia USDC wallet)");
+
+  let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
+  try {
+    const viem = "viem";
+    ({ privateKeyToAccount } = await import(viem));
+  } catch {
+    fail("viem not installed — needed for EIP-3009 signing (npm i viem)");
+  }
+  const pk = agentKey.startsWith("0x") ? agentKey : `0x${agentKey}`;
+  const account = privateKeyToAccount(pk);
+  ok(`Agent wallet ${account.address}`);
+
+  // Check USDC balance on Base Sepolia via public RPC (no viem dependency)
+  const balanceCheck = await fetch("https://sepolia.base.org", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "eth_call",
+      params: [{
+        to: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        data: `0x70a08231000000000000000000000000${account.address.slice(2).toLowerCase()}`
+      }, "latest"],
+    }),
+  });
+  const balResp = await balanceCheck.json() as { result?: string };
+  const balance = balResp.result ? BigInt(balResp.result) : 0n;
+  if (balance < 10000n) { // < $0.01 USDC
+    fail(`Agent wallet has ${balance} USDC atomic units (< $0.01) on Base Sepolia.\n  → Fund it first: https://www.alchemy.com/faucets/base-sepolia`);
+  }
+  info(`  USDC balance: ${balance} atomic units ($${(Number(balance) / 1e6).toFixed(4)})`);
+
+  // Spin up a local x402-gated server settled through CDP
+  const priceMicro = 10000n; // $0.01
+  const payTo = account.address; // seller receives to same wallet (self-serve canary)
+
+  const sellerChain = new MockChain(); // accounting only — real settlement is CDP
+  const server = http.createServer(
+    paymentGate(
+      { priceMicro, description: "canary endpoint", payTo, facilitator: fac, network: "base-sepolia" },
+      (_req, res) => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ canary: true })); },
+    ),
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/data`;
+  ok(`Local x402 seller running → ${url} · price $0.01 USDC`);
+
+  // Build a live agent (same viem signer, same wallet)
+  const rails = {
+    agentName: "canary-agent",
+    address: account.address,
+    chain: { sign: () => { throw new Error("mock-only"); }, balance: () => balance },
+    encodePayment: async (unsigned: { requirements: AcceptsEntry; [k: string]: unknown }) => {
+      const { encodePaymentEvm } = await import("../src/live.ts");
+      return encodePaymentEvm(account, unsigned as Parameters<typeof encodePaymentEvm>[1]);
+    },
+    authorize: async () => ({ allowed: true } as const),
+    recordPayment: () => {},
+    recordBlocked: () => {},
+  };
+
+  info("  Sending payingFetch — will hit 402 challenge, sign EIP-3009, settle via CDP…");
+  const result = await payingFetch(rails, url);
+
+  server.closeAllConnections();
+  server.close();
+
+  if (result.ok) {
+    ok(`PAID $${(Number(result.costMicro) / 1e6).toFixed(4)} · txHash=${result.txHash?.slice(0, 14)}…`);
+    console.log(`\n${GREEN}${BOLD}✓ Canary passed — AllowanceKit → CDP → Base Sepolia settlement works end-to-end${RST}\n`);
+  } else {
+    fail(`Payment failed: ${result.blockedBy?.rule ?? ""} ${result.error ?? "unknown"}`);
+  }
+}
+
+async function main() {
+  console.log(`${BOLD}AllowanceKit canary${RST} — proves CDP facilitator integration works\n`);
+  if (PHASE1_ONLY) info("Running auth check only · add --full for end-to-end settlement\n");
+  const fac = await phase1Verify();
+  if (!PHASE1_ONLY) await phase2E2E(fac);
+}
+
+main().catch((e) => fail(String(e)));
