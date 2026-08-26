@@ -24,7 +24,7 @@
     "spend-controls"
   ],
   "scripts": {
-    "demo": "rm -rf .allowance && node demo/demo.ts",
+    "demo": "node demo/demo.ts",
     "dashboard": "node src/cli.ts dashboard",
     "cli": "node src/cli.ts"
   },

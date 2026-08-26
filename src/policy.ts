@@ -46,7 +46,7 @@ export class PolicyStore {
   }
 }
 
-export type PolicyDecision = { allowed: true } | { allowed: false; rule: string; detail: string };
+export type PolicyDecision = { allowed: true } | { allowed: false; rule: string; detail: string; requestId?: string };
 
 export function evaluatePolicy(
   policy: RuntimePolicy,
@@ -78,11 +78,5 @@ export function evaluatePolicy(
     };
   if (ctx.topupsMicro - ctx.spendTotalMicro < ctx.amountMicro)
     return { allowed: false, rule: "budget_exhausted", detail: "remaining allowance below price" };
-  if (ctx.amountMicro >= usd(policy.requireApprovalAboveUsd))
-    return {
-      allowed: false,
-      rule: "human_approval_required",
-      detail: `price at or above $${policy.requireApprovalAboveUsd.toFixed(2)} needs explicit human approval`,
-    };
   return { allowed: true };
 }

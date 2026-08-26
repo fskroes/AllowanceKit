@@ -8,7 +8,7 @@ export interface PaidResult<T = unknown> {
   raw: string;
   costMicro: bigint;
   txHash?: string;
-  blockedBy?: { rule: string; detail: string };
+  blockedBy?: { rule: string; detail: string; requestId?: string };
   error?: string;
 }
 
@@ -21,7 +21,7 @@ export interface PayContext {
   };
   authorize(amountMicro: bigint, url: string): Promise<
     | { allowed: true }
-    | { allowed: false; rule: string; detail: string }
+    | { allowed: false; rule: string; detail: string; requestId?: string }
   >;
   recordPayment(url: string, host: string, amountMicro: bigint, txHash: string): void;
   recordBlocked(url: string, host: string, rule: string, detail: string, amountMicro: bigint): void;

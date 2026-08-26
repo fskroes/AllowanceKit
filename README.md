@@ -38,10 +38,10 @@ AllowanceKit is that missing piece: the **allowance layer between the human and 
 One-time flow for the human:
 
 ```bash
-node src/cli.ts init          # provision agent wallet
-node src/cli.ts topup 5.00    # fund the allowance once
+node src/cli.ts init          # provision agent wallet (stable identity across commands)
+node src/cli.ts topup 5.00    # fund the allowance once (simulated faucet funds on the mock ledger)
 node src/cli.ts policy perCallMaxUsd 0.50
-node src/cli.ts dashboard     # watch every cent, flip the kill switch
+node src/cli.ts dashboard     # watch every cent, flip the kill switch, clear approval queue
 ```
 
 Then the agent just calls `payingFetch(ctx, url)` instead of `fetch(url)` against any x402 endpoint. It handles the whole protocol — 402 challenge → price discovery → two-phase policy authorization → signed payment → settle → receipt — while the policy engine enforces:
@@ -53,7 +53,11 @@ Then the agent just calls `payingFetch(ctx, url)` instead of `fetch(url)` agains
 | `per_call_cap` | max price per single call | ✅ |
 | `velocity_circuit_breaker` | rolling-window spend limit (kills retry loops) | ✅ |
 | `budget_exhausted` | hard total allowance | ✅ |
-| `human_approval_required` | escalation gate above threshold | ⏸ pending human |
+| `human_approval_required` | escalation gate above threshold | ⏸ blocked & queued until you approve |
+
+Approvals are real, not decorative: an above-threshold call is blocked and lands in a queue (`cli approvals` or the dashboard). You approve or deny by id; once approved, that host+price-class passes on retry. Every step — request, decision, retry — is in the ledger.
+
+The kill switch and the approval queue are **token-gated**: mutating dashboard endpoints require the local control token (auto-generated into `.allowance/dashboard-token`, injected into the served UI).
 
 Every decision — paid or blocked, with rule + reason + tx hash — lands in an append-only JSONL ledger (`​.allowance/ledger.jsonl`) that satisfies EU AI Act Art. 26 §5 logging.
 
@@ -70,10 +74,15 @@ src/
   seller.ts         paymentGate(): drop-in x402 middleware for any node:http route
   payer.ts          payingFetch(): the agent-side client (two-phase authorization)
   policy.ts         PolicyStore (hot-reloaded JSON) + evaluatePolicy()
+  approvals.ts      human-approval queue (request → decide → standing grant)
+  wallet.ts         agent runtime: stable wallet identity + authorization gate
   ledger.ts         append-only audit log
   demo-servers.ts   five x402-priced APIs used by the demo
-  dashboard-server.ts + public/dashboard.html   live UI + kill-switch API
-demo/demo.ts        the full story: happy path → runaway loop → attacks → kill switch
+  dashboard-server.ts + public/dashboard.html   live UI; kill switch & approvals
+                    are token-gated (.allowance/dashboard-token)
+demo/demo.ts        the full story: happy path → runaway loop → attacks → approval
+                    → kill switch. Runs in its own .allowance-demo/ state dir and
+                    never touches your funded .allowance/ ledger.
 ```
 
 The wire format follows x402 v1 exactly (`HTTP 402` + `accepts[]` + base64 `X-PAYMENT` / `X-PAYMENT-RESPONSE` headers), so the seller middleware and client interoperate with real x402 tooling once a real facilitator is plugged in. Settlement here uses a deterministic mock ledger so the product runs anywhere with zero setup and zero funds at risk.
@@ -89,16 +98,18 @@ PHASE 2 · runaway loop
   PAID    loop #1…#149                   $0.010000 each
   BLOCKED loop #150  velocity_circuit_breaker  rolling 12s spend would exceed $2.00
 
-PHASE 3 · attack & mispricing
+PHASE 3 · attack, mispricing & approval gate
   BLOCKED evil-api.example.com  host_not_allowlisted
-  BLOCKED report?id=q3-2026     human_approval_required ($0.45 > $0.30)
-  BLOCKED feed?key=pro          per_call_cap ($5 > $0.50)
+  BLOCKED report?id=q3-2026     human_approval_required ($0.45 ≥ $0.30 → queued)
+  human approves via dashboard button or `cli approve <id>`
+  PAID    report?id=q3-2026 (retry)      $0.450000 (approved grant)
+  BLOCKED feed?key=pro         per_call_cap ($5 > $0.50)
 
 PHASE 4 · kill switch
   BLOCKED weather?city=berlin   kill_switch — human paused all spending
 
-spent $1.993 across 154 settled payments; 5 policy blocks enforced
-remaining allowance: $3.007 of $5.00
+spent $2.443 across 155 settled payments; 5 policy blocks enforced
+remaining allowance: $2.557 of $5.00 simulated
 ```
 
 ## Business model
@@ -113,6 +124,6 @@ The wedge is precise: sellers already have x402 middleware; **nobody owns the mo
 
 ## Honest limitations
 
-- Settlement is a mock ledger (HMAC-signed payloads, nonce replay protection) — not USDC on Base. Real chain integration = implement `Facilitator.verify/settle`; wire formats already match x402 v1.
+- Settlement is a mock ledger (HMAC-signed payloads, nonce replay protection) — **all funds are simulated**; the CLI and dashboard say so at every money touchpoint. Real chain integration = implement `Facilitator.verify/settle`; wire formats already match x402 v1.
 - Single-agent CLI today; multi-agent is a schema change (`agentName` already threads everywhere).
-- Approval queue currently denies rather than pends; needs a notification channel (webhook/Slack) to become interactive.
+- Approved grants are standing per host+amount (no expiry, no per-grant spend cap yet); the approval notification channel is local (CLI/dashboard) — no webhook/Slack push yet.

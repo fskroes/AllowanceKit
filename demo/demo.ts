@@ -1,7 +1,8 @@
-import { createAgent, allowanceRemaining } from "../src/wallet.ts";
+import { createAgent, decideApproval, allowanceRemaining } from "../src/wallet.ts";
 import { startSellerApis, describeServers } from "../src/demo-servers.ts";
 import { payingFetch, type PaidResult } from "../src/payer.ts";
 import { fmtUsdExact } from "../src/money.ts";
+import fs from "node:fs";
 
 const c = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -33,9 +34,13 @@ function paid(result: PaidResult, label: string, extra = ""): void {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main(): Promise<void> {
-  const stateDir = new URL("../.allowance/", import.meta.url).pathname;
+  const stateDir = new URL("../.allowance-demo/", import.meta.url).pathname;
   console.log(c.bold("\n  AllowanceKit — an agent that pays its own way, inside rails the human controls"));
   console.log(c.dim("  x402 wire-compatible · zero dependencies · deterministic mock settlement (facilitator is pluggable)\n"));
+  if (fs.existsSync(stateDir)) {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+    console.log(c.dim("  (demo state .allowance-demo/ reset — your funded .allowance/ ledger is never touched)\n"));
+  }
 
   const rt = createAgent(stateDir, "research-agent");
 
@@ -44,7 +49,7 @@ async function main(): Promise<void> {
   rt.chain.faucet(rt.address, topupMicro);
   rt.ledger.append({ t: "topup", at: new Date().toISOString(), agent: rt.agentName, amountMicro: topupMicro.toString(), source: "human::demo-card", balanceAfterMicro: topupMicro.toString() });
   console.log(`  agent wallet   ${rt.address}`);
-  console.log(`  allowance      ${c.green("$5.00")} (one-time top-up, agent can never exceed it)`);
+  console.log(`  allowance      ${c.green("$5.00 simulated")} (faucet top-up on the mock ledger — no real funds; agent can never exceed it)`);
   console.log(`  policy         per-call ≤ $0.50 · velocity ≤ $2.00/12s · human approval ≥ $0.30`);
   console.log(`                 host allowlist [${rt.policy().allowHostSuffixes.join(", ")}]`);
 
@@ -82,7 +87,14 @@ async function main(): Promise<void> {
   const evil = await payingFetch(rt.ctx, "http://evil-api.example.com/steal-data");
   paid(evil, "evil-api.example.com", c.dim("(prompt-injection style redirect)"));
   const report = await payingFetch(rt.ctx, catalog.analystReportUrl("q3-2026"));
-  paid(report, "report?id=q3-2026", c.dim("$0.45 > approval threshold $0.30"));
+  paid(report, "report?id=q3-2026", c.dim("$0.45 ≥ $0.30 → queued for human"));
+  const reqId = report.blockedBy?.requestId ?? rt.approvals.pending()[0]?.id;
+  if (!reqId) throw new Error("expected a queued approval request for the analyst report");
+  console.log(c.amber(`  human reviews the queue (dashboard button or \`node src/cli.ts approve ${reqId}\`)…`));
+  decideApproval(rt, reqId, true);
+  console.log(c.green(`  approved ${reqId} — retrying the exact same call:`));
+  const retry = await payingFetch(rt.ctx, catalog.analystReportUrl("q3-2026"));
+  paid(retry, "report?id=q3-2026 (retry)", c.dim("(approved grant covers this host+amount)"));
   const feed = await payingFetch(rt.ctx, catalog.enterpriseFeedUrl("pro"));
   paid(feed, "feed?key=pro");
 

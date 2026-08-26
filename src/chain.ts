@@ -43,6 +43,10 @@ export class MockChain implements Facilitator {
     fs.writeFileSync(this.snapPath, JSON.stringify(snap, null, 2));
   }
 
+  hasAccount(address: string): boolean {
+    return this.keys.has(address);
+  }
+
   createAccount(): { address: string; secretKey: string } {
     const secretKey = crypto.randomBytes(32).toString("hex");
     const address = "0x" + crypto.createHash("sha256").update(secretKey).digest().subarray(0, 20).toString("hex");

@@ -30,8 +30,17 @@
   .ev time { color:var(--dim); flex:none; width:74px; }
   .tag { flex:none; width:96px; font-weight:700; letter-spacing:.03em; }
   .tag.pay { color:var(--green);} .tag.blk { color:var(--red);} .tag.pol,.tag.top { color:var(--amber);}
+  .tag.apr { color:var(--blue);}
   .detail { color:var(--dim); word-break:break-all; }
   .pill { display:inline-block; padding:2px 8px; border:1px solid var(--line); border-radius:99px; margin:2px 4px 2px 0; font-size:12px; color:var(--blue); }
+  .appr { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:8px; font-size:13px; }
+  .appr .meta { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .appr .amt { color:var(--text); font-weight:700; }
+  .appr .id { color:var(--dim); }
+  .appr button { font:inherit; font-size:12px; padding:5px 12px; border-radius:6px; cursor:pointer; border:1px solid var(--line); background:transparent; color:var(--text); margin-left:6px; }
+  .appr button.ok { border-color:var(--green); color:var(--green); }
+  .appr button.no { border-color:var(--red); color:var(--red); }
+  .empty { color:var(--dim); font-size:13px; }
 </style>
 </head>
 <body>
@@ -50,9 +59,12 @@
 
 <div class="cols">
   <div class="panel">
-    <h2>Policy</h2>
+    <h2>Approval queue — spending above threshold waits for you</h2>
+    <div id="approvals"></div>
+    <h2 style="margin-top:18px">Policy</h2>
     <div class="row"><span class="muted">agent</span><b id="p-agent"></b></div>
     <div class="row"><span class="muted">wallet</span><span id="p-addr" class="detail"></span></div>
+    <div class="row"><span class="muted">network</span><b id="p-net" class="muted"></b></div>
     <div class="row"><span class="muted">total budget</span><b id="p-budget"></b></div>
     <div class="row"><span class="muted">window limit</span><b id="p-window"></b></div>
     <div class="row"><span class="muted">approval above</span><b id="p-approve"></b></div>
@@ -68,12 +80,23 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const TOKEN = "__ALLOWANCE_TOKEN__";
 let killOn = false;
 
 function usd(micro) {
   const n = Number(BigInt(micro)) / 1e6;
   const small = Math.abs(n) > 0 && Math.abs(n) < 0.01;
   return "$" + (small ? n.toFixed(6) : n.toFixed(2));
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-allowance-token": TOKEN },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 401) alert("Unauthorized — dashboard control token mismatch (.allowance/dashboard-token).");
+  return r;
 }
 
 async function refresh() {
@@ -91,13 +114,28 @@ async function refresh() {
   $("velocity").textContent = `$${Number(s.windowLimitUsd).toFixed(2)} / ${s.windowSeconds}s`;
   $("p-agent").textContent = s.agent;
   $("p-addr").textContent = s.address.slice(0, 12) + "…" + s.address.slice(-6);
+  $("p-net").textContent = s.network;
   $("p-budget").textContent = "$" + Number(s.totalBudgetUsd).toFixed(2);
   $("p-window").textContent = `$${Number(s.windowLimitUsd).toFixed(2)} / ${s.windowSeconds}s`;
-  $("p-approve").textContent = "—" ;
+  $("p-approve").textContent = "$" + Number(s.requireApprovalAboveUsd).toFixed(2);
   $("hosts").innerHTML = s.allowHostSuffixes.map(h => `<span class="pill">${h}</span>`).join("");
   const btn = $("kill");
   btn.textContent = "KILL SWITCH: " + (s.killSwitch ? "ON — spending frozen" : "OFF");
   btn.classList.toggle("armed", s.killSwitch);
+
+  const pending = (s.approvals || []).filter(a => a.status === "pending");
+  $("approvals").innerHTML = pending.length
+    ? pending.map(a => `
+        <div class="appr">
+          <div class="meta">
+            <span><span class="amt">${usd(a.amountMicro)}</span> → ${a.host} <span class="id">· req ${a.id}</span></span>
+            <span>
+              <button class="ok" onclick="decide('${a.id}', true)">Approve</button>
+              <button class="no" onclick="decide('${a.id}', false)">Deny</button>
+            </span>
+          </div>
+        </div>`).join("")
+    : `<div class="empty">no payments waiting on you</div>`;
 
   const evs = [...s.events].reverse().slice(0, 60);
   $("events").innerHTML = evs.map(e => {
@@ -106,12 +144,19 @@ async function refresh() {
     if (e.t === "payment") return `<div class="ev"><time>${t}</time><span class="tag pay">PAID</span><span class="detail">${usd(e.amountMicro)} → ${e.host}${new URL(e.url).pathname} <span class="muted">tx ${String(e.txHash).slice(0,10)}…</span></span></div>`;
     if (e.t === "blocked") return `<div class="ev"><time>${t}</time><span class="tag blk">BLOCKED</span><span class="detail"><b>${e.rule}</b> · ${e.detail} · attempted ${usd(e.attemptedMicro)} @ ${e.host}</span></div>`;
     if (e.t === "policy_change") return `<div class="ev"><time>${t}</time><span class="tag pol">POLICY</span><span class="detail">${e.field} → ${JSON.stringify(e.value)}</span></div>`;
+    if (e.t === "approval_requested") return `<div class="ev"><time>${t}</time><span class="tag apr">APPROVAL</span><span class="detail">request ${e.id} · ${usd(e.amountMicro)} @ ${e.host} queued for human decision</span></div>`;
+    if (e.t === "approval_decided") return `<div class="ev"><time>${t}</time><span class="tag apr">APPROVAL</span><span class="detail">request ${e.id} <b>${e.approved ? "approved" : "denied"}</b> by human · ${usd(e.amountMicro)} @ ${e.host}</span></div>`;
     return "";
   }).join("");
 }
 
+window.decide = async (id, approve) => {
+  await post("/api/approvals", { id, approve });
+  refresh();
+};
+
 $("kill").onclick = async () => {
-  await fetch("/api/kill", { method: "POST", body: JSON.stringify({ on: !killOn }) });
+  await post("/api/kill", { on: !killOn });
   refresh();
 };
 

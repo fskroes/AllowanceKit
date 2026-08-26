@@ -5,7 +5,9 @@ export type LedgerEvent =
   | { t: "topup"; at: string; agent: string; amountMicro: string; source: string; balanceAfterMicro: string }
   | { t: "payment"; at: string; agent: string; url: string; host: string; amountMicro: string; txHash: string; balanceAfterMicro: string }
   | { t: "blocked"; at: string; agent: string; url: string; host: string; rule: string; detail: string; attemptedMicro: string }
-  | { t: "policy_change"; at: string; agent: string; field: string; value: unknown };
+  | { t: "policy_change"; at: string; agent: string; field: string; value: unknown }
+  | { t: "approval_requested"; at: string; agent: string; id: string; url: string; host: string; amountMicro: string }
+  | { t: "approval_decided"; at: string; agent: string; id: string; approved: boolean; host: string; amountMicro: string };
 
 export class Ledger {
   private file: string;
