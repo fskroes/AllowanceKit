@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Facilitator } from "./chain.ts";
 import type { AcceptsEntry, DecodedPayment, PaymentRequiredBody } from "./types.ts";
 import { flatAmount, payeeOf } from "./types.ts";
+import { NETWORKS } from "./live.ts";
 
 export interface GateOptions {
   priceMicro: bigint;
@@ -13,17 +14,22 @@ export interface GateOptions {
 }
 
 function advertise(opts: GateOptions, resource: string): AcceptsEntry {
+  const network = opts.network ?? "mock-ledger";
+  // On a real EVM network the asset must be the USDC contract address and
+  // `extra` must carry that contract's exact EIP-712 domain — facilitators
+  // reconstruct the signing domain from these and reject any mismatch.
+  const info = NETWORKS[network];
   return {
     scheme: "exact",
-    network: opts.network ?? "mock-ledger",
+    network,
     maxAmountRequired: opts.priceMicro.toString(),
     resource,
     description: opts.description,
     mimeType: "application/json",
     payTo: opts.payTo,
-    asset: "USDC",
+    asset: info?.usdc ?? "USDC",
     maxTimeoutSeconds: 30,
-    extra: { name: "USDC", version: "1" },
+    extra: info ? { name: info.domainName, version: info.domainVersion } : { name: "USDC", version: "1" },
   };
 }
 
