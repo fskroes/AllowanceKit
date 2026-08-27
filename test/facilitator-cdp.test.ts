@@ -45,7 +45,7 @@ test("jwt is ES256-signed with CDP claims and verifiable with its public key", (
   assert.ok(ok, "jwt signature must verify against public key");
 });
 
-type Captured = { auth?: string; body?: Record<string, unknown>; path?: string };
+type Captured = { auth?: string; body?: Record<string, unknown>; path?: string; result?: any };
 
 async function withCaptureServer(action: "verify" | "settle", respond: object, fn: (captured: Captured) => Promise<void>): Promise<void> {
   const captured: Captured = {};
@@ -68,8 +68,8 @@ async function withCaptureServer(action: "verify" | "settle", respond: object, f
       apiKeySecret: PEM,
       baseUrl: `http://127.0.0.1:${addr.port}`,
     });
-    if (action === "verify") await fac.verify({ scheme: "exact", payload: {} }, reqs);
-    else await fac.settle({ scheme: "exact", payload: {} }, reqs);
+    if (action === "verify") captured.result = await fac.verify({ scheme: "exact", payload: {} }, reqs);
+    else captured.result = await fac.settle({ scheme: "exact", payload: {} }, reqs);
     await fn(captured);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -89,8 +89,34 @@ test("verify posts x402 v1 contract shape with bearer jwt", async () => {
 test("settle maps success/txHash/network and errorReason", async () => {
   await withCaptureServer("settle", { success: true, txHash: "0xtx", network: "base-sepolia" }, async (cap) => {
     assert.equal(cap.path, "/platform/v2/x402/settle");
+    assert.equal(cap.result.success, true);
+    assert.equal(cap.result.txHash, "0xtx");
+    assert.equal(cap.result.network, "base-sepolia");
   });
-  await withCaptureServer("settle", { success: false, errorReason: "insufficient_funds" }, async () => {});
+  await withCaptureServer("settle", { success: false, errorReason: "insufficient_funds" }, async (cap) => {
+    assert.equal(cap.result.success, false);
+    assert.equal(cap.result.error, "insufficient_funds");
+  });
+});
+
+// Regression: the live CDP API returns the settled hash as "transaction", not
+// "txHash". Reading the wrong field silently dropped the on-chain audit trail
+// from every real payment while the mock-shaped tests stayed green.
+test("settle reads the tx hash from CDP's \"transaction\" field", async () => {
+  await withCaptureServer("settle", {
+    success: true,
+    transaction: "0x22ce5c2788286a760e135adcc3ff9b05e8cc5a968452e8d7c2fd614f74784f14",
+    network: "base-sepolia",
+    payer: "0xe48f38f38e88e6275a155f772508ee6953a4425B",
+  }, async (cap) => {
+    assert.equal(cap.result.txHash, "0x22ce5c2788286a760e135adcc3ff9b05e8cc5a968452e8d7c2fd614f74784f14");
+  });
+});
+
+test("settle prefers \"transaction\" when a facilitator sends both", async () => {
+  await withCaptureServer("settle", { success: true, transaction: "0xreal", txHash: "0xlegacy" }, async (cap) => {
+    assert.equal(cap.result.txHash, "0xreal");
+  });
 });
 
 test("missing credentials throw a helpful error", () => {

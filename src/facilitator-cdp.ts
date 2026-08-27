@@ -37,6 +37,9 @@ interface CdpSettleResponse {
   success: boolean;
   errorReason?: string;
   error?: string;
+  /** CDP returns the settled tx hash as "transaction"; older/other
+   *  facilitators use "txHash". Accept both so the audit trail is never lost. */
+  transaction?: string;
   txHash?: string;
   network?: string;
   payer?: string;
@@ -70,7 +73,7 @@ export class CdpFacilitator implements Facilitator {
     return {
       success: Boolean(res.success),
       error: res.error ?? res.errorReason,
-      txHash: res.txHash,
+      txHash: res.transaction ?? res.txHash,
       network: res.network ?? requirements.network,
     };
   }
