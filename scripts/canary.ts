@@ -102,9 +102,11 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   if (!agentKey) fail("AGENT_PRIVATE_KEY not set — needed for end-to-end (Base Sepolia USDC wallet)");
 
   let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
+  let keccak256: (hex: `0x${string}`) => `0x${string}`;
   try {
-    const viem = "viem";
-    ({ privateKeyToAccount } = await import(viem));
+    const viemAccounts = "viem/accounts";
+    ({ privateKeyToAccount } = await import(viemAccounts));
+    ({ keccak256 } = await import("viem"));
   } catch {
     fail("viem not installed — needed for EIP-3009 signing (npm i viem)");
   }
@@ -133,7 +135,12 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
 
   // Spin up a local x402-gated server settled through CDP
   const priceMicro = 10000n; // $0.01
-  const payTo = account.address; // seller receives to same wallet (self-serve canary)
+  // The facilitator rejects self-sends ("self_send_not_allowed"), so the seller
+  // is a second wallet deterministically derived from the agent key — the payment
+  // is a real transfer, and the funds stay under the same operator's control.
+  const sellerAccount = privateKeyToAccount(keccak256(pk as `0x${string}`));
+  const payTo = sellerAccount.address;
+  ok(`Seller wallet ${payTo} ${DIM}(derived from agent key)${RST}`);
 
   const sellerChain = new MockChain(); // accounting only — real settlement is CDP
   const server = http.createServer(

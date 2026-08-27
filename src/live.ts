@@ -7,7 +7,7 @@ import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { MockChain } from "./chain.ts";
-import { buildPolicyRails } from "./wallet.ts";
+import { buildPolicyRails, DEFAULT_AGENT_NAME } from "./wallet.ts";
 
 /**
  * Live-network agent runtime: same policy rails, approvals and audit ledger
@@ -30,7 +30,10 @@ export const NETWORKS: Record<string, NetworkInfo> = {
   "base-sepolia": {
     chainId: 84532,
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-    domainName: "USD Coin",
+    // Testnet USDC reports name() = "USDC"; mainnet reports "USD Coin". The
+    // EIP-712 domain must match the contract exactly or the recovered signer
+    // is a different address and the transfer fails verification.
+    domainName: "USDC",
     domainVersion: "2",
   },
   base: {
@@ -68,18 +71,21 @@ export interface LiveAgentRuntime {
 }
 
 export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgentRuntime> {
-  const agentName = opts.agentName ?? "research-agent";
+  const agentName = opts.agentName ?? DEFAULT_AGENT_NAME;
   const stateDir = path.resolve(opts.stateDir);
   fs.mkdirSync(stateDir, { recursive: true });
 
   let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
   try {
     // Optional peer dependency — resolved at runtime so the core stays zero-dep.
-    const viem = "viem";
-    ({ privateKeyToAccount } = await import(viem));
+    // Signers live in the "viem/accounts" subpath, not the package root.
+    const viemAccounts = "viem/accounts";
+    ({ privateKeyToAccount } = await import(viemAccounts));
   } catch {
     throw new Error("live networks need viem for EIP-712 signing: npm i viem");
   }
+  if (typeof privateKeyToAccount !== "function")
+    throw new Error("viem is installed but does not export privateKeyToAccount from viem/accounts — check the viem version");
   const account = privateKeyToAccount(normalizePk(opts.privateKey));
 
   const ledger = new Ledger(stateDir);
@@ -88,7 +94,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   // Accounting-only stub: balances are derived from the allowance ledger
   // (topups − spend); settlement happens on-chain via the seller's facilitator.
   const accounting = new MockChain();
-  const rails = buildPolicyRails({ agentName, address: account.address, chain: accounting, ledger, policyStore, approvals });
+  const rails = buildPolicyRails({ agentName, address: account.address, stateDir, chain: accounting, ledger, policyStore, approvals });
 
   const ctx: PayContext = {
     agentName,
@@ -141,7 +147,17 @@ export async function encodePaymentEvm(
     scheme: reqs.scheme,
     network: reqs.network,
     resource: { url: reqs.resource, description: reqs.description ?? "", mimeType: reqs.mimeType ?? "" },
-    payload: { signature, authorization },
+    // signTypedData needs uint256 fields as BigInt, but the x402 wire format
+    // carries them as decimal strings — and BigInt is not JSON-serializable.
+    payload: {
+      signature,
+      authorization: {
+        ...authorization,
+        value: authorization.value.toString(),
+        validAfter: authorization.validAfter.toString(),
+        validBefore: authorization.validBefore.toString(),
+      },
+    },
   };
   return Buffer.from(JSON.stringify(payload)).toString("base64");
 }

@@ -141,14 +141,17 @@ banner "AllowanceKit CDP canary — prove real settlement works"
 # ── Stage 1: CDP API key ─────────────────────────────────────────────────
 stage "Coinbase Developer Platform — API key" 4
 say "We need an ECDSA (P-256) API key from the CDP portal."
+say "  ${RED}Important:${RST} select ${BOLD}ECDSA${RST} as the algorithm — Ed25519 won't work for x402."
 say ""
-open_url "https://portal.cdp.coinbase.com/projects/api-keys"
-step "Log in to the CDP portal (create a free account if needed)."
+open_url "https://portal.cdp.coinbase.com"
+step "Log in (create a free account if needed)."
+step "In the left sidebar, click 'Secret API Keys' (or visit /api-keys/secret)."
 step "Click 'Create API key'."
 step "Name it (e.g. 'allowance-canary')."
-step "Select ECDSA as the signature algorithm (required — Ed25519 won't work)."
-step "On success, you'll see the key ID and can download/view the private key."
-step "Copy the API key ID (starts with 'organizations/...')."
+step "Under 'Signature algorithm', select ${BOLD}ECDSA${RST} (NOT Ed25519)."
+step "Do NOT check the Non-custodial wallet boxes — we don't need those."
+step "On success, you'll see the key ID and can download/view the private key PEM."
+step "Copy the API key ID (looks like 'organizations/.../apiKeys/...' or a UUID)."
 ask CDP_API_KEY_ID "Paste the full API key ID:"
 step "Open the downloaded key file (or copy the private key PEM from the modal)."
 step "Paste it below — the full block from -----BEGIN EC PRIVATE KEY----- to -----END EC PRIVATE KEY-----."
@@ -172,16 +175,21 @@ if [[ -z "$AGENT_PRIVATE_KEY" ]]; then
     console.log(pk);
   " 2>/dev/null || echo "")
   if [[ -n "$AGENT_PRIVATE_KEY" ]]; then
+    # Derive the real EVM address (keccak256 of the uncompressed pubkey) via
+    # viem. sha256 of the private key is NOT an address — funding it burns funds.
     AGENT_ADDRESS=$(node -e "
-      const c = require('crypto');
-      const pk = Buffer.from('${AGENT_PRIVATE_KEY}', 'hex');
-      const addr = '0x' + c.createHash('sha256').update(pk).digest().subarray(0, 20).toString('hex');
-      console.log(addr);
+      import('viem/accounts')
+        .then(({ privateKeyToAccount }) => console.log(privateKeyToAccount('0x${AGENT_PRIVATE_KEY}').address))
+        .catch(() => console.log('unknown'));
     " 2>/dev/null || echo "unknown")
     say "  Fresh wallet generated:"
     say "    address  ${BOLD}${AGENT_ADDRESS}${RESET}"
     say "    key      ${DIM}${AGENT_PRIVATE_KEY:0:8}…${RESET}"
-    warn "This key is RANDOM — not a real EVM wallet. Use an actual funded wallet for the canary."
+    if [[ "$AGENT_ADDRESS" == "unknown" ]]; then
+      warn "Could not derive the address — install viem (npm i viem), then re-run to see it."
+    else
+      warn "This wallet is EMPTY. Fund it at the faucets below before running the canary."
+    fi
   fi
 fi
 write_env AGENT_PRIVATE_KEY "$AGENT_PRIVATE_KEY"
