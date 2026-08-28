@@ -1,9 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
-import { usd } from "./money.ts";
+import { fmtUsd, usd } from "./money.ts";
+
+/**
+ * The complete vocabulary of reasons a payment can be refused. Exported so
+ * consumers can `switch` exhaustively instead of hand-copying strings out of
+ * the README.
+ */
+export type PolicyRule =
+  | "kill_switch"
+  | "host_not_allowlisted"
+  | "host_blocked"
+  | "per_call_cap"
+  | "velocity_circuit_breaker"
+  | "budget_exhausted"
+  | "human_approval_required"
+  | "settlement_rejected";
+
+/** Plain-English names for the rules, for anything a non-developer reads. */
+export const RULE_LABELS: Record<PolicyRule, string> = {
+  kill_switch: "Spending paused by you",
+  host_not_allowlisted: "Site not on your approved list",
+  host_blocked: "Site on your blocked list",
+  per_call_cap: "Over your per-payment limit",
+  velocity_circuit_breaker: "Too much, too fast",
+  budget_exhausted: "Allowance used up",
+  human_approval_required: "Waiting for your approval",
+  settlement_rejected: "Payment refused by the seller",
+};
 
 export interface PolicyConfig {
   agentName: string;
+  /** Hard ceiling on lifetime spend. Enforced alongside the funded amount: the agent can spend min(this, topups). */
   totalBudgetUsd: number;
   perCallMaxUsd: number;
   windowLimitUsd: number;
@@ -26,6 +54,86 @@ export const defaultPolicy: PolicyConfig = {
   requireApprovalAboveUsd: 0.3,
 };
 
+/** Every field `allowance policy <field> <value>` accepts, with its shape. */
+export const POLICY_FIELDS = {
+  totalBudgetUsd: "usd",
+  perCallMaxUsd: "usd",
+  windowLimitUsd: "usd",
+  windowSeconds: "seconds",
+  requireApprovalAboveUsd: "usd",
+  allowHostSuffixes: "host-list",
+  blockedHosts: "host-list",
+  killSwitch: "boolean",
+  agentName: "string",
+} as const;
+
+export type PolicyField = keyof typeof POLICY_FIELDS;
+
+function nearest(field: string): string | undefined {
+  const keys = Object.keys(POLICY_FIELDS);
+  const lower = field.toLowerCase();
+  return (
+    keys.find((k) => k.toLowerCase() === lower) ??
+    keys.find((k) => k.toLowerCase().startsWith(lower.slice(0, 6))) ??
+    keys.find((k) => lower.startsWith(k.toLowerCase().slice(0, 6)))
+  );
+}
+
+export class PolicyValidationError extends Error {}
+
+/**
+ * Rejects unknown fields, wrong types and impossible values *before* they are
+ * written. A silently-accepted typo on the command that sets a spending limit
+ * is the worst failure mode this library has.
+ */
+export function validatePolicyPatch(patch: Record<string, unknown>): void {
+  for (const [field, value] of Object.entries(patch)) {
+    if (!(field in POLICY_FIELDS)) {
+      const guess = nearest(field);
+      throw new PolicyValidationError(
+        `unknown policy field "${field}"${guess ? ` — did you mean "${guess}"?` : ""}\n` +
+          `known fields: ${Object.keys(POLICY_FIELDS).join(", ")}`,
+      );
+    }
+    const kind = POLICY_FIELDS[field as PolicyField];
+    if (kind === "usd" || kind === "seconds") {
+      if (typeof value !== "number" || !Number.isFinite(value))
+        throw new PolicyValidationError(`${field} must be a number, got ${JSON.stringify(value)}`);
+      if (value < 0) throw new PolicyValidationError(`${field} cannot be negative (got ${value})`);
+      if (kind === "seconds" && value < 1)
+        throw new PolicyValidationError(`${field} must be at least 1 second (got ${value})`);
+    }
+    if (kind === "host-list") {
+      if (!Array.isArray(value) || value.some((h) => typeof h !== "string"))
+        throw new PolicyValidationError(`${field} must be a list of hostnames, got ${JSON.stringify(value)}`);
+    }
+    if (kind === "boolean" && typeof value !== "boolean")
+      throw new PolicyValidationError(`${field} must be true or false, got ${JSON.stringify(value)}`);
+  }
+}
+
+/**
+ * Non-fatal configuration warnings: combinations where one rail silently
+ * shadows another, so a rule the human thinks they armed can never fire.
+ */
+export function policyWarnings(p: RuntimePolicy): string[] {
+  const out: string[] = [];
+  if (p.requireApprovalAboveUsd >= p.perCallMaxUsd)
+    out.push(
+      `the approval gate can never fire: requireApprovalAboveUsd ($${p.requireApprovalAboveUsd.toFixed(2)}) is not below ` +
+        `perCallMaxUsd ($${p.perCallMaxUsd.toFixed(2)}), so anything big enough to need your approval is hard-blocked first. ` +
+        `Lower requireApprovalAboveUsd or raise perCallMaxUsd.`,
+    );
+  if (p.windowLimitUsd >= p.totalBudgetUsd)
+    out.push(
+      `the velocity breaker will usually trip before the total budget: windowLimitUsd ($${p.windowLimitUsd.toFixed(2)}) ` +
+        `is not below totalBudgetUsd ($${p.totalBudgetUsd.toFixed(2)}), so spend is reported as "too fast" rather than "out of money".`,
+    );
+  if (p.allowHostSuffixes.includes("*"))
+    out.push(`allowHostSuffixes contains "*" — the host allowlist is disabled and the agent may pay any host.`);
+  return out;
+}
+
 export class PolicyStore {
   private file: string;
 
@@ -41,19 +149,52 @@ export class PolicyStore {
   }
 
   save(patch: Partial<RuntimePolicy>): void {
+    validatePolicyPatch(patch as Record<string, unknown>);
     const next = { ...this.load(), ...patch };
     fs.writeFileSync(this.file, JSON.stringify(next, null, 2));
   }
 }
 
-export type PolicyDecision = { allowed: true } | { allowed: false; rule: string; detail: string; requestId?: string };
+export type PolicyDecision =
+  | { allowed: true }
+  | {
+      allowed: false;
+      rule: PolicyRule;
+      detail: string;
+      /** True when retrying later, cheaper, or after a human decision can succeed. */
+      recoverable: boolean;
+      requestId?: string;
+      /** The price the seller quoted, so an agent can decide how far over it was. */
+      quotedMicro?: bigint;
+      /** The limit that refused it, in the same units. */
+      capMicro?: bigint;
+      /** For time-based rails: how long to wait before the same call could pass. */
+      retryAfterMs?: number;
+    };
 
-export function evaluatePolicy(
-  policy: RuntimePolicy,
-  ctx: { host: string; amountMicro: bigint; spendTotalMicro: bigint; topupsMicro: bigint; windowSpendMicro: bigint },
-): PolicyDecision {
+export interface PolicyContext {
+  host: string;
+  amountMicro: bigint;
+  spendTotalMicro: bigint;
+  topupsMicro: bigint;
+  windowSpendMicro: bigint;
+}
+
+/** The spendable ceiling: you can never exceed what you funded, nor the configured budget. */
+export function effectiveBudgetMicro(policy: RuntimePolicy, topupsMicro: bigint): bigint {
+  const configured = usd(policy.totalBudgetUsd);
+  return configured < topupsMicro ? configured : topupsMicro;
+}
+
+export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): PolicyDecision {
   if (policy.killSwitch)
-    return { allowed: false, rule: "kill_switch", detail: "human paused all spending for this agent" };
+    return {
+      allowed: false,
+      rule: "kill_switch",
+      detail: "human paused all spending for this agent",
+      recoverable: true,
+    };
+
   const bare = ctx.host.split(":")[0].toLowerCase();
   const matches = (suffix: string) => suffix === "*" || bare === suffix || bare.endsWith("." + suffix);
   if (!policy.allowHostSuffixes.some(matches))
@@ -61,22 +202,58 @@ export function evaluatePolicy(
       allowed: false,
       rule: "host_not_allowlisted",
       detail: `"${bare}" not in allowHostSuffixes [${policy.allowHostSuffixes.join(", ")}]`,
+      recoverable: false,
+      quotedMicro: ctx.amountMicro,
     };
   if (policy.blockedHosts.some(matches))
-    return { allowed: false, rule: "host_blocked", detail: `"${bare}" appears in blockedHosts` };
-  if (ctx.amountMicro > usd(policy.perCallMaxUsd))
+    return {
+      allowed: false,
+      rule: "host_blocked",
+      detail: `"${bare}" appears in blockedHosts`,
+      recoverable: false,
+      quotedMicro: ctx.amountMicro,
+    };
+
+  const perCallCap = usd(policy.perCallMaxUsd);
+  if (ctx.amountMicro > perCallCap)
     return {
       allowed: false,
       rule: "per_call_cap",
-      detail: `price exceeds per-call cap of $${policy.perCallMaxUsd.toFixed(2)}`,
+      detail: `price ${fmtUsd(ctx.amountMicro)} exceeds per-call cap of $${policy.perCallMaxUsd.toFixed(2)}`,
+      recoverable: false,
+      quotedMicro: ctx.amountMicro,
+      capMicro: perCallCap,
     };
-  if (ctx.windowSpendMicro + ctx.amountMicro > usd(policy.windowLimitUsd))
+
+  const windowCap = usd(policy.windowLimitUsd);
+  if (ctx.windowSpendMicro + ctx.amountMicro > windowCap)
     return {
       allowed: false,
       rule: "velocity_circuit_breaker",
       detail: `rolling ${policy.windowSeconds}s spend would exceed $${policy.windowLimitUsd.toFixed(2)} limit`,
+      recoverable: true,
+      quotedMicro: ctx.amountMicro,
+      capMicro: windowCap,
+      retryAfterMs: policy.windowSeconds * 1000,
     };
-  if (ctx.topupsMicro - ctx.spendTotalMicro < ctx.amountMicro)
-    return { allowed: false, rule: "budget_exhausted", detail: "remaining allowance below price" };
+
+  const budget = effectiveBudgetMicro(policy, ctx.topupsMicro);
+  const remaining = budget - ctx.spendTotalMicro;
+  if (remaining < ctx.amountMicro) {
+    const boundByConfig = usd(policy.totalBudgetUsd) < ctx.topupsMicro;
+    return {
+      allowed: false,
+      rule: "budget_exhausted",
+      detail:
+        `remaining allowance ${fmtUsd(remaining < 0n ? 0n : remaining)} is below the ${fmtUsd(ctx.amountMicro)} price ` +
+        (boundByConfig
+          ? `(capped by totalBudgetUsd $${policy.totalBudgetUsd.toFixed(2)}; ${fmtUsd(ctx.topupsMicro)} funded)`
+          : `(${fmtUsd(ctx.topupsMicro)} funded — top up with \`allowance topup <usd>\`)`),
+      recoverable: true,
+      quotedMicro: ctx.amountMicro,
+      capMicro: budget,
+    };
+  }
+
   return { allowed: true };
 }
