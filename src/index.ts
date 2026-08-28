@@ -57,6 +57,9 @@ export {
 } from "./policy.ts";
 export type { PolicyConfig, RuntimePolicy, PolicyDecision, PolicyRule, PolicyField } from "./policy.ts";
 
+export { NotifyStore, Notifier, deliver, defaultNotifyConfig, providerEnvVar } from "./notify.ts";
+export type { NotifyConfig, NotifyEvent, Message as NotifyMessage } from "./notify.ts";
+
 export { Ledger } from "./ledger.ts";
 export type { LedgerEvent, LedgerTotals } from "./ledger.ts";
 export { ApprovalStore } from "./approvals.ts";

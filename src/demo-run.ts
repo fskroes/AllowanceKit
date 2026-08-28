@@ -5,6 +5,7 @@ import { startSellerApis, describeServers } from "./demo-servers.ts";
 import { payingFetch, type PaidResult } from "./payer.ts";
 import { fmtUsdExact } from "./money.ts";
 import { RULE_LABELS } from "./policy.ts";
+import { CLI } from "./cli-name.ts";
 
 const c = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -101,7 +102,7 @@ export async function runDemo(stateDir: string): Promise<void> {
   paid(report, "report?id=q3-2026", c.dim("$0.45 ≥ $0.30 → queued for human"));
   const reqId = report.blockedBy?.requestId ?? rt.approvals.pending()[0]?.id;
   if (!reqId) throw new Error("expected a queued approval request for the analyst report");
-  console.log(c.amber(`  human reviews the queue (dashboard button or \`npx allowance-kit approve ${reqId}\`)…`));
+  console.log(c.amber(`  human reviews the queue (dashboard button or \`${CLI} approve ${reqId}\`)…`));
   decideApproval(rt, reqId, true);
   console.log(c.green(`  approved ${reqId} — the agent retries the exact same call:`));
   const retry = await payingFetch(rt.ctx, catalog.analystReportUrl("q3-2026"));
@@ -146,5 +147,5 @@ export async function runDemo(stateDir: string): Promise<void> {
 
   const rel = path.relative(process.cwd(), dir) || dir;
   console.log(c.bold("\n  See this ledger in the live dashboard — same numbers, with a kill switch:"));
-  console.log(`    npx allowance-kit dashboard --state ${rel}\n`);
+  console.log(`    ${CLI} dashboard --state ${rel}\n`);
 }

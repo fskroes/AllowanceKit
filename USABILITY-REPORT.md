@@ -11,7 +11,7 @@ Scratch dirs with repro scripts: `/tmp/ak-cold`, `/tmp/ak-sdk`, `/tmp/ak-maya`, 
 
 ## Status — resolved 2026-08-26
 
-All code-side findings are fixed, verified, and covered by tests (`npm test`: 19/19).
+All code-side findings are fixed, verified, and covered by tests (`npm test`: 41/41 as of 0.3.0).
 Version bumped to **0.2.0**; see the "Changes in 0.2.0" section of the README for the
 breaking changes.
 
@@ -54,14 +54,30 @@ outrank `per_call_cap`. That would make the per-call cap overridable, which remo
 guarantee in the product. Instead the ordering stands and `policy`/`status` warn when
 `requireApprovalAboveUsd >= perCallMaxUsd` makes the approval gate unreachable.
 
-**Still outstanding — not code in this repo**
+**Still outstanding — resolved 2026-08-28**
 
-1. **Claim `wallie` on npm** (0.1). Needs your npm account; a publish is yours to make, not mine.
-2. **onewallie.com** (1.1, 1.8, C6): change `npx wallie` → `npx allowance-kit`, drop the
-   "no install" claim, reconcile €20 vs $20, add a dashboard screenshot.
-3. **Notifications** (P4.2): email/SMS/webhook on 50/80/100%, on every block, on every queued
-   approval. Still the biggest gap for a non-developer, and README's "Honest limitations" now says so.
-4. **Publishing 0.2.0** to npm — your call.
+1. ~~**Claim `wallie` on npm** (0.1)~~ — done. `wallie` is published and is a real alias: it depends on
+   `allowance-kit`, imports the CLI in-process and re-exports the SDK, so `npx wallie` and
+   `npx allowance-kit` are the same tool. `allowance-kit@0.2.0` shipped the same day.
+2. ~~**onewallie.com** (1.1, 1.8, C6)~~ — done. `npx wallie` on the site now works rather than 404s,
+   so the commands stayed as written. The three "no install" claims are gone (npx installs; saying
+   otherwise burned trust for nothing), €20 vs $20 is settled at €20 to match what Stripe actually
+   charges, and the dashboard screenshot is on the page — with a payment parked for a human, which
+   is the differentiator the site never showed.
+3. ~~**Notifications** (P4.2)~~ — shipped in 0.3.0. `notify webhook`, `notify email`, `notify test`.
+   Alerts at 50/80/100% of the allowance, on every block, and on every payment waiting on a human.
+   Webhook payloads carry a Slack/Discord `text` field and flat structured detail. Email goes over
+   Resend or Postmark's REST API, so the zero-dependency promise holds and no key touches disk.
+   Delivery is never awaited inside the ledger lock: a hung webhook cannot slow a payment, and a
+   broken one cannot fail it.
+4. ~~**Publishing 0.2.0**~~ — done.
+
+**What is genuinely left**
+
+- SMS and push. Webhook and email only, for now.
+- Alerts are fire-and-forget, so a dropped webhook is not retried. The ledger is the record.
+- Free alerts only fire while the agent is running on a machine you control. Alerting that works
+  when your laptop is shut is the thing Cloud is for, and it is not built.
 
 **The strategic finding stands.** P4 is not a bug list. For someone whose problem is a metered API
 invoice on a card, this still caps nothing they are billed for. The README now says that in the

@@ -2,12 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { MockChain } from "./chain.ts";
 import { Ledger } from "./ledger.ts";
-import { PolicyStore, evaluatePolicy, type RuntimePolicy } from "./policy.ts";
+import { PolicyStore, evaluatePolicy, effectiveBudgetMicro, type RuntimePolicy } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
 import { withLock } from "./lock.ts";
 import { fmtUsdExact, usd } from "./money.ts";
 import type { PayContext } from "./payer.ts";
+import { CLI } from "./cli-name.ts";
+import { NotifyStore, Notifier } from "./notify.ts";
 
 interface AgentIdentity {
   address: string;
@@ -24,6 +26,7 @@ export interface AgentRuntime {
   policyStore: PolicyStore;
   approvals: ApprovalStore;
   reservations: ReservationStore;
+  notifyStore: NotifyStore;
   policy(): RuntimePolicy;
 }
 
@@ -60,6 +63,7 @@ export interface PolicyRailsInput {
   policyStore: PolicyStore;
   approvals: ApprovalStore;
   reservations?: ReservationStore;
+  notifier?: Notifier;
 }
 
 /**
@@ -75,6 +79,7 @@ export function buildPolicyRails(
 ): Pick<PayContext, "authorize" | "recordPayment" | "recordBlocked" | "releaseReservation" | "policy"> {
   const { agentName, address, stateDir, chain, ledger, policyStore, approvals } = input;
   const reservations = input.reservations ?? new ReservationStore(stateDir);
+  const notifier = input.notifier ?? new Notifier(new NotifyStore(stateDir), agentName);
   const lockPath = path.join(stateDir, "allowance.lock");
 
   return {
@@ -103,6 +108,7 @@ export function buildPolicyRails(
 
         if (amountMicro >= usd(policy.requireApprovalAboveUsd) && !approvals.grantCovers(host, amountMicro)) {
           const req = approvals.findOrCreate(agentName, url, host, amountMicro);
+          notifier.approvalQueued(req.id, host, amountMicro, CLI);
           ledger.append({
             t: "approval_requested",
             at: new Date().toISOString(),
@@ -118,7 +124,7 @@ export function buildPolicyRails(
             detail:
               `${fmtUsdExact(amountMicro)} is at or above your approval threshold of ` +
               `$${policy.requireApprovalAboveUsd.toFixed(2)} — request ${req.id} is queued for a human. ` +
-              `Approve it with \`npx allowance-kit approve ${req.id}\` or on the dashboard, then retry.`,
+              `Approve it with \`${CLI} approve ${req.id}\` or on the dashboard, then retry.`,
             recoverable: true,
             requestId: req.id,
             quotedMicro: amountMicro,
@@ -131,8 +137,8 @@ export function buildPolicyRails(
       });
     },
 
-    recordPayment(url, host, amountMicro, txHash, reservationId) {
-      return withLock(lockPath, () => {
+    async recordPayment(url, host, amountMicro, txHash, reservationId) {
+      await withLock(lockPath, () => {
         if (reservationId) reservations.close(reservationId);
         ledger.append({
           t: "payment",
@@ -145,10 +151,14 @@ export function buildPolicyRails(
           balanceAfterMicro: chain.balance(address).toString(),
         });
       });
+      // Read the new totals outside the lock: this only reports, and holding a
+      // write lock across a webhook call would serialise every parallel payer.
+      const totals = ledger.totals(agentName, 0);
+      notifier.spendChanged(totals.spendTotalMicro, effectiveBudgetMicro(policyStore.load(), totals.topupsMicro));
     },
 
-    recordBlocked(url, host, rule, detail, attemptedMicro) {
-      return withLock(lockPath, () => {
+    async recordBlocked(url, host, rule, detail, attemptedMicro) {
+      await withLock(lockPath, () => {
         ledger.append({
           t: "blocked",
           at: new Date().toISOString(),
@@ -160,6 +170,7 @@ export function buildPolicyRails(
           attemptedMicro: attemptedMicro.toString(),
         });
       });
+      notifier.blocked(host, rule, detail, attemptedMicro);
     },
 
     releaseReservation(id) {
@@ -177,13 +188,15 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
   const policyStore = new PolicyStore(stateDir);
   const approvals = new ApprovalStore(stateDir);
   const reservations = new ReservationStore(stateDir);
+  const notifyStore = new NotifyStore(stateDir);
   const address = loadOrCreateIdentity(chain, stateDir, agentName);
+  const notifier = new Notifier(notifyStore, agentName);
 
   const ctx: PayContext = {
     agentName,
     address,
     chain,
-    ...buildPolicyRails({ agentName, address, stateDir, chain, ledger, policyStore, approvals, reservations }),
+    ...buildPolicyRails({ agentName, address, stateDir, chain, ledger, policyStore, approvals, reservations, notifier }),
   };
 
   return {
@@ -196,6 +209,7 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     policyStore,
     approvals,
     reservations,
+    notifyStore,
     policy: () => policyStore.load(),
   };
 }

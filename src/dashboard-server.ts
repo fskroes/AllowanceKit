@@ -5,6 +5,7 @@ import path from "node:path";
 import type { AgentRuntime } from "./wallet.ts";
 import { decideApproval, allowanceRemaining } from "./wallet.ts";
 import { effectiveBudgetMicro, policyWarnings } from "./policy.ts";
+import { CLI } from "./cli-name.ts";
 
 function ensureControlToken(stateDir: string): string {
   const file = path.join(stateDir, "dashboard-token");
@@ -30,6 +31,24 @@ function json(res: http.ServerResponse, status: number, payload: unknown): void 
   res.end(JSON.stringify(payload));
 }
 
+/**
+ * A one-line answer to "if this blows the budget at 3am, who hears about it?"
+ * — the question the dashboard cannot answer just by being open.
+ */
+function describeAlerts(rt: AgentRuntime): string[] {
+  const cfg = rt.notifyStore.load();
+  const out: string[] = [];
+  if (cfg.webhookUrl) {
+    try {
+      out.push(`webhook to ${new URL(cfg.webhookUrl).host}`);
+    } catch {
+      out.push("webhook");
+    }
+  }
+  if (cfg.email) out.push(`email to ${cfg.email}`);
+  return out;
+}
+
 export function startDashboard(rt: AgentRuntime, port = 4030): Promise<{ server: http.Server; token: string }> {
   const htmlPath = path.join(import.meta.dirname ?? ".", "..", "public", "dashboard.html");
   const token = ensureControlToken(rt.stateDir);
@@ -46,6 +65,8 @@ export function startDashboard(rt: AgentRuntime, port = 4030): Promise<{ server:
       return json(res, 200, {
         agent: rt.agentName,
         address: rt.address,
+        cli: CLI,
+        alerts: describeAlerts(rt),
         network: "practice money (local simulated ledger)",
         remainingMicro: allowanceRemaining(rt).toString(),
         fundedMicro: totals.topupsMicro.toString(),

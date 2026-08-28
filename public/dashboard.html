@@ -92,6 +92,7 @@
     <div class="row"><span class="muted">total budget</span><b id="p-budget"></b></div>
     <div class="row"><span class="muted">spend limit</span><b id="p-window"></b></div>
     <div class="row"><span class="muted">ask me above</span><b id="p-approve"></b></div>
+    <div class="row"><span class="muted">alerts</span><b id="p-alerts"></b></div>
     <h2 style="margin-top:18px">Sites it may pay</h2>
     <div id="hosts"></div>
     <div id="warnings"></div>
@@ -289,6 +290,10 @@ async function refresh() {
   $("p-budget").textContent = "$" + Number(s.totalBudgetUsd).toFixed(2);
   $("p-window").textContent = "$" + Number(s.windowLimitUsd).toFixed(2) + " / " + s.windowSeconds + "s";
   $("p-approve").textContent = "$" + Number(s.requireApprovalAboveUsd).toFixed(2);
+  // Where a heads-up would go if this ran overnight and nobody was watching.
+  $("p-alerts").textContent = s.alerts && s.alerts.length
+    ? s.alerts.join(" and ")
+    : "nobody is told — set up with " + (s.cli || "npx allowance-kit") + " notify";
 
   const hosts = $("hosts");
   hosts.textContent = "";
@@ -322,7 +327,7 @@ async function refresh() {
       }
     }
     $("ledgerNote").textContent = s.events.length > 60
-      ? "showing the most recent 60 of " + s.events.length + " entries · full log: npx allowance-kit audit"
+      ? "showing the most recent 60 of " + s.events.length + " entries · full log: " + (s.cli || "npx allowance-kit") + " audit"
       : s.events.length + " entries";
   }
 }

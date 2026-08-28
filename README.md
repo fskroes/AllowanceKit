@@ -11,6 +11,10 @@ npx allowance-kit topup 5.00    # fund the allowance
 npx allowance-kit dashboard     # live spending, kill switch, approval queue
 ```
 
+![The AllowanceKit dashboard: $2.14 left of a $5.00 allowance, $2.86 spent across 156 payments with 6 stopped, one $0.42 payment waiting on a human decision, and every payment and block listed in plain English.](docs/dashboard.png)
+
+*The dashboard. One payment is parked for a human — nothing moves until someone decides.*
+
 ## What this does and does not cap
 
 **It caps** payments your agent makes *through AllowanceKit* to x402-priced APIs — every call routed through `payingFetch`.
@@ -132,6 +136,7 @@ policy [field value]            show or change one limit
 approvals                       payments waiting for your decision
 approve <id> | deny <id>        decide one
 audit [--json]                  the full spending history
+notify [webhook|email|test|off] where alerts are sent, and on what
 dashboard [--port <n>]          live dashboard (default http://localhost:4030)
 demo                            run the built-in demo into ./.allowance-demo
 
@@ -145,6 +150,35 @@ npx allowance-kit policy perCallMaxUsd 0.10
 npx allowance-kit policy allowHostSuffixes api.weather.com,api.search.com
 npx allowance-kit policy killSwitch true      # freeze everything, right now
 ```
+
+## Alerts, so nobody has to watch a screen
+
+A dashboard only helps someone who is looking at it. The runs that hurt happen overnight.
+
+```bash
+npx allowance-kit notify webhook https://hooks.slack.com/services/...   # Slack, Discord, Zapier, your own server
+npx allowance-kit notify email you@example.com --from alerts@you.com    # needs a provider key, below
+npx allowance-kit notify test                                           # send one of each now, report delivery
+npx allowance-kit notify                                                # show what is set up
+npx allowance-kit notify off                                            # stop sending anything
+```
+
+You get told about three things:
+
+- **Spending**, at 50%, 80% and 100% of the allowance. Once per threshold, not once per payment. Topping up rearms them.
+- **Every block** — which rail refused, what it tried to pay, and that nothing moved.
+- **Every payment waiting on you**, with the `approve` and `deny` commands to settle it.
+
+Email goes through a provider's REST API, not SMTP, so the package keeps its zero-dependency promise. Set one key in your environment — **never in a config file**:
+
+```bash
+export RESEND_API_KEY=...        # for --via resend (the default)
+export POSTMARK_API_TOKEN=...    # for --via postmark
+```
+
+`notifications.json` in the state dir holds the address and the provider. It never holds the key, so it is safe to read, copy, or paste into a bug report.
+
+Alerts are best-effort by construction: delivery is never awaited inside the ledger lock, a webhook that hangs cannot slow a payment down, and one that errors cannot fail one. `notify test` is how you find out whether it works, rather than discovering it at 3am.
 
 ## Architecture
 
@@ -241,11 +275,22 @@ See [BUSINESS.md](BUSINESS.md).
 ## Honest limitations
 
 - Default settlement is a local mock ledger — **all funds are simulated**. Real settlement ships two ways: sellers settle real USDC via `CdpFacilitator`, buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`). Untested against mainnet until first live transaction — treat the first runs as canary.
-- **No notifications.** Blocks, queued approvals and a draining allowance are visible only in the CLI and the dashboard. There is no email, SMS, webhook or Slack push, so an overnight run needs someone watching a screen. This is the biggest gap for non-developer operators.
+- **Alerts go out over webhook and email only.** There is no SMS and no push. Email needs a Resend or Postmark key you supply; without one, nothing sends and `notify` says so plainly rather than failing quietly.
+- **Alerts are best-effort, not guaranteed.** They are fired without being awaited so they can never fail a payment, which also means a dropped webhook is not retried. The ledger, not your inbox, is the record of what happened.
 - The CLI manages a single agent per state dir; multi-agent is a schema change (`agentName` already threads everywhere).
 - Approved grants are standing per host+amount — no expiry and no per-grant spend cap yet.
 - The dashboard binds to `127.0.0.1` and gates all mutations behind a token, but `GET /api/state` is unauthenticated to anything already on the loopback interface.
 - npm ships compiled `dist/` (ESM + `.d.ts`, zero runtime deps).
+
+## Changes in 0.3.0
+
+Added:
+
+- **Notifications.** `notify webhook`, `notify email`, `notify test`, `notify off`. Alerts fire at 50/80/100% of the allowance, on every block, and on every payment queued for a human. Webhook payloads carry both a Slack/Discord-shaped `text` field and flat structured detail. Email goes over Resend or Postmark's REST API; the key is read from the environment and never written to disk. New exports: `NotifyStore`, `Notifier`, `deliver()`, `defaultNotifyConfig`, `providerEnvVar()`, and the `NotifyConfig` / `NotifyEvent` / `NotifyMessage` types. `AgentRuntime` gained `notifyStore`.
+- **The CLI answers to the name you typed.** Run it as `wallie` and every hint it prints back says `npx wallie`; run it as `allowance-kit` and they say `npx allowance-kit`. The dashboard follows the same name. A bare `node dist/cli.js` falls back to the published name rather than printing `npx cli`.
+- The dashboard's Settings panel shows where alerts go, or says nobody is told.
+
+`wallie` on npm is an alias for this package: same CLI, same SDK, the name [onewallie.com](https://onewallie.com) uses.
 
 ## Changes in 0.2.0
 

@@ -6,12 +6,12 @@ import { startDashboard } from "./dashboard-server.ts";
 import { fmtUsd, fmtUsdSmart } from "./money.ts";
 import { POLICY_FIELDS, PolicyValidationError, RULE_LABELS, policyWarnings, type PolicyField } from "./policy.ts";
 import { runDemo } from "./demo-run.ts";
+import { deliver, providerEnvVar } from "./notify.ts";
 import type { LedgerEvent } from "./ledger.ts";
-
-const CLI = "npx allowance-kit";
+import { CLI, NAME } from "./cli-name.ts";
 const PRACTICE = "Practice money — this is a local simulated ledger, no real money can move";
 
-const HELP = `allowance-kit — a spending allowance for your AI agent
+const HELP = `${NAME} — a spending allowance for your AI agent
 
 Getting started
   ${CLI} init                    create the agent's wallet
@@ -28,6 +28,7 @@ Commands
   approvals                       payments waiting for your decision
   approve <id> | deny <id>        decide one
   audit [--json]                  the full spending history
+  notify                          where alerts are sent, and on what
   dashboard [--port <n>]          live dashboard (default http://localhost:4030)
   demo                            run the built-in demo into ./.allowance-demo
 
@@ -41,22 +42,38 @@ Limits you can set with \`policy\`
   blockedHosts <hosts>            never these sites (comma-separated)
   killSwitch true|false           freeze or unfreeze all spending
 
+Alerts you can set with \`notify\`
+  notify webhook <url>            POST every alert to Slack, Discord, Zapier, you
+  notify email <address>          mail every alert (needs a provider key, see below)
+  notify test                     send one of each, right now, and report delivery
+  notify off                      stop sending anything
+
 Options
   --state <dir>                   state directory (default ./.allowance)
   --port <n>                      dashboard port (default 4030)
   --json                          machine-readable output where offered
+  --from <email>                  verified sender address for notify email
+  --via <resend|postmark>         email provider (default resend)
   -h, --help                      this text
   -v, --version                   print the version
 
 Examples
   ${CLI} policy perCallMaxUsd 0.10
   ${CLI} policy allowHostSuffixes api.weather.com,api.search.com
-  ${CLI} policy killSwitch true            # freeze everything, right now`;
+  ${CLI} policy killSwitch true            # freeze everything, right now
+  ${CLI} notify webhook https://hooks.slack.com/services/...
+  ${CLI} notify email you@example.com --from alerts@yourdomain.com
+
+Email needs an API key in your environment, never in a config file:
+  RESEND_API_KEY=...      for --via resend (the default)
+  POSTMARK_API_TOKEN=...  for --via postmark`;
 
 interface Flags {
   state: string;
   port: number;
   json: boolean;
+  from?: string;
+  via?: string;
   rest: string[];
 }
 
@@ -65,6 +82,8 @@ function parseFlags(argv: string[]): Flags {
   let state = process.env.ALLOWANCE_STATE_DIR ?? ".allowance";
   let port = 4030;
   let json = false;
+  let from: string | undefined;
+  let via: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--state" || a === "--state-dir") state = required(argv[++i], "--state <dir>");
@@ -72,10 +91,14 @@ function parseFlags(argv: string[]): Flags {
     else if (a === "--port") port = Number(required(argv[++i], "--port <n>"));
     else if (a.startsWith("--port=")) port = Number(a.slice(7));
     else if (a === "--json") json = true;
+    else if (a === "--from") from = required(argv[++i], "--from <email>");
+    else if (a.startsWith("--from=")) from = a.slice(7);
+    else if (a === "--via") via = required(argv[++i], "--via <resend|postmark>");
+    else if (a.startsWith("--via=")) via = a.slice(6);
     else rest.push(a);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UserError(`--port must be a number between 1 and 65535`);
-  return { state: path.resolve(state), port, json, rest };
+  return { state: path.resolve(state), port, json, from, via, rest };
 }
 
 function required(value: string | undefined, usage: string): string {
@@ -335,6 +358,107 @@ async function main(): Promise<void> {
       for (const e of events) console.log(auditLine(e));
       console.log(`\n${events.length} entries · full machine-readable log: ${CLI} audit --json`);
       break;
+    }
+
+    case "notify": {
+      const rt = agent(stateDir);
+      const [sub, value] = args;
+
+      if (!sub) {
+        const c = rt.notifyStore.load();
+        console.log(`webhook   ${c.webhookUrl ?? "not set"}`);
+        if (c.email) {
+          const provider = c.emailProvider ?? "resend";
+          const envVar = providerEnvVar(provider);
+          const key = process.env[envVar] ? "key found" : `${envVar} is NOT set — no mail will send`;
+          console.log(`email     ${c.email}  (via ${provider}, from ${c.emailFrom ?? "wallie@resend.dev"}, ${key})`);
+        } else {
+          console.log(`email     not set`);
+        }
+        console.log(`telling you about`);
+        console.log(`  spending  at ${c.thresholds.join("%, ")}% of the allowance`);
+        console.log(`  blocks    ${c.onBlock ? "yes — every payment your rails refuse" : "no"}`);
+        console.log(`  approvals ${c.onApproval ? "yes — every payment waiting on you" : "no"}`);
+        if (!c.webhookUrl && !c.email)
+          console.log(`\nnothing is set up, so nothing is sent. Start with:\n  ${CLI} notify webhook <url>\n  ${CLI} notify email you@example.com`);
+        break;
+      }
+
+      if (sub === "off") {
+        rt.notifyStore.save({ webhookUrl: undefined, email: undefined });
+        console.log(`alerts off — nothing will be sent`);
+        break;
+      }
+
+      if (sub === "webhook") {
+        if (!value) throw new UserError(`which URL? e.g.  ${CLI} notify webhook https://hooks.slack.com/services/...`);
+        if (value === "off") {
+          rt.notifyStore.save({ webhookUrl: undefined });
+          console.log(`webhook alerts off`);
+          break;
+        }
+        let parsed: URL;
+        try {
+          parsed = new URL(value);
+        } catch {
+          throw new UserError(`"${value}" is not a URL — it should start with https://`);
+        }
+        if (parsed.protocol !== "https:" && parsed.hostname !== "localhost")
+          throw new UserError(`webhooks must be https (got ${parsed.protocol}//) — alerts name what your agent pays for`);
+        rt.notifyStore.save({ webhookUrl: value });
+        console.log(`webhook set — every alert will POST to ${parsed.host}`);
+        console.log(`check it now with:  ${CLI} notify test`);
+        break;
+      }
+
+      if (sub === "email") {
+        if (!value) throw new UserError(`which address? e.g.  ${CLI} notify email you@example.com`);
+        if (value === "off") {
+          rt.notifyStore.save({ email: undefined });
+          console.log(`email alerts off`);
+          break;
+        }
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) throw new UserError(`"${value}" does not look like an email address`);
+        const provider = (flags.via ?? rt.notifyStore.load().emailProvider ?? "resend") as "resend" | "postmark";
+        if (provider !== "resend" && provider !== "postmark")
+          throw new UserError(`--via must be resend or postmark, got "${provider}"`);
+        rt.notifyStore.save({ email: value, emailProvider: provider, emailFrom: flags.from ?? rt.notifyStore.load().emailFrom });
+        console.log(`email set — alerts go to ${value} via ${provider}`);
+        const envVar = providerEnvVar(provider);
+        if (!process.env[envVar]) {
+          console.log(`\nnothing will send yet: ${envVar} is not set in your environment.`);
+          console.log(`Get a key from ${provider === "resend" ? "resend.com" : "postmarkapp.com"}, then:`);
+          console.log(`  export ${envVar}=...`);
+        }
+        if (!flags.from) console.log(`\nsending from the provider's shared address. Use --from you@yourdomain.com once you have verified a domain.`);
+        console.log(`check it now with:  ${CLI} notify test`);
+        break;
+      }
+
+      if (sub === "test") {
+        const cfg = rt.notifyStore.load();
+        if (!cfg.webhookUrl && !cfg.email)
+          throw new UserError(`nothing to test — set a channel first:  ${CLI} notify webhook <url>`);
+        console.log(`sending one test alert on every configured channel…`);
+        const results = await deliver(cfg, {
+          event: "threshold",
+          subject: `Test alert from ${rt.agentName}`,
+          body:
+            `This is ${CLI} checking that alerts reach you.\n\n` +
+            `If you are reading this, you will also hear about: spending at ${cfg.thresholds.join("%, ")}%, ` +
+            `every payment your rails refuse, and every payment waiting on your approval.`,
+          data: { agent: rt.agentName, test: true },
+        });
+        let failed = false;
+        for (const r of results) {
+          console.log(`  ${r.ok ? "delivered" : "FAILED   "}  ${r.channel}  ${r.detail}`);
+          if (!r.ok) failed = true;
+        }
+        if (failed) process.exitCode = 1;
+        break;
+      }
+
+      throw new UserError(`unknown notify command "${sub}" — try: webhook, email, test, off`);
     }
 
     case "demo": {
