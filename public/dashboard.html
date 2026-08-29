@@ -52,6 +52,7 @@
   .note { color:var(--green); font-size:12.5px; margin-bottom:8px; }
   .footnote { color:var(--dim); font-size:12px; margin-top:10px; }
   .practice { color:var(--amber); }
+  .live { color:var(--red); font-weight:600; }
   @media (max-width:760px) {
     body { padding:16px; }
     .cards { grid-template-columns:repeat(2,1fr); }
@@ -287,6 +288,8 @@ async function refresh() {
   $("p-agent").textContent = s.agent;
   $("p-addr").textContent = s.address.slice(0, 12) + "…" + s.address.slice(-6);
   $("p-net").textContent = s.network;
+  // Practice money is amber; real money is not something to render as a caveat.
+  $("p-net").className = s.mode === "live" ? "live" : "practice";
   $("p-budget").textContent = "$" + Number(s.totalBudgetUsd).toFixed(2);
   $("p-window").textContent = "$" + Number(s.windowLimitUsd).toFixed(2) + " / " + s.windowSeconds + "s";
   $("p-approve").textContent = "$" + Number(s.requireApprovalAboveUsd).toFixed(2);

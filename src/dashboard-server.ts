@@ -2,9 +2,10 @@ import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentRuntime } from "./wallet.ts";
+import type { AllowanceRuntime } from "./wallet.ts";
 import { decideApproval, allowanceRemaining } from "./wallet.ts";
 import { effectiveBudgetMicro, policyWarnings } from "./policy.ts";
+import { describeMode, readMode } from "./mode.ts";
 import { CLI } from "./cli-name.ts";
 
 function ensureControlToken(stateDir: string): string {
@@ -35,7 +36,7 @@ function json(res: http.ServerResponse, status: number, payload: unknown): void 
  * A one-line answer to "if this blows the budget at 3am, who hears about it?"
  * — the question the dashboard cannot answer just by being open.
  */
-function describeAlerts(rt: AgentRuntime): string[] {
+function describeAlerts(rt: AllowanceRuntime): string[] {
   const cfg = rt.notifyStore.load();
   const out: string[] = [];
   if (cfg.webhookUrl) {
@@ -46,10 +47,12 @@ function describeAlerts(rt: AgentRuntime): string[] {
     }
   }
   if (cfg.email) out.push(`email to ${cfg.email}`);
+  if (cfg.sms) out.push(`sms to ${cfg.sms}`);
+  if (cfg.pushTopic) out.push(`push to ${cfg.pushTopic}`);
   return out;
 }
 
-export function startDashboard(rt: AgentRuntime, port = 4030): Promise<{ server: http.Server; token: string }> {
+export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ server: http.Server; token: string }> {
   const htmlPath = path.join(import.meta.dirname ?? ".", "..", "public", "dashboard.html");
   const token = ensureControlToken(rt.stateDir);
   const html = fs.readFileSync(htmlPath, "utf8").replace("__ALLOWANCE_TOKEN__", token);
@@ -67,7 +70,9 @@ export function startDashboard(rt: AgentRuntime, port = 4030): Promise<{ server:
         address: rt.address,
         cli: CLI,
         alerts: describeAlerts(rt),
-        network: "practice money (local simulated ledger)",
+        alertFailures: rt.notifyStore.recentFailures(3),
+        mode: rt.mode,
+        network: describeMode(readMode(rt.stateDir)),
         remainingMicro: allowanceRemaining(rt).toString(),
         fundedMicro: totals.topupsMicro.toString(),
         budgetMicro: effectiveBudgetMicro(policy, totals.topupsMicro).toString(),
@@ -84,6 +89,12 @@ export function startDashboard(rt: AgentRuntime, port = 4030): Promise<{ server:
         inFlightMicro: rt.reservations.total(rt.agentName).toString(),
         warnings: policyWarnings(policy),
         approvals: rt.approvals.list(),
+        grants: rt.approvals.activeGrants().map((g) => ({
+          id: g.id,
+          host: g.host,
+          remainingMicro: rt.approvals.remainingMicro(g).toString(),
+          expiresAt: g.expiresAt ?? null,
+        })),
         events: rt.ledger.read(),
       });
     }

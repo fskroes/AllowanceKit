@@ -6,14 +6,27 @@ import type { PayContext, UnsignedPayment } from "./payer.ts";
 import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
-import { MockChain } from "./chain.ts";
-import { buildPolicyRails, DEFAULT_AGENT_NAME } from "./wallet.ts";
+import { ReservationStore } from "./reservations.ts";
+import { NotifyStore, Notifier } from "./notify.ts";
+import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
+import { writeMode } from "./mode.ts";
+import { BalanceCache, RPC_DEFAULTS, usdcBalanceMicro } from "./usdc.ts";
 
 /**
  * Live-network agent runtime: same policy rails, approvals and audit ledger
  * as the mock agent, but payments are real x402 v1 EVM payloads
  * (EIP-3009 TransferWithAuthorization, EIP-712 signed) usable against any
  * live x402 endpoint whose seller settles through a standard facilitator.
+ *
+ * Two things separate this from the practice-money runtime, and both exist
+ * because the money is real:
+ *
+ *   - The allowance is a ceiling, not a balance. `topUp` records what a human
+ *     is willing to let the agent spend; the USDC itself arrives by being sent
+ *     to `runtime.address`. Both are enforced — see `insufficient_funds`.
+ *   - The configured network is a hard constraint. A seller quoting a chain the
+ *     agent was not configured for is refused before anything is signed, so a
+ *     testnet agent can never be talked into signing a mainnet authorization.
  *
  * Signing needs `viem`. It is intentionally an optional peer dependency so
  * the core stays zero-dependency: `npm i viem`.
@@ -60,20 +73,41 @@ export interface LiveAgentOptions {
   agentName?: string;
   /** Hex secp256k1 private key of the payer wallet ("0x…"). */
   privateKey: string;
+  /**
+   * The only chain this agent will sign for. Defaults to Base Sepolia: an
+   * agent that reaches mainnet has to be told to, in writing.
+   */
+  network?: keyof typeof NETWORKS | string;
+  /** JSON-RPC endpoint used to read the wallet's USDC balance. Defaults per network. */
+  rpcUrl?: string;
+  /** How long a balance reading stays good enough to authorize against. */
+  balanceTtlMs?: number;
+  /**
+   * Set false to spend on the allowance ledger alone, without checking that the
+   * wallet can actually cover it. Only sensible when an RPC is unreachable.
+   */
+  checkOnChainBalance?: boolean;
 }
 
-export interface LiveAgentRuntime {
-  agentName: string;
-  address: string;
-  stateDir: string;
-  ctx: PayContext;
-  ledger: Ledger;
+export interface LiveAgentRuntime extends AllowanceRuntime {
+  mode: "live";
+  network: string;
+  rpcUrl: string;
+  /** The wallet's real USDC balance right now, straight from the chain. */
+  walletBalanceMicro(): Promise<bigint>;
 }
 
 export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgentRuntime> {
   const agentName = opts.agentName ?? DEFAULT_AGENT_NAME;
   const stateDir = path.resolve(opts.stateDir);
   fs.mkdirSync(stateDir, { recursive: true });
+
+  const network = opts.network ?? "base-sepolia";
+  const info = NETWORKS[network];
+  if (!info)
+    throw new Error(`unsupported network "${network}" (known: ${Object.keys(NETWORKS).join(", ")})`);
+  const rpcUrl = opts.rpcUrl ?? RPC_DEFAULTS[network];
+  if (!rpcUrl) throw new Error(`no default RPC for "${network}" — pass rpcUrl`);
 
   let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
   try {
@@ -89,12 +123,40 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   const account = privateKeyToAccount(normalizePk(opts.privateKey));
 
   const ledger = new Ledger(stateDir);
-  const policyStore = new PolicyStore(stateDir);
-  const approvals = new ApprovalStore(stateDir);
-  // Accounting-only stub: balances are derived from the allowance ledger
-  // (topups − spend); settlement happens on-chain via the seller's facilitator.
-  const accounting = new MockChain();
-  const rails = buildPolicyRails({ agentName, address: account.address, stateDir, chain: accounting, ledger, policyStore, approvals });
+  const policyStore = new PolicyStore(stateDir, agentName);
+  const approvals = new ApprovalStore(stateDir, agentName);
+  const reservations = new ReservationStore(stateDir);
+  const notifyStore = new NotifyStore(stateDir, agentName);
+  const notifier = new Notifier(notifyStore, agentName);
+
+  const readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
+  const balances = new BalanceCache(readBalance, opts.balanceTtlMs ?? 15_000, (e) =>
+    console.warn(`could not read the wallet's USDC balance: ${e instanceof Error ? e.message : String(e)}`),
+  );
+
+  // Anyone reading this directory afterwards — the CLI, the dashboard — needs
+  // to know the money here is real before it prints "practice money" at a human.
+  writeMode(stateDir, { mode: "live", network, address: account.address, rpcUrl });
+
+  const rails = buildPolicyRails({
+    agentName,
+    address: account.address,
+    stateDir,
+    // Accounting-only: the ledger, not a simulated chain, is the balance of
+    // record here. Settlement happens on-chain via the seller's facilitator.
+    chain: {
+      sign: () => {
+        throw new Error("mock signing unavailable on a live agent");
+      },
+      balance: () => ledger.topups(agentName) - ledger.spendTotal(agentName),
+    },
+    ledger,
+    policyStore,
+    approvals,
+    reservations,
+    notifier,
+    walletBalance: opts.checkOnChainBalance === false ? undefined : () => balances.get(),
+  });
 
   const ctx: PayContext = {
     agentName,
@@ -103,13 +165,37 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       sign: () => {
         throw new Error("mock signing unavailable on a live agent");
       },
-      balance: (addr) => ledger.topups(agentName) - ledger.spendTotal(agentName),
+      balance: () => ledger.topups(agentName) - ledger.spendTotal(agentName),
     },
-    encodePayment: (unsigned) => encodePaymentEvm(account, unsigned),
+    encodePayment: async (unsigned) => {
+      if (unsigned.requirements.network !== network)
+        throw new Error(
+          `seller wants payment on "${unsigned.requirements.network}" but this agent is configured for "${network}" — ` +
+            `nothing was signed. Create the agent with network: "${unsigned.requirements.network}" if that is what you meant.`,
+        );
+      // A settled payment changes the balance; make the next authorize read it.
+      balances.invalidate();
+      return encodePaymentEvm(account, unsigned);
+    },
     ...rails,
   };
 
-  return { agentName, address: account.address, stateDir, ctx, ledger };
+  return {
+    agentName,
+    address: account.address,
+    stateDir,
+    ctx,
+    ledger,
+    policyStore,
+    approvals,
+    reservations,
+    notifyStore,
+    mode: "live",
+    network,
+    rpcUrl,
+    walletBalanceMicro: readBalance,
+    policy: () => policyStore.load(),
+  };
 }
 
 /**

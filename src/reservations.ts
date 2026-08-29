@@ -22,6 +22,8 @@ export interface Reservation {
   url: string;
   host: string;
   amountMicro: string;
+  /** The approval grant this payment draws on, so a failure can hand the budget back. */
+  grantId?: string;
 }
 
 interface ReservationFile {
@@ -58,7 +60,7 @@ export class ReservationStore {
   }
 
   /** Records an authorized-but-unsettled payment. Call inside the allowance lock. */
-  open(agent: string, url: string, host: string, amountMicro: bigint): Reservation {
+  open(agent: string, url: string, host: string, amountMicro: bigint, grantId?: string): Reservation {
     const res: Reservation = {
       id: crypto.randomBytes(6).toString("hex"),
       at: new Date().toISOString(),
@@ -66,6 +68,7 @@ export class ReservationStore {
       url,
       host,
       amountMicro: amountMicro.toString(),
+      ...(grantId ? { grantId } : {}),
     };
     this.write({ open: [...this.live(), res] });
     return res;

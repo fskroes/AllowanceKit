@@ -75,6 +75,7 @@ switch (res.blockedBy?.rule) {
   case "velocity_circuit_breaker": await sleep(res.blockedBy.retryAfterMs!); break;
   case "per_call_cap":             return tryCheaperTier(res.blockedBy.quotedMicro!, res.blockedBy.capMicro!);
   case "human_approval_required":  return askHuman(res.blockedBy.requestId!);
+  case "insufficient_funds":       return askHumanToFundWallet(res.blockedBy!.capMicro!);
   case "budget_exhausted":         return giveUp("out of allowance");
 }
 ```
@@ -112,6 +113,7 @@ The agent calls `payingFetch(ctx, url)` instead of `fetch(url)`. That handles th
 | `per_call_cap` | max price per single call | ✅ |
 | `velocity_circuit_breaker` | rolling-window spend limit (kills retry loops) | ✅ |
 | `budget_exhausted` | hard total: the agent can spend `min(totalBudgetUsd, amount funded)` | ✅ |
+| `insufficient_funds` | live rails only: the wallet's real USDC balance cannot cover the price | ✅ |
 | `human_approval_required` | escalation gate above threshold | ⏸ blocked & queued until you approve |
 | `settlement_rejected` | the seller refused the payment; nothing was spent | ✅ logged |
 
@@ -119,8 +121,17 @@ Two properties worth stating plainly:
 
 - **Authorization is atomic.** Deciding and reserving happen inside one state-dir lock, and in-flight payments count as spent until they settle. Twenty parallel `payingFetch` calls against a $1.00/60s velocity limit settle exactly $1.00 — a retry storm cannot fan out past the breaker.
 - **`totalBudgetUsd` is enforced, not decorative.** The spendable ceiling is the smaller of what you configured and what you funded.
+- **On a live rail, the wallet is checked too.** The allowance says what a human permitted; the chain says what is actually there. A payment the allowance allows but the wallet cannot cover is refused as `insufficient_funds` before anything is signed — not discovered at the facilitator. If the RPC is unreachable the rails fall back to the allowance rather than freezing the agent over someone else's outage.
 
-Approvals are real: an above-threshold call is blocked and queued (`allowance-kit approvals` or the dashboard). Approving creates a standing grant for that host+price — **it does not execute the payment**; the agent completes it on its next attempt. Every step is in the ledger.
+Approvals are real, and they are not permanent. An above-threshold call is blocked and queued (`allowance-kit approvals` or the dashboard). Approving creates a grant that **expires in 24 hours and covers exactly the amount that was approved** — one yes is one payment, not a standing licence. Widen it deliberately:
+
+```bash
+npx allowance-kit approve a1b2c3d4                        # that payment, for 24 hours
+npx allowance-kit approve a1b2c3d4 --budget 2.00          # up to $2.00 of spend to that host
+npx allowance-kit approve a1b2c3d4 --expires 2h           # or 30m, 7d, never
+```
+
+Grants draw down as payments authorize against them, and a payment that never settles hands its budget back. Approving **does not execute the payment**; the agent completes it on its next attempt. Every step is in the ledger.
 
 The kill switch and approval queue are **token-gated**: mutating dashboard endpoints require the local control token (auto-generated into `.allowance/dashboard-token`, injected into the served UI).
 
@@ -133,15 +144,29 @@ init                            provision the agent wallet in ./.allowance
 topup <usd>                     add to the allowance
 status                          what is left, what the limits are, what needs you
 policy [field value]            show or change one limit
-approvals                       payments waiting for your decision
-approve <id> | deny <id>        decide one
+approvals                       payments waiting for your decision, and live grants
+approve <id> | deny <id>        decide one (--budget <usd>, --expires <30m|2h|7d|never>)
 audit [--json]                  the full spending history
-notify [webhook|email|test|off] where alerts are sent, and on what
+notify [webhook|email|sms|push|heartbeat|test|off]   where alerts are sent, and on what
+agents                          every agent sharing this state directory
 dashboard [--port <n>]          live dashboard (default http://localhost:4030)
 demo                            run the built-in demo into ./.allowance-demo
 
 --state <dir>                   state directory (default ./.allowance, or $ALLOWANCE_STATE_DIR)
+--agent <name>                  which agent in that directory (default research-agent, or $ALLOWANCE_AGENT)
 ```
+
+### More than one agent in one directory
+
+Every command takes `--agent`. Limits, allowances, approvals and alert settings are per agent; the audit ledger is shared and every row is tagged.
+
+```bash
+npx allowance-kit topup 3.00 --agent writer-agent
+npx allowance-kit policy perCallMaxUsd 0.02 --agent writer-agent
+npx allowance-kit agents        # what is in this directory, and what each has left
+```
+
+The first agent keeps the original file names (`config.json`, `agent.json`), so a directory written by an earlier version reads back unchanged.
 
 Limits: `totalBudgetUsd`, `perCallMaxUsd`, `windowLimitUsd`, `windowSeconds`, `requireApprovalAboveUsd`, `allowHostSuffixes`, `blockedHosts`, `killSwitch`. Unknown fields are rejected, not silently written, and combinations where one rail shadows another produce a warning.
 
@@ -158,6 +183,9 @@ A dashboard only helps someone who is looking at it. The runs that hurt happen o
 ```bash
 npx allowance-kit notify webhook https://hooks.slack.com/services/...   # Slack, Discord, Zapier, your own server
 npx allowance-kit notify email you@example.com --from alerts@you.com    # needs a provider key, below
+npx allowance-kit notify sms +31612345678                               # needs Twilio keys, below
+npx allowance-kit notify push my-agent-alerts                           # ntfy.sh — no account, no key
+npx allowance-kit notify heartbeat https://hc-ping.com/<uuid>           # a dead-man's switch, see below
 npx allowance-kit notify test                                           # send one of each now, report delivery
 npx allowance-kit notify                                                # show what is set up
 npx allowance-kit notify off                                            # stop sending anything
@@ -169,16 +197,30 @@ You get told about three things:
 - **Every block** — which rail refused, what it tried to pay, and that nothing moved.
 - **Every payment waiting on you**, with the `approve` and `deny` commands to settle it.
 
-Email goes through a provider's REST API, not SMTP, so the package keeps its zero-dependency promise. Set one key in your environment — **never in a config file**:
+Every channel is an HTTP POST made with the platform's own `fetch` — email and SMS go through a provider's REST API rather than SMTP or a vendor SDK, so the package keeps its zero-dependency promise. Keys live in your environment, **never in a config file**:
 
 ```bash
 export RESEND_API_KEY=...        # for --via resend (the default)
 export POSTMARK_API_TOKEN=...    # for --via postmark
+export TWILIO_ACCOUNT_SID=... TWILIO_AUTH_TOKEN=... TWILIO_FROM=+1...   # for notify sms
 ```
 
-`notifications.json` in the state dir holds the address and the provider. It never holds the key, so it is safe to read, copy, or paste into a bug report.
+Push needs nothing at all: pick a topic, install the [ntfy](https://ntfy.sh) app, subscribe. Anyone who knows the topic name can read it, so pick something unguessable.
 
-Alerts are best-effort by construction: delivery is never awaited inside the ledger lock, a webhook that hangs cannot slow a payment down, and one that errors cannot fail one. `notify test` is how you find out whether it works, rather than discovering it at 3am.
+`notifications.json` in the state dir holds addresses and providers. It never holds a key, so it is safe to read, copy, or paste into a bug report.
+
+**Delivery is retried, and failures are written down.** A timeout, a 429 or a 5xx is tried three times with backoff; a 401 is not retried, because a wrong key is wrong three times too. Anything that still never arrived lands in `notify-failures.jsonl` and is surfaced by `notify` and `status`. Alerts remain best-effort by construction — never awaited inside the ledger lock, so a webhook that hangs cannot slow a payment down and one that errors cannot fail one. The ledger, not your inbox, is the record of what happened.
+
+### When the machine itself goes quiet
+
+Nothing running on your laptop can tell you that your laptop is off. Something outside it can:
+
+```bash
+npx allowance-kit notify heartbeat https://hc-ping.com/<uuid>
+npx allowance-kit dashboard        # pings that URL every 60s while it runs
+```
+
+Point [healthchecks.io](https://healthchecks.io), Cronitor or your own monitor at that URL and it alerts you when the pings stop. That is the honest shape of the guarantee: the free channels fire while the agent is running somewhere you control, and a dead-man's switch covers the case where it is not.
 
 ## Architecture
 
@@ -234,13 +276,36 @@ paymentGate(
 ### Live networks
 
 ```ts
-import { payingFetch, createLiveAgent } from "allowance-kit";
+import { payingFetch, createLiveAgent, topUp } from "allowance-kit";
 
-const live = await createLiveAgent({ stateDir: ".allowance", privateKey: process.env.AGENT_KEY! });
+const live = await createLiveAgent({
+  stateDir: ".allowance",
+  privateKey: process.env.AGENT_KEY!,
+  network: "base-sepolia",              // "base" is mainnet — ask for it explicitly
+});
+
+topUp(live, 5);                         // the ceiling you allow out of that wallet
+live.policyStore.save({ allowHostSuffixes: ["some-live-x402-api.com"] });
+
 const res = await payingFetch(live.ctx, "https://some-live-x402-api.com/data");
 ```
 
+**The allowance and the wallet are two different numbers, and both are enforced.** `topUp` records what you are willing to let the agent spend; the USDC itself arrives by being sent to `live.address`. A payment inside the allowance that the wallet cannot cover is refused as `insufficient_funds` before anything is signed. Check both at once with `allowance-kit status`, which prints the wallet's real balance on a live directory.
+
+The directory is marked live the moment `createLiveAgent` touches it, so the CLI and the dashboard stop saying "practice money" and start saying `REAL MONEY — payments settle in USDC on base-sepolia`. Funding from the CLI on a live directory says plainly that it raised a ceiling and moved nothing.
+
+`network` is a hard constraint, not a hint: a seller quoting a chain the agent was not configured for is refused before signing, so a testnet agent can never be talked into signing a mainnet authorization.
+
 Signing needs the optional peer dependency [`viem`](https://viem.sh) (`npm i viem`); everything else stays zero-dep. Policy, approvals, kill switch and the audit ledger apply identically to simulated and live spending.
+
+Prove the whole path before trusting it with anything:
+
+```bash
+node --env-file=.env scripts/canary.ts --buyer                  # Base Sepolia, free faucet USDC
+node --env-file=.env scripts/canary.ts --buyer --network base   # mainnet, real money
+```
+
+It funds a $0.20 allowance with a $0.05 per-call cap, settles a real $0.01 payment through a CDP facilitator, then tightens the cap and checks the next payment is refused — and fails loudly if the audit ledger does not show exactly one payment and one block.
 
 ## Demo output (abridged)
 
@@ -274,13 +339,42 @@ See [BUSINESS.md](BUSINESS.md).
 
 ## Honest limitations
 
-- Default settlement is a local mock ledger — **all funds are simulated**. Real settlement ships two ways: sellers settle real USDC via `CdpFacilitator`, buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`). Untested against mainnet until first live transaction — treat the first runs as canary.
-- **Alerts go out over webhook and email only.** There is no SMS and no push. Email needs a Resend or Postmark key you supply; without one, nothing sends and `notify` says so plainly rather than failing quietly.
-- **Alerts are best-effort, not guaranteed.** They are fired without being awaited so they can never fail a payment, which also means a dropped webhook is not retried. The ledger, not your inbox, is the record of what happened.
-- The CLI manages a single agent per state dir; multi-agent is a schema change (`agentName` already threads everywhere).
-- Approved grants are standing per host+amount — no expiry and no per-grant spend cap yet.
-- The dashboard binds to `127.0.0.1` and gates all mutations behind a token, but `GET /api/state` is unauthenticated to anything already on the loopback interface.
+- Default settlement is a local mock ledger — **all funds are simulated** until you deliberately wire a real rail. Sellers settle real USDC via `CdpFacilitator`; buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`).
+- **The live buyer path is proven on Base Sepolia, not yet on mainnet.** `scripts/canary.ts --buyer` settles a real testnet USDC payment through a CDP facilitator inside real rails and checks the ledger afterwards. The same command with `--network base` runs it on mainnet; nobody has run that yet. Treat the first mainnet runs as canary.
+- **Alerts are best-effort, not guaranteed.** Retried three times with backoff, then recorded in `notify-failures.jsonl` — but never awaited inside the ledger lock, so a payment is never delayed or failed by a broken channel. The ledger, not your inbox, is the record of what happened.
+- **Free alerts only fire while the agent is running on a machine you control.** `notify heartbeat` plus an outside monitor covers the case where it is not; genuinely hosted alerting is not built.
+- SMS needs a Twilio account and costs money per message. Push over ntfy is unauthenticated by design: anyone who knows the topic name can read your alerts.
+- The on-chain balance check reads USDC over a public RPC and caches it for 15 seconds, so a payment can be authorized against a reading that is up to 15 seconds stale. Bring your own `rpcUrl` for anything busy.
+- Several agents can share a state dir, but they share one lock, so a very busy agent serialises the others' authorizations.
+- The dashboard binds to `127.0.0.1` and gates all mutations behind a token, but `GET /api/state` is unauthenticated to anything already on the loopback interface. It also shows one agent at a time.
 - npm ships compiled `dist/` (ESM + `.d.ts`, zero runtime deps).
+
+## Changes in 0.4.0
+
+The release that makes real money work, and makes a "yes" stop meaning "yes, forever".
+
+Breaking:
+
+- **Approval grants expire and have a budget.** `approve <id>` now covers exactly the amount that was approved, for 24 hours, and draws down as payments authorize against it. Previously a single yes was a standing licence for that host and price. `--budget <usd>` and `--expires <30m|2h|7d|never>` widen it deliberately; `decideApproval(rt, id, true, { budgetMicro, expiresInMs })` is the SDK equivalent.
+- `PolicyRule` gained `insufficient_funds`. Exhaustive `switch` statements over it need a new arm.
+- `topUp`, `decideApproval` and `allowanceRemaining` take `AllowanceRuntime` — a live agent and a practice agent both satisfy it. `AgentRuntime` extends it and still carries `chain: MockChain`.
+- `ApprovalStore`, `PolicyStore` and `NotifyStore` take an optional agent name and scope themselves to it.
+
+Fixed:
+
+- **A live agent could not be funded at all.** `topUp()` reached for the mock chain's faucet, which a live runtime does not have, so it threw — and every real payment was refused as `budget_exhausted` against a $0.00 allowance. The documented live snippet could not make a single payment. It now records the ceiling without a faucet.
+- **The CLI told a live directory it was practice money.** `init`, `topup` and `status` printed "no real money can move" over an allowance governing real USDC, and showed a simulated address instead of the payer. A directory is now marked when `createLiveAgent` claims it, and every reader says `REAL MONEY — payments settle in USDC on <network>`.
+
+Added:
+
+- **The wallet is reconciled against the chain.** A live agent reads its real USDC balance over plain JSON-RPC and refuses payments the wallet cannot cover (`insufficient_funds`) before signing, instead of discovering it at the facilitator. Cached for 15s and fail-open: an unreachable node falls back to the allowance rather than freezing the agent.
+- **`network` is a hard constraint on a live agent.** A seller quoting a different chain is refused before anything is signed. Defaults to `base-sepolia`.
+- **SMS and push.** `notify sms <e164>` over Twilio, `notify push <topic>` over ntfy (no account, no key).
+- **Alerts are retried and failures are recorded.** Three attempts with backoff for anything retrying can fix, none for a 401, and whatever still never arrived lands in `notify-failures.jsonl` and is surfaced by `notify` and `status`.
+- **`notify heartbeat <url>`** — a dead-man's switch pinged while the dashboard runs, so an outside monitor can alert you when this machine goes quiet.
+- **Several agents per state directory.** `--agent <name>` on every command, per-agent limits, allowances, approvals and alert settings, and `allowance-kit agents` to list them. The first agent keeps the original file names.
+- `scripts/canary.ts --buyer [--network base]` — the buyer runtime end to end: real settlement inside real rails, with the ledger checked afterwards.
+- New exports: `AllowanceRuntime`, `listAgents`, `modeOf`, `readMode`, `writeMode`, `describeMode`, `describeTopUp`, `usdcBalanceMicro`, `BalanceCache`, `RPC_DEFAULTS`, `RpcError`, `startHeartbeat`, `DEFAULT_GRANT_TTL_MS`, `policyFileName`, `TWILIO_ENV`, and the `DecideOptions` / `DeliveryResult` / `DeliveryFailure` / `ModeInfo` / `SettlementMode` types.
 
 ## Changes in 0.3.0
 

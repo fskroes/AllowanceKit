@@ -72,12 +72,35 @@ guarantee in the product. Instead the ordering stands and `policy`/`status` warn
    broken one cannot fail it.
 4. ~~**Publishing 0.2.0**~~ — done.
 
+**Resolved 2026-08-29 (0.4.0)** — a production-readiness pass found the live buyer path was
+broken end to end, and closed it along with everything left on the list above.
+
+| Finding | Verification |
+|---|---|
+| `topUp()` threw on a live agent, so every real payment was refused as `budget_exhausted` against a $0.00 allowance — the README's live snippet could not make one payment | `topUp` records the ceiling without a faucet · test: *a live agent can be funded…* |
+| The CLI printed "practice money" and a simulated address over a directory governing real USDC | `createLiveAgent` marks the directory; `init`/`topup`/`status`/dashboard all read it · test: *a directory a live agent claimed…* |
+| The allowance was pure bookkeeping on a live rail — a wallet holding $0 passed every rail and failed at the facilitator | live agents read USDC over JSON-RPC and refuse with `insufficient_funds` before signing · tests: *a payment the allowance permits but the wallet cannot cover…*, *a live agent's rails consult the chain…* |
+| Nothing stopped a testnet agent signing a mainnet authorization | `network` is a hard constraint, checked before signing · test: *refuses to sign for a chain it was not configured for* |
+| The live buyer path had never been exercised end to end | `scripts/canary.ts --buyer` — real $0.01 USDC settled on Base Sepolia through CDP, inside a $0.20 allowance and a $0.05 per-call cap, over-cap payment refused, ledger checked. Passed 2026-08-29 |
+| SMS and push (P4.2) | `notify sms` over Twilio, `notify push` over ntfy · tests in `notify-channels.test.ts` |
+| Dropped alerts were not retried | 3 attempts with backoff for retryable failures, none for a 401, failures recorded to `notify-failures.jsonl` · test: *an alert that never arrives is written down* |
+| Grants were standing per host+amount, with no expiry and no cap | grants expire in 24h, cover the approved amount, draw down, and refund on a failed payment · `grants.test.ts` |
+| One agent per state dir | `--agent` everywhere, per-agent limits/allowance/approvals/alerts, `agents` command · test: *two agents in one directory…* |
+
+`npm test`: 65/65 as of 0.4.0.
+
 **What is genuinely left**
 
-- SMS and push. Webhook and email only, for now.
-- Alerts are fire-and-forget, so a dropped webhook is not retried. The ledger is the record.
-- Free alerts only fire while the agent is running on a machine you control. Alerting that works
-  when your laptop is shut is the thing Cloud is for, and it is not built.
+- **The mainnet canary has not run.** The code path is wired and one command away
+  (`scripts/canary.ts --buyer --network base`), but the canary wallet holds $0.00 USDC on Base.
+  It is blocked on funding, not on code.
+- **No CI.** `npm test` still runs only when someone types it. Deliberately out of scope for now.
+- Free alerts only fire while the agent is running on a machine you control. `notify heartbeat`
+  plus an outside monitor covers the silence; genuinely hosted alerting is still what Cloud is for,
+  and it is not built.
+- The on-chain balance is cached for 15 seconds, so an authorization can be made against a reading
+  that stale. Public RPCs also rate-limit; bring your own for anything busy.
+- Several agents share one state-dir lock, so a busy agent serialises the others' authorizations.
 
 **The strategic finding stands.** P4 is not a bug list. For someone whose problem is a metered API
 invoice on a card, this still caps nothing they are billed for. The README now says that in the

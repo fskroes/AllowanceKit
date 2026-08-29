@@ -14,6 +14,7 @@ export type PolicyRule =
   | "per_call_cap"
   | "velocity_circuit_breaker"
   | "budget_exhausted"
+  | "insufficient_funds"
   | "human_approval_required"
   | "settlement_rejected";
 
@@ -25,6 +26,7 @@ export const RULE_LABELS: Record<PolicyRule, string> = {
   per_call_cap: "Over your per-payment limit",
   velocity_circuit_breaker: "Too much, too fast",
   budget_exhausted: "Allowance used up",
+  insufficient_funds: "Wallet is short of real funds",
   human_approval_required: "Waiting for your approval",
   settlement_rejected: "Payment refused by the seller",
 };
@@ -68,6 +70,17 @@ export const POLICY_FIELDS = {
 } as const;
 
 export type PolicyField = keyof typeof POLICY_FIELDS;
+
+/** The default agent's limits live in `config.json`; every other agent gets its own file. */
+export function policyFileName(agentName?: string): string {
+  return !agentName || agentName === defaultPolicy.agentName ? "config.json" : `config.${slug(agentName)}.json`;
+}
+
+/** Agent names reach the filesystem, so they are reduced to something that cannot escape it. */
+export function slug(agentName: string): string {
+  const cleaned = agentName.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  return cleaned || "agent";
+}
 
 function nearest(field: string): string | undefined {
   const keys = Object.keys(POLICY_FIELDS);
@@ -137,10 +150,16 @@ export function policyWarnings(p: RuntimePolicy): string[] {
 export class PolicyStore {
   private file: string;
 
-  constructor(stateDir: string) {
+  /**
+   * Limits are per agent, but the first agent in a directory keeps the
+   * unsuffixed `config.json` so a state dir written by an earlier version
+   * still reads back with the same limits.
+   */
+  constructor(stateDir: string, agentName?: string) {
     fs.mkdirSync(stateDir, { recursive: true });
-    this.file = path.join(stateDir, "config.json");
-    if (!fs.existsSync(this.file)) fs.writeFileSync(this.file, JSON.stringify(defaultPolicy, null, 2));
+    this.file = path.join(stateDir, policyFileName(agentName));
+    if (!fs.existsSync(this.file))
+      fs.writeFileSync(this.file, JSON.stringify({ ...defaultPolicy, agentName: agentName ?? defaultPolicy.agentName }, null, 2));
   }
 
   load(): RuntimePolicy {
@@ -178,6 +197,13 @@ export interface PolicyContext {
   spendTotalMicro: bigint;
   topupsMicro: bigint;
   windowSpendMicro: bigint;
+  /**
+   * Live rails only: what the payer wallet actually holds on-chain, minus
+   * anything already authorized and not yet settled. Left undefined on
+   * practice money and whenever the chain could not be read, in which case the
+   * allowance ledger is the only ceiling.
+   */
+  walletBalanceMicro?: bigint;
 }
 
 /** The spendable ceiling: you can never exceed what you funded, nor the configured budget. */
@@ -254,6 +280,19 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       capMicro: budget,
     };
   }
+
+  if (ctx.walletBalanceMicro !== undefined && ctx.walletBalanceMicro < ctx.amountMicro)
+    return {
+      allowed: false,
+      rule: "insufficient_funds",
+      detail:
+        `the wallet holds ${fmtUsd(ctx.walletBalanceMicro < 0n ? 0n : ctx.walletBalanceMicro)} of spendable USDC, ` +
+        `below the ${fmtUsd(ctx.amountMicro)} price. The allowance allows this payment; the wallet cannot cover it. ` +
+        `Send USDC to the agent's wallet.`,
+      recoverable: true,
+      quotedMicro: ctx.amountMicro,
+      capMicro: ctx.walletBalanceMicro < 0n ? 0n : ctx.walletBalanceMicro,
+    };
 
   return { allowed: true };
 }

@@ -156,7 +156,7 @@ test("the webhook payload is shaped for Slack and for machines at the same time"
       data: { host: "api.example.com", rule: "per_call_cap" },
     });
 
-    assert.deepEqual(results, [{ channel: "webhook", ok: true, detail: "200" }]);
+    assert.deepEqual(results, [{ channel: "webhook", ok: true, detail: "200", attempts: 1 }]);
     const body = hook.bodies[0] as Record<string, unknown>;
     assert.equal(body.text, "Agent was stopped\nIt tried to pay $0.90.", "Slack renders `text`");
     assert.equal(body.content, body.text, "Discord renders `content`");

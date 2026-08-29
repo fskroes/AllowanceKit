@@ -1,6 +1,6 @@
 {
   "name": "allowance-kit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The missing buyer-side runtime for x402: fund your AI agent once; it pays any x402 API autonomously inside hard policy rails \u2014 budgets, per-call caps, velocity circuit breakers, host allowlists, kill switch, audit ledger.",
   "type": "module",
   "license": "MIT",
