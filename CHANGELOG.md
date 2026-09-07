@@ -10,6 +10,8 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-07
+
 Working toward `0.5.0` — "mainnet-proven": a CLI front door for real money, x402
 version compatibility, and release hygiene.
 
@@ -160,7 +162,8 @@ The release that makes real money work, and makes a "yes" stop meaning "yes, for
   rails (budget, per-call cap, velocity circuit breaker, host allowlist, kill switch),
   the append-only audit ledger, and practice-money settlement on a local mock chain.
 
-[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/fskroes/AllowanceKit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fskroes/AllowanceKit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fskroes/AllowanceKit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fskroes/AllowanceKit/compare/v0.1.1...v0.2.0
