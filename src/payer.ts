@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { AcceptsEntry, PaymentPayload, PaymentRequiredBody, SettleResult } from "./types.ts";
+import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import type { PolicyRule, RuntimePolicy } from "./policy.ts";
 
 /**
@@ -116,20 +117,74 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
   }
   if (first.status !== 402) return wrapPlain(first);
 
-  const required = (await first.json()) as PaymentRequiredBody;
-  const offer = required.accepts?.[0];
-  if (!offer)
+  // Parse the 402 challenge. A v1 seller carries it in the JSON body; a v2
+  // seller carries it in the base64 `PAYMENT-REQUIRED` header and often leaves
+  // the body literally `{}` (x402-compat.md §4c, §5). Read both, detect the
+  // version from `x402Version`, and answer in kind. Reading only the body — as
+  // v1 did — mis-reports every reference-SDK v2 seller as "no payment methods".
+  const bodyText = await first.text();
+  let bodyJson: PaymentRequiredBody | undefined;
+  try {
+    bodyJson = bodyText ? (JSON.parse(bodyText) as PaymentRequiredBody) : undefined;
+  } catch {}
+
+  let headerJson: PaymentRequiredBody | undefined;
+  const challengeHeader = first.headers.get("payment-required");
+  if (challengeHeader) {
+    try {
+      headerJson = JSON.parse(Buffer.from(challengeHeader, "base64").toString("utf8")) as PaymentRequiredBody;
+    } catch {}
+  }
+
+  // Prefer whichever source actually carries an `accepts[]`; the header is v2's
+  // canonical location, the body is v1's.
+  const challenge =
+    (headerJson?.accepts?.length ? headerJson : undefined) ??
+    (bodyJson?.accepts?.length ? bodyJson : undefined) ??
+    headerJson ??
+    bodyJson;
+  const isV2 = Number(headerJson?.x402Version ?? bodyJson?.x402Version ?? 1) >= 2;
+
+  const rawOffer = challenge?.accepts?.[0];
+  if (!rawOffer)
     return {
       ok: false,
       status: 402,
-      body: required,
-      raw: "",
+      body: (bodyJson ?? headerJson ?? null) as never,
+      raw: bodyText,
       costMicro: 0n,
       quotedMicro: 0n,
       error: "seller returned 402 with no acceptable payment methods",
     };
 
-  const amountMicro = BigInt(offer.maxAmountRequired);
+  const amountStr = offerAmount(rawOffer);
+  if (amountStr === undefined || !/^\d+$/.test(amountStr))
+    return {
+      ok: false,
+      status: 402,
+      body: (bodyJson ?? headerJson ?? null) as never,
+      raw: bodyText,
+      costMicro: 0n,
+      quotedMicro: 0n,
+      error: "seller returned 402 with no usable amount",
+    };
+
+  // Normalize the seller's offer into a single v1-shaped entry so everything
+  // downstream (authorize, the encoder, the facilitator) reads one field set.
+  // v2 puts the resource url in a top-level object, so fall back to it, then to
+  // the request url. Both `amount` and `maxAmountRequired` are kept populated.
+  const topResource = challenge?.resource;
+  const topResourceUrl = typeof topResource === "string" ? topResource : topResource?.url;
+  const offer: AcceptsEntry = {
+    ...rawOffer,
+    amount: amountStr,
+    maxAmountRequired: amountStr,
+    payTo: offerPayTo(rawOffer),
+    asset: offerAsset(rawOffer),
+    resource: rawOffer.resource ?? topResourceUrl ?? url,
+  };
+
+  const amountMicro = BigInt(amountStr);
   const decision = await ctx.authorize(amountMicro, url);
   if (!decision.allowed) {
     const blockedBy = blockDetails(decision);
@@ -144,27 +199,31 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
 
   const nonce = crypto.randomBytes(16).toString("hex");
   const unsigned: UnsignedPayment = {
-    x402Version: 1,
+    // Answer in the version the seller spoke (x402-compat.md §6.4).
+    x402Version: isV2 ? 2 : 1,
     scheme: offer.scheme,
     network: offer.network,
-    resource: offer.resource,
+    resource: offer.resource ?? url,
     from: ctx.address,
-    payTo: offer.payTo,
-    amount: offer.maxAmountRequired,
+    payTo: offer.payTo ?? "",
+    amount: amountStr,
     nonce,
     timestamp: Date.now(),
     requirements: offer,
   };
+
+  // v2 renamed the wire headers: the payment goes up in `PAYMENT-SIGNATURE`
+  // (not `X-PAYMENT`) and the receipt comes back in `PAYMENT-RESPONSE` (not
+  // `X-PAYMENT-RESPONSE`). See x402-compat.md §5.
+  const paymentHeaderName = isV2 ? "PAYMENT-SIGNATURE" : "X-PAYMENT";
 
   let encoded: string;
   let paid: Response;
   try {
     encoded = ctx.encodePayment
       ? await ctx.encodePayment(unsigned)
-      : Buffer.from(
-          JSON.stringify({ ...unsigned, signature: ctx.chain.sign(ctx.address, unsigned) }),
-        ).toString("base64");
-    paid = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), "X-PAYMENT": encoded } });
+      : encodeDefaultPayment(unsigned, ctx.chain.sign(ctx.address, unsigned));
+    paid = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), [paymentHeaderName]: encoded } });
   } catch (e) {
     // Signing or the network failed — the money never left, so free the hold.
     await release();
@@ -188,17 +247,21 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
     body = JSON.parse(raw);
   } catch {}
 
-  const receiptHeader = paid.headers.get("x-payment-response");
+  const receiptHeader = paid.headers.get(isV2 ? "payment-response" : "x-payment-response");
   let txHash: string | undefined;
   let settledMicro = 0n;
   if (receiptHeader) {
     try {
       const receipt = JSON.parse(Buffer.from(receiptHeader, "base64").toString("utf8")) as SettleResult & {
-        amountMicro: string;
+        amountMicro?: string;
+        transaction?: string;
       };
-      txHash = receipt.txHash;
-      settledMicro = BigInt(receipt.amountMicro);
-      await ctx.recordPayment(url, host, settledMicro, receipt.txHash ?? "", reservationId);
+      // v2 SettlementResponse names the hash `transaction`; v1 uses `txHash`.
+      txHash = receipt.transaction ?? receipt.txHash;
+      // v1 receipts carry `amountMicro`; a v2 receipt need not, so fall back to
+      // the amount we authorized and settled against.
+      settledMicro = receipt.amountMicro !== undefined ? BigInt(receipt.amountMicro) : amountMicro;
+      await ctx.recordPayment(url, host, settledMicro, txHash ?? "", reservationId);
     } catch {
       txHash = undefined;
     }
@@ -237,6 +300,33 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
     quotedMicro: amountMicro,
     txHash,
   };
+}
+
+/**
+ * Fallback encoder for contexts without a real signer (the mock chain). It
+ * mirrors the two wire shapes so a mock buyer can answer either seller:
+ *   - v1: the flat `{ …unsigned, signature }` shape the mock ledger settles.
+ *   - v2: the nested `{ x402Version:2, accepted, payload:{…} }` shape (spec
+ *     §5.2.2). The mock signer yields a flat signature rather than an EIP-3009
+ *     authorization, so we synthesize the `payload.authorization` fields a
+ *     seller checks (`flatAmount`/`payeeOf` read `payload.authorization`).
+ * A live agent overrides this via `ctx.encodePayment` (src/live.ts), which
+ * signs a real EIP-712 authorization for the same two shapes.
+ */
+function encodeDefaultPayment(unsigned: UnsignedPayment, signature: string): string {
+  if (unsigned.x402Version >= 2) {
+    const payloadV2 = {
+      x402Version: 2,
+      resource: unsigned.resource,
+      accepted: unsigned.requirements,
+      payload: {
+        signature,
+        authorization: { from: unsigned.from, to: unsigned.payTo, value: unsigned.amount },
+      },
+    };
+    return Buffer.from(JSON.stringify(payloadV2)).toString("base64");
+  }
+  return Buffer.from(JSON.stringify({ ...unsigned, signature })).toString("base64");
 }
 
 async function wrapPlain(res: Response): Promise<PaidResult> {
