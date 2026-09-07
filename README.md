@@ -361,7 +361,8 @@ See [BUSINESS.md](BUSINESS.md).
 
 ## Honest limitations
 
-- Default settlement is a local mock ledger — **all funds are simulated** until you deliberately wire a real rail. Sellers settle real USDC via `CdpFacilitator`; buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`).
+- Default settlement is a local mock ledger — **all funds are simulated** until you deliberately wire a real rail. Sellers settle real USDC via `CdpFacilitator`; buyers sign real x402 payments via `createLiveAgent` (needs optional `viem`).
+- **The buyer speaks x402 v1 and v2, but has not yet settled against a live third-party seller.** The live ecosystem has moved to v2 (CAIP-2 networks, `PAYMENT-*` headers — see [docs/x402-compat.md](docs/x402-compat.md)); the buyer detects the version and answers in kind. That v2 path is proven against in-repo mocks built from real sellers' recorded 402s, not yet against a live seller on the network — no such run is recorded in [docs/canary-runs/](docs/canary-runs/) yet. The `CdpFacilitator` v2 body follows the spec but has not been round-tripped against real CDP.
 - **The live buyer path is proven on Base Sepolia, not yet on mainnet.** `scripts/canary.ts --buyer` settles a real testnet USDC payment through a CDP facilitator inside real rails and checks the ledger afterwards. The same command with `--network base` runs it on mainnet; nobody has run that yet. Treat the first mainnet runs as canary.
 - **Alerts are best-effort, not guaranteed.** Retried three times with backoff, then recorded in `notify-failures.jsonl` — but never awaited inside the ledger lock, so a payment is never delayed or failed by a broken channel. The ledger, not your inbox, is the record of what happened.
 - **Free alerts only fire while the agent is running on a machine you control.** `notify heartbeat` plus an outside monitor covers the case where it is not; genuinely hosted alerting is not built.

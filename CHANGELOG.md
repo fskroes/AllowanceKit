@@ -27,18 +27,26 @@ version compatibility, and release hygiene.
 - **Mainnet guardrails.** On Base mainnet, `init --live --network base` requires a
   typed confirmation (or `--yes` for scripts), a top-up over $50 requires `--yes`, and
   every `policy` change prints a `REAL MONEY` reminder.
-- `docs/x402-compat.md` — primary-sourced findings on x402 v1 vs v2 (the live
-  ecosystem has moved to v2; see below).
+- **x402 v2 alongside v1 in the buyer.** `payingFetch` detects the version from
+  `x402Version` (in the `PAYMENT-REQUIRED` header or the body), reads the challenge from
+  wherever the seller put `accepts[]` (v2 often leaves the body empty), and answers in
+  kind — `PAYMENT-SIGNATURE`/`PAYMENT-RESPONSE` headers, the `amount` field, CAIP-2
+  networks (`eip155:8453` ↔ `base`), and the nested v2 payload. v1 is untouched.
+- `docs/x402-compat.md` — primary-sourced findings on x402 v1 vs v2 that drove the above.
 - Continuous integration (`.github/workflows/ci.yml`): build, pack and audit on Node
   20.11 / 22 / 24, full test suite on 24.
 - This `CHANGELOG.md` and a `SECURITY.md`; annotated git tags for every past release.
 
 ### Known
 
-- **The live buyer path speaks x402 v1 only, and the live ecosystem has moved to v2.**
-  Real payments settle against our own v1 `paymentGate`, but not yet against
-  third-party sellers in the Coinbase CDP directory. Adding v2 alongside v1 is
-  tracked as ticket L-02. See `docs/x402-compat.md`.
+- **No real third-party seller has been paid yet.** The v2 buyer is proven against
+  in-repo mock sellers built from the recorded live wire shapes (`docs/x402-compat.md`
+  §4), not yet against a live seller on the network — that canary run (ticket L-02's
+  acceptance test) needs a funded testnet wallet and is not recorded in
+  `docs/canary-runs/` yet.
+- **The `CdpFacilitator` v2 body is written but not round-tripped against real CDP** —
+  it needs CDP credentials and a signed payload to verify. It defaults to v1.
+- **Mainnet has never been exercised.** The buyer path is proven on Base Sepolia only.
 
 ## [0.4.0] — 2026-08-29
 
