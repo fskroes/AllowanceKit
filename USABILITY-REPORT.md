@@ -91,9 +91,12 @@ broken end to end, and closed it along with everything left on the list above.
 
 **What is genuinely left**
 
-- **The mainnet canary has not run.** The code path is wired and one command away
-  (`scripts/canary.ts --buyer --network base`), but the canary wallet holds $0.00 USDC on Base.
-  It is blocked on funding, not on code.
+- **The mainnet canary has run (2026-09-07).** `scripts/canary.ts --buyer --network base` settled
+  a real $0.01 USDC payment on Base through the buyer runtime — inside real rails, over-cap payment
+  refused, ledger clean. Tx `0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e`
+  ([BaseScan](https://basescan.org/tx/0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e)),
+  recorded in [docs/canary-runs/2026-09-07-base.md](docs/canary-runs/2026-09-07-base.md). It is one
+  canary run, not sustained traffic.
 - **No CI.** `npm test` still runs only when someone types it. Deliberately out of scope for now.
 - Free alerts only fire while the agent is running on a machine you control. `notify heartbeat`
   plus an outside monitor covers the silence; genuinely hosted alerting is still what Cloud is for,

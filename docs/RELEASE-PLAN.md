@@ -66,7 +66,7 @@ the implementation order. Workstreams can run in parallel where the dependency l
 | Practice path | Complete: CLI, SDK, dashboard, demo, alerts, approvals with expiring grants, multi-agent state dirs. |
 | Live path (SDK) | `createLiveAgent` signs real x402 **v1** EVM payloads (EIP-3009) on `base-sepolia` and `base`. On-chain USDC balance check over public JSON-RPC, 15 s cache, fail-open. Network is a hard constraint. |
 | Live path (CLI) | **Cannot be started from the CLI.** Only code that calls `createLiveAgent` with a private key marks a directory live. `init`, `topup`, `status`, `dashboard` merely *read* `mode.json`. A non-coder cannot use real money. |
-| Mainnet | **Never exercised.** `scripts/canary.ts --buyer --network base` exists; the canary wallet holds $0.00 USDC on Base. Testnet canary passed 2026-08-29. |
+| Mainnet | **Exercised 2026-09-07 (M-02).** `scripts/canary.ts --buyer --network base` settled a real $0.01 USDC payment on Base; tx `0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e`, recorded in `docs/canary-runs/2026-09-07-base.md`. Testnet canary passed 2026-08-29. |
 | x402 version | v1 only (`X-PAYMENT` / `X-PAYMENT-RESPONSE`, `x402Version: 1`, bare network names). No v2 support. Whether live sellers still answer v1 must be verified (ticket L-01). |
 | Facilitator | Coinbase CDP only (`facilitator-cdp.ts`, ES256 JWT). Sellers' side. Buyers depend on whatever facilitator the seller uses. |
 | Dashboard | Loopback only, mutations token-gated, `GET /api/state` open to anything on loopback, one agent at a time. |
