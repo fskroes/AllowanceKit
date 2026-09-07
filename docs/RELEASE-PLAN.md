@@ -577,14 +577,17 @@ agent does not serialise the others.
 
 All of the following are true, each verifiable by a command or a URL:
 
-- [ ] `npx wallie@latest --version` and `npx allowance-kit@latest --version` print `0.5.0`.
-- [ ] `docs/canary-runs/` contains a passing mainnet run with a BaseScan link.
+- [x] `npx wallie@latest --version` and `npx allowance-kit@latest --version` print `0.5.0`.
+      (Published + verified 2026-09-07; `latest` dist-tag is `0.5.0`, wallie pins `allowance-kit@^0.5.0`.)
+- [x] `docs/canary-runs/` contains a passing mainnet run with a BaseScan link.
+      (M-02: `docs/canary-runs/2026-09-07-base.md`, tx `0x044245…2648e`.)
 - [x] `docs/x402-compat.md` exists and the testnet canary passed against a third-party seller.
       (Mart402, Base Sepolia, 2026-09-07 — `docs/canary-runs/2026-09-07-base-sepolia-mart402.md`.)
-- [ ] CI is green on `main` for both repos.
+- [~] CI is green on `main` for both repos. (allowance-kit: green on `27b9369`. Cloud repo not built yet.)
 - [ ] A test-mode Stripe purchase produces a welcome email with a working key within 2 minutes.
 - [ ] `allowance-kit notify cloud <key>` followed by `notify test` shows `delivered cloud`.
 - [ ] Stopping the agent produces an "agent silent" email within 6 minutes.
 - [ ] `curl -s https://onewallie.com | grep -c "1%"` prints 0.
 - [ ] Terms and privacy list the sub-processors and retention.
-- [ ] `SECURITY.md`, `CHANGELOG.md`, five git tags, and a README badge exist.
+- [x] `SECURITY.md`, `CHANGELOG.md`, five git tags, and a README badge exist.
+      (Six tags now: v0.1.0–v0.5.0; CI badge at the top of README.)
