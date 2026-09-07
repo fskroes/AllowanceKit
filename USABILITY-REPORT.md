@@ -97,10 +97,17 @@ broken end to end, and closed it along with everything left on the list above.
   ([BaseScan](https://basescan.org/tx/0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e)),
   recorded in [docs/canary-runs/2026-09-07-base.md](docs/canary-runs/2026-09-07-base.md). It is one
   canary run, not sustained traffic.
-- **No CI.** `npm test` still runs only when someone types it. Deliberately out of scope for now.
-- Free alerts only fire while the agent is running on a machine you control. `notify heartbeat`
-  plus an outside monitor covers the silence; genuinely hosted alerting is still what Cloud is for,
-  and it is not built.
+- **The buyer has settled against a real third-party seller (2026-09-07).** `scripts/l02-thirdparty.ts`
+  paid [Mart402](https://mart402.dev)'s PDF parser (x402 v2, Base Sepolia) end to end — negotiated the
+  multi-offer 402, signed a real EIP-3009 authorization, and the seller's facilitator settled $0.004
+  USDC on-chain, returning the parsed document. Tx `0xf53b18b0e0effcd93f171f2cce941c0a3c1775992548a9d38829c683d18d817e`
+  ([Sepolia BaseScan](https://sepolia.basescan.org/tx/0xf53b18b0e0effcd93f171f2cce941c0a3c1775992548a9d38829c683d18d817e)),
+  recorded in [docs/canary-runs/2026-09-07-base-sepolia-mart402.md](docs/canary-runs/2026-09-07-base-sepolia-mart402.md).
+- **CI now runs on every push and PR** (`.github/workflows/ci.yml`, Node 20/22/24) — no longer only when someone types `npm test`.
+- Free local alerts only fire while the agent runs on a machine you control. `notify heartbeat` plus an
+  outside monitor covers the silence; the runtime now also has a `cloud` channel (`notify cloud`) that
+  feeds every decision and a heartbeat to a hosted control plane — but that hosted service (Wallie Cloud)
+  is not deployed yet, so the channel has nothing to talk to in production.
 - The on-chain balance is cached for 15 seconds, so an authorization can be made against a reading
   that stale. Public RPCs also rate-limit; bring your own for anything busy.
 - Several agents share one state-dir lock, so a busy agent serialises the others' authorizations.

@@ -337,7 +337,26 @@ response to the next failure layer, which is how we know they were real:
 negotiated the real v2 402, selected the right offer, signed a real EIP-3009 authorization,
 and produced a payload their verifier accepted.
 
-**L-02 status:** the buyer is proven against a real third-party v2 seller up to the
-settlement boundary, but a fully-**settled** third-party testnet payment (200 + tx hash,
-recorded under `docs/canary-runs/`) has **not** happened yet — it needs a Base-Sepolia seller
-that actually settles what it advertises. L-02 remains open on that last step.
+**L-02 status (superseded — see §9):** against QuickNode the buyer was proven up to the
+settlement boundary only. The missing last step — a fully-**settled** third-party testnet
+payment — was completed on 2026-09-07 against a different seller.
+
+## 9. L-02 closed: settled against Mart402 (2026-09-07)
+
+The seller that "actually settles what it advertises" turned out to be **Mart402**
+(https://mart402.dev) — a PDF-extraction API running x402 **v2** on `eip155:84532`, whose
+deterministic products run fully on its Base Sepolia sandbox against real testnet USDC. Its
+`/v1/parse` takes a free `quote_id` first; the harness (`scripts/l02-thirdparty.ts`) quotes a
+public dummy PDF, then pays.
+
+Result: `ok: true`, HTTP 200, the parsed document returned (`"markdown": "## Dummy PDF file"`),
+**$0.004 USDC settled on-chain** — tx
+`0xf53b18b0e0effcd93f171f2cce941c0a3c1775992548a9d38829c683d18d817e` (block 46518690,
+receipt `status 0x1`, EIP-3009 Transfer + AuthorizationUsed logs, gas paid by the seller's
+facilitator relayer). Full record: `docs/canary-runs/2026-09-07-base-sepolia-mart402.md`.
+
+**No new buyer code was needed** beyond the two QuickNode fixes (§8). Notably, Mart402's
+`agents.md` documents retrying with the legacy `X-PAYMENT` header, but it accepted our v2
+`PAYMENT-SIGNATURE` header as-is — so real v2 sellers read the new header, and no `X-PAYMENT`
+fallback was required. The buyer now has an end-to-end **settled** proof against a real
+third-party v2 seller on Base Sepolia. **L-02 is closed.**

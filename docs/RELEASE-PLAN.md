@@ -579,7 +579,8 @@ All of the following are true, each verifiable by a command or a URL:
 
 - [ ] `npx wallie@latest --version` and `npx allowance-kit@latest --version` print `0.5.0`.
 - [ ] `docs/canary-runs/` contains a passing mainnet run with a BaseScan link.
-- [ ] `docs/x402-compat.md` exists and the testnet canary passed against a third-party seller.
+- [x] `docs/x402-compat.md` exists and the testnet canary passed against a third-party seller.
+      (Mart402, Base Sepolia, 2026-09-07 — `docs/canary-runs/2026-09-07-base-sepolia-mart402.md`.)
 - [ ] CI is green on `main` for both repos.
 - [ ] A test-mode Stripe purchase produces a welcome email with a working key within 2 minutes.
 - [ ] `allowance-kit notify cloud <key>` followed by `notify test` shows `delivered cloud`.
