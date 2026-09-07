@@ -77,10 +77,16 @@ export {
   NotifyStore,
   Notifier,
   deliver,
+  deliverCloud,
   startHeartbeat,
+  startCloudHeartbeat,
+  cloudWhoami,
+  stripQuery,
   defaultNotifyConfig,
   providerEnvVar,
   TWILIO_ENV,
+  CLOUD_ENV,
+  CLOUD_DEFAULT_URL,
 } from "./notify.ts";
 export type {
   NotifyConfig,
@@ -88,6 +94,10 @@ export type {
   Message as NotifyMessage,
   DeliveryResult,
   DeliveryFailure,
+  CloudConfig,
+  CloudEvent,
+  CloudEventKind,
+  CloudHeartbeat,
 } from "./notify.ts";
 
 export { Ledger } from "./ledger.ts";

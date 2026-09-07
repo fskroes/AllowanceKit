@@ -6,10 +6,20 @@ import { startDashboard } from "./dashboard-server.ts";
 import { fmtUsd, fmtUsdSmart, usd } from "./money.ts";
 import { POLICY_FIELDS, PolicyValidationError, RULE_LABELS, policyFileName, policyWarnings, type PolicyField } from "./policy.ts";
 import { runDemo } from "./demo-run.ts";
-import { deliver, providerEnvVar, startHeartbeat } from "./notify.ts";
+import {
+  deliver,
+  deliverCloud,
+  providerEnvVar,
+  startHeartbeat,
+  cloudWhoami,
+  NotifyStore,
+  CLOUD_ENV,
+  CLOUD_DEFAULT_URL,
+} from "./notify.ts";
 import { describeMode, describeTopUp, readMode } from "./mode.ts";
-import { NETWORKS } from "./live.ts";
-import { usdcBalanceMicro } from "./usdc.ts";
+import { NETWORKS, createLiveAgent } from "./live.ts";
+import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
+import { payingFetch } from "./payer.ts";
 import { DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 import type { LedgerEvent } from "./ledger.ts";
 import { CLI, NAME } from "./cli-name.ts";
@@ -24,7 +34,10 @@ Getting started
 
 Commands
   init                            provision the agent wallet in ./.allowance
+  init --live [--network <net>]   provision for REAL MONEY on a live network (see below)
   topup <usd>                     add to the allowance
+  pay <url>                       make one payment to an x402 URL, print the result
+  doctor                          check your setup: node, viem, keys, RPC, permissions
   status                          what is left, what the limits are, what needs you
   policy                          show every limit
   policy <field> <value>          change one limit
@@ -35,6 +48,14 @@ Commands
   agents                          every agent sharing this state directory
   dashboard [--port <n>]          live dashboard (default http://localhost:4030)
   demo                            run the built-in demo into ./.allowance-demo
+
+Real money in five commands (Base Sepolia is free testnet USDC)
+  export AGENT_PRIVATE_KEY=0x...           your wallet key — read from the env, never stored
+  ${CLI} init --live                  mark this directory live, print the wallet address
+  # send USDC to that address, then:
+  ${CLI} topup 5.00                   set the ceiling the agent may spend
+  ${CLI} pay https://api.example.com/paid   make a real payment
+  Mainnet (real money): ${CLI} init --live --network base   (asks you to confirm)
 
 Limits you can set with \`policy\`
   totalBudgetUsd <usd>            hard lifetime cap on this agent's spending
@@ -56,6 +77,7 @@ Alerts you can set with \`notify\`
   notify email <address>          mail every alert (needs a provider key, see below)
   notify sms +31612345678         text every alert (needs Twilio keys, see below)
   notify push <topic>             phone push over ntfy.sh — no account needed
+  notify cloud <workspace-key>    send every decision + a heartbeat to Wallie Cloud
   notify heartbeat <url>          ping a dead-man's switch while the agent runs
   notify test                     send one of each, right now, and report delivery
   notify off                      stop sending anything
@@ -69,6 +91,11 @@ Options
   --via <resend|postmark>         email provider (default resend)
   --budget <usd>                  spend an approval grant may cover
   --expires <30m|2h|7d|never>     how long an approval grant lasts
+  --network <base-sepolia|base>   live network for init --live (default base-sepolia)
+  --rpc <url>                     override the JSON-RPC endpoint for balance reads
+  --method <GET|POST>             HTTP method for pay (default GET, or POST with --body)
+  --body <json>                   request body for pay
+  --yes, -y                       skip the mainnet confirmation prompt (for scripts)
   -h, --help                      this text
   -v, --version                   print the version
 
@@ -94,6 +121,12 @@ interface Flags {
   via?: string;
   budget?: number;
   expires?: string;
+  live: boolean;
+  network?: string;
+  rpc?: string;
+  yes: boolean;
+  method?: string;
+  body?: string;
   rest: string[];
 }
 
@@ -107,6 +140,12 @@ function parseFlags(argv: string[]): Flags {
   let via: string | undefined;
   let budget: number | undefined;
   let expires: string | undefined;
+  let live = false;
+  let network: string | undefined;
+  let rpc: string | undefined;
+  let yes = false;
+  let method: string | undefined;
+  let body: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--state" || a === "--state-dir") state = required(argv[++i], "--state <dir>");
@@ -124,13 +163,23 @@ function parseFlags(argv: string[]): Flags {
     else if (a.startsWith("--budget=")) budget = Number(a.slice(9));
     else if (a === "--expires") expires = required(argv[++i], "--expires <duration>");
     else if (a.startsWith("--expires=")) expires = a.slice(10);
+    else if (a === "--live") live = true;
+    else if (a === "--network" || a === "--net") network = required(argv[++i], "--network <net>");
+    else if (a.startsWith("--network=")) network = a.slice(10);
+    else if (a === "--rpc") rpc = required(argv[++i], "--rpc <url>");
+    else if (a.startsWith("--rpc=")) rpc = a.slice(6);
+    else if (a === "--yes" || a === "-y") yes = true;
+    else if (a === "--method") method = required(argv[++i], "--method <GET|POST>");
+    else if (a.startsWith("--method=")) method = a.slice(9);
+    else if (a === "--body") body = required(argv[++i], "--body <json>");
+    else if (a.startsWith("--body=")) body = a.slice(7);
     else rest.push(a);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UserError(`--port must be a number between 1 and 65535`);
   if (budget !== undefined && (!Number.isFinite(budget) || budget <= 0))
     throw new UserError(`--budget must be a positive dollar amount`);
   if (!agentName.trim()) throw new UserError(`--agent needs a name`);
-  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, rest };
+  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, rest };
 }
 
 function required(value: string | undefined, usage: string): string {
@@ -187,6 +236,74 @@ async function liveWalletLine(stateDir: string): Promise<string | undefined> {
   } catch (e) {
     return `wallet         ${mode.address} on ${mode.network} — balance unreadable: ${e instanceof Error ? e.message : String(e)}`;
   }
+}
+
+/** The payer's wallet key, read from the environment only — never from disk. */
+function requireLiveKey(): string {
+  const key = process.env.AGENT_PRIVATE_KEY;
+  if (!key || !key.trim())
+    throw new UserError(
+      `live mode needs your wallet's private key in the environment:\n` +
+        `  export AGENT_PRIVATE_KEY=0x...\n` +
+        `It is read from the environment only — ${NAME} never writes it to any file.`,
+    );
+  return key.trim();
+}
+
+/** Ask once, on a real terminal, before anything touches Base mainnet. */
+async function promptLine(question: string): Promise<string> {
+  const readline = await import("node:readline/promises");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(question);
+  } finally {
+    rl.close();
+  }
+}
+
+/** Mainnet is not practice: it takes a `--yes`, or typing the network name back. */
+async function confirmMainnet(network: string, yes: boolean): Promise<void> {
+  if (network !== "base" || yes) return;
+  if (!process.stdin.isTTY)
+    throw new UserError(
+      `REAL MONEY — this signs USDC payments on Base mainnet, not practice.\n` +
+        `Re-run with --yes to confirm in a script, or run it in a terminal to confirm by hand.`,
+    );
+  const answer = await promptLine(`REAL MONEY — payments will settle on Base mainnet.\nType "base" to confirm: `);
+  if (answer.trim() !== "base") throw new UserError(`not confirmed — nothing was changed.`);
+}
+
+/** `init --live`: derive the payer address, mark the directory live, keep the key out of it. */
+async function initLive(stateDir: string, flags: Flags): Promise<void> {
+  const network = flags.network ?? "base-sepolia";
+  if (!(network in NETWORKS))
+    throw new UserError(`unknown network "${network}" — known: ${Object.keys(NETWORKS).join(", ")}`);
+  const existing = readMode(stateDir);
+  if (existing.mode === "live" && existing.network && existing.network !== network)
+    throw new UserError(
+      `${stateDir} is already live on ${existing.network}.\n` +
+        `Use a separate --state directory for ${network}, or delete ${path.join(stateDir, "mode.json")} to re-point this one.`,
+    );
+  const key = requireLiveKey();
+  await confirmMainnet(network, flags.yes);
+
+  let live;
+  try {
+    live = await createLiveAgent({ stateDir, agentName: flags.agent, privateKey: key, network, rpcUrl: flags.rpc });
+  } catch (e) {
+    // viem missing, a malformed key, or an unknown network — surface it plainly.
+    throw new UserError(e instanceof Error ? e.message : String(e));
+  }
+
+  console.log(describeMode(readMode(stateDir)));
+  console.log(`agent    ${live.agentName}`);
+  console.log(`wallet   ${live.address}`);
+  console.log(`network  ${network}${flags.rpc ? ` (rpc ${hostOfUrl(flags.rpc)})` : ""}`);
+  console.log(`\nFund it — send USDC to this address on ${network}:`);
+  console.log(`  ${live.address}`);
+  console.log(`Set the spending ceiling:  ${CLI} topup 5.00`);
+  console.log(`See the balance and limits: ${CLI} status`);
+  console.log(`Make one real payment:      ${CLI} pay <url>`);
 }
 
 function ago(iso: string): string {
@@ -295,6 +412,10 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case "init": {
+      if (flags.live) {
+        await initLive(stateDir, flags);
+        break;
+      }
       const existed = fs.existsSync(path.join(stateDir, "agent.json"));
       const rt = agent(stateDir, flags.agent);
       const mode = readMode(stateDir);
@@ -313,6 +434,11 @@ async function main(): Promise<void> {
         throw new UserError(`top-up must be a positive dollar amount, got "${args[0]}" — e.g. ${CLI} topup 5.00`);
       const rt = agent(stateDir, flags.agent);
       const mode = readMode(stateDir);
+      if (mode.mode === "live" && mode.network === "base" && amount > 50 && !flags.yes)
+        throw new UserError(
+          `REAL MONEY — raising the ceiling to ${fmtUsd(usd(amount))} on Base mainnet.\n` +
+            `Re-run with --yes to confirm. (Amounts up to $50.00 do not need it.)`,
+        );
       const remaining = topUp(rt, amount, "human::cli");
       console.log(`added ${fmtUsd(usd(amount))} to ${rt.agentName}'s allowance`);
       console.log(`the agent can now spend up to ${fmtUsd(remaining)}`);
@@ -371,6 +497,19 @@ async function main(): Promise<void> {
       const failures = rt.notifyStore.recentFailures(1);
       if (failures.length)
         console.log(`alerts         last delivery failed: ${failures[0].channel} — ${failures[0].detail}`);
+      const cloudCfg = rt.notifyStore.load().cloud;
+      if (cloudCfg?.enabled) {
+        if (process.env[cloudCfg.keyEnv]) {
+          const who = await cloudWhoami(cloudCfg);
+          console.log(
+            who.ok
+              ? `cloud          connected as ${who.workspace ?? "your workspace"}`
+              : `cloud          ${hostOfUrl(cloudCfg.url)} — ${who.detail}`,
+          );
+        } else {
+          console.log(`cloud          ${hostOfUrl(cloudCfg.url)} — ${cloudCfg.keyEnv} is NOT set, nothing will send`);
+        }
+      }
       printWarnings(policyWarnings(p));
       break;
     }
@@ -424,6 +563,9 @@ async function main(): Promise<void> {
           `   (takes effect on the agent's next call)`,
       );
       printWarnings(policyWarnings(rt.policy()));
+      const pmode = readMode(stateDir);
+      if (pmode.mode === "live" && pmode.network === "base")
+        console.log(`\n  ! REAL MONEY — this limit governs USDC on Base mainnet.`);
       break;
     }
 
@@ -515,6 +657,20 @@ async function main(): Promise<void> {
           console.log(`sms       not set`);
         }
         console.log(`push      ${c.pushTopic ? `${c.pushTopic} (via ntfy)` : "not set"}`);
+        if (c.cloud?.enabled) {
+          if (process.env[c.cloud.keyEnv]) {
+            const who = await cloudWhoami(c.cloud);
+            console.log(
+              who.ok
+                ? `cloud     connected as ${who.workspace ?? "your workspace"} (${hostOfUrl(c.cloud.url)})`
+                : `cloud     ${hostOfUrl(c.cloud.url)} — ${who.detail}`,
+            );
+          } else {
+            console.log(`cloud     ${hostOfUrl(c.cloud.url)} — ${c.cloud.keyEnv} is NOT set, nothing will send`);
+          }
+        } else {
+          console.log(`cloud     not set`);
+        }
         console.log(
           c.heartbeatUrl
             ? `heartbeat every ${c.heartbeatSeconds}s to ${hostOfUrl(c.heartbeatUrl)} while the dashboard runs`
@@ -544,8 +700,34 @@ async function main(): Promise<void> {
           sms: undefined,
           pushTopic: undefined,
           heartbeatUrl: undefined,
+          cloud: undefined,
         });
         console.log(`alerts off — nothing will be sent`);
+        break;
+      }
+
+      if (sub === "cloud") {
+        if (!value)
+          throw new UserError(
+            `which workspace key? e.g.  ${CLI} notify cloud wk_live_...\n` +
+              `It is in your Wallie Cloud welcome email. Or "${CLI} notify cloud off" to disconnect.`,
+          );
+        if (value === "off") {
+          rt.notifyStore.save({ cloud: undefined });
+          console.log(`cloud off — no events or heartbeats will be sent`);
+          break;
+        }
+        if (!/^wk_(live|test)_[A-Za-z0-9]{8,}$/.test(value))
+          throw new UserError(
+            `"${value.slice(0, 12)}…" is not a Wallie Cloud workspace key — it should look like wk_live_…`,
+          );
+        // Store only the wiring, never the key: it is read from the environment
+        // at send time, so notifications.json stays safe to paste in a bug report.
+        rt.notifyStore.save({ cloud: { enabled: true, url: CLOUD_DEFAULT_URL, keyEnv: CLOUD_ENV } });
+        console.log(`cloud set — every decision and a heartbeat go to ${hostOfUrl(CLOUD_DEFAULT_URL)}`);
+        console.log(`\nThe key is never written to disk. Export it so the runtime can read it:`);
+        console.log(`  export ${CLOUD_ENV}=${value}`);
+        console.log(`\ncheck it now with:  ${CLI} notify test`);
         break;
       }
 
@@ -669,7 +851,7 @@ async function main(): Promise<void> {
 
       if (sub === "test") {
         const cfg = rt.notifyStore.load();
-        if (!cfg.webhookUrl && !cfg.email)
+        if (!rt.notifyStore.configured() && !cfg.cloud?.enabled)
           throw new UserError(`nothing to test — set a channel first:  ${CLI} notify webhook <url>`);
         console.log(`sending one test alert on every configured channel…`);
         const results = await deliver(cfg, {
@@ -681,6 +863,17 @@ async function main(): Promise<void> {
             `every payment your rails refuse, and every payment waiting on your approval.`,
           data: { agent: rt.agentName, test: true },
         });
+        // The cloud test verifies the key authenticates (GET /v1/me) rather than
+        // injecting a fake payment into the feed.
+        if (cfg.cloud?.enabled) {
+          const who = await cloudWhoami(cfg.cloud);
+          results.push({
+            channel: "cloud",
+            ok: who.ok,
+            detail: who.ok ? `connected as ${who.workspace ?? "your workspace"}` : who.detail,
+            attempts: 1,
+          });
+        }
         let failed = false;
         for (const r of results) {
           const tries = r.attempts > 1 ? ` (${r.attempts} attempts)` : "";
@@ -691,7 +884,138 @@ async function main(): Promise<void> {
         break;
       }
 
-      throw new UserError(`unknown notify command "${sub}" — try: webhook, email, sms, push, heartbeat, test, off`);
+      throw new UserError(`unknown notify command "${sub}" — try: webhook, email, sms, push, cloud, heartbeat, test, off`);
+    }
+
+    case "pay": {
+      const url = args[0];
+      if (!url) throw new UserError(`which URL? e.g.  ${CLI} pay https://api.example.com/paid`);
+      try {
+        new URL(url);
+      } catch {
+        throw new UserError(`"${url}" is not a URL — it should start with https://`);
+      }
+      const method = (flags.method ?? (flags.body !== undefined ? "POST" : "GET")).toUpperCase();
+      const init: RequestInit = { method };
+      if (flags.body !== undefined) {
+        init.body = flags.body;
+        init.headers = { "Content-Type": "application/json" };
+      }
+
+      const mode = readMode(stateDir);
+      let ctx;
+      if (mode.mode === "live") {
+        const key = requireLiveKey();
+        let live;
+        try {
+          live = await createLiveAgent({
+            stateDir,
+            agentName: flags.agent,
+            privateKey: key,
+            network: mode.network,
+            rpcUrl: mode.rpcUrl,
+          });
+        } catch (e) {
+          throw new UserError(e instanceof Error ? e.message : String(e));
+        }
+        ctx = live.ctx;
+        console.log(describeMode(mode));
+      } else {
+        ctx = agent(stateDir, flags.agent).ctx;
+      }
+
+      const res = await payingFetch(ctx, url, init);
+      const preview = (s: string) => (s ? `\n${s.slice(0, 200)}${s.length > 200 ? "…" : ""}` : "");
+      if (res.txHash || res.costMicro > 0n) {
+        console.log(
+          `PAID     ${fmtUsdSmart(res.costMicro)}  ${shortPath(url)}` +
+            (res.txHash ? `  ${String(res.txHash).slice(0, 18)}…` : ""),
+        );
+        console.log(preview(res.raw).trimStart());
+        process.exitCode = 0;
+      } else if (res.blockedBy) {
+        const label = RULE_LABELS[res.blockedBy.rule as keyof typeof RULE_LABELS] ?? res.blockedBy.rule;
+        console.log(`BLOCKED  ${label}`);
+        console.log(res.blockedBy.detail);
+        process.exitCode = 2;
+      } else if (res.error) {
+        console.log(`ERROR    ${res.error}`);
+        process.exitCode = 1;
+      } else {
+        console.log(`${res.ok ? "OK" : `HTTP ${res.status}`}   ${shortPath(url)} — no payment was required${preview(res.raw)}`);
+        process.exitCode = res.ok ? 0 : 1;
+      }
+      break;
+    }
+
+    case "doctor": {
+      const mode = readMode(stateDir);
+      const lines: string[] = [];
+      let bad = false;
+      const ok = (label: string, detail: string) => lines.push(`  ok    ${label.padEnd(14)} ${detail}`);
+      const warn = (label: string, detail: string) => lines.push(`  warn  ${label.padEnd(14)} ${detail}`);
+      const fail = (label: string, detail: string) => {
+        bad = true;
+        lines.push(`  FAIL  ${label.padEnd(14)} ${detail}`);
+      };
+
+      const [maj, min] = process.versions.node.split(".").map(Number);
+      if (maj > 20 || (maj === 20 && min >= 11)) ok("node", `v${process.versions.node}`);
+      else fail("node", `v${process.versions.node} — the package needs Node ≥ 20.11 (running the TS sources needs Node 24)`);
+
+      try {
+        await import("viem/accounts");
+        ok("viem", "installed — live signing available");
+      } catch {
+        (mode.mode === "live" ? fail : warn)("viem", "not installed — run `npm i viem` (needed only for live networks)");
+      }
+
+      try {
+        fs.accessSync(stateDir, fs.constants.W_OK);
+        ok("state dir", stateDir);
+      } catch {
+        warn("state dir", `${stateDir} is missing or not writable — run \`${CLI} init\``);
+      }
+
+      ok("mode", describeMode(mode));
+
+      if (mode.mode === "live") {
+        if (process.env.AGENT_PRIVATE_KEY?.trim())
+          ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
+        else fail("wallet key", "AGENT_PRIVATE_KEY is not set — export AGENT_PRIVATE_KEY=0x... before you can pay");
+
+        const info = mode.network ? NETWORKS[mode.network] : undefined;
+        const rpc = mode.rpcUrl ?? (mode.network ? RPC_DEFAULTS[mode.network] : undefined);
+        if (!info) fail("network", `unknown network "${mode.network}"`);
+        else if (!rpc) warn("rpc", `no RPC for ${mode.network} — the wallet balance will be unreadable`);
+        else if (mode.address) {
+          try {
+            const bal = await usdcBalanceMicro(rpc, info.usdc, mode.address);
+            ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
+          } catch (e) {
+            warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+          }
+        }
+      }
+
+      const cfg = new NotifyStore(stateDir, flags.agent).load();
+      if (cfg.email) {
+        const envVar = providerEnvVar(cfg.emailProvider ?? "resend");
+        process.env[envVar]
+          ? ok("email", `${cfg.email} — ${envVar} is set`)
+          : warn("email", `${cfg.email} — ${envVar} is NOT set, no mail will send`);
+      }
+      if (cfg.sms) {
+        const missing = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"].filter((v) => !process.env[v]);
+        missing.length
+          ? warn("sms", `${cfg.sms} — ${missing.join(" and ")} NOT set, no text will send`)
+          : ok("sms", `${cfg.sms} — Twilio keys set`);
+      }
+
+      console.log(lines.join("\n"));
+      console.log(bad ? `\nSomething needs fixing above.` : `\nAll checks passed.`);
+      if (bad) process.exitCode = 1;
+      break;
     }
 
     case "demo": {
@@ -717,6 +1041,7 @@ async function main(): Promise<void> {
       const stopHeartbeat = startHeartbeat(rt.notifyStore.load(), rt.agentName);
       process.on("SIGINT", () => {
         stopHeartbeat();
+        rt.stopHeartbeat?.();
         process.exit(0);
       });
       console.log(`dashboard → http://localhost:${port}`);

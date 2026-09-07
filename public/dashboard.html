@@ -14,6 +14,10 @@
   h1 span { color:var(--dim); font-weight:400; }
   .kill { border:1px solid var(--red); background:var(--panel); color:#ff8a85; padding:10px 16px; border-radius:8px; cursor:pointer; font:inherit; font-weight:600; white-space:nowrap; }
   .kill[aria-pressed="true"] { background:#2a1214; }
+  .switcher { display:flex; align-items:center; gap:8px; font-size:13px; }
+  .switcher label { color:var(--dim); text-transform:uppercase; letter-spacing:.08em; font-size:11px; }
+  .switcher select { font:inherit; font-size:13px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer; }
+  .switcher[data-single="1"] { display:none; }
   button:focus-visible, a:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
   .banner { display:none; border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; border:1px solid var(--amber); background:#2a2210; color:#ffd479; }
   .banner[data-show="1"] { display:block; }
@@ -67,6 +71,10 @@
 <body>
 <header>
   <h1>AllowanceKit <span>— what your agent is spending, and your stop button</span></h1>
+  <div class="switcher" id="switcher" data-single="1">
+    <label for="agentPick">Agent</label>
+    <select id="agentPick" aria-label="Which agent to view"></select>
+  </div>
   <button class="kill" id="kill" type="button" aria-pressed="false">Spending: active — Pause</button>
 </header>
 
@@ -124,6 +132,10 @@ let killOn = false;
 let lastRemaining = "$–";
 let ledgerSignature = "";
 let decisionNote = "";
+// Which agent the human is looking at. Null until the first state arrives, then
+// pinned to their choice from the switcher.
+let selected = null;
+let agentOptions = "";
 
 function usd(micro) {
   const n = Number(BigInt(micro)) / 1e6;
@@ -245,12 +257,37 @@ function eventRow(e) {
   return li;
 }
 
+function syncAgents(agents, active) {
+  // Rebuild the <select> only when the roster actually changes, so it does not
+  // clobber the open dropdown on every poll. Agent names are user-set strings —
+  // set them with textContent/value, never as markup.
+  $("switcher").dataset.single = agents.length > 1 ? "" : "1";
+  const signature = agents.join(" ");
+  if (signature !== agentOptions) {
+    agentOptions = signature;
+    const pick = $("agentPick");
+    pick.textContent = "";
+    for (const name of agents) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      pick.appendChild(opt);
+    }
+  }
+  $("agentPick").value = active;
+}
+
 async function refresh() {
-  let s;
+  let envelope;
   try {
-    const r = await fetch("/api/state");
+    const r = await fetch("/api/state", { headers: { "x-allowance-token": TOKEN } });
+    if (r.status === 401) {
+      document.body.dataset.stale = "1";
+      showBanner("This page lost its control token. Restart the dashboard and reload.", true);
+      return;
+    }
     if (!r.ok) throw new Error("bad status");
-    s = await r.json();
+    envelope = await r.json();
   } catch {
     document.body.dataset.stale = "1";
     showBanner("Disconnected — the figures below are from " + new Date().toLocaleTimeString() + " and may be out of date.", true);
@@ -258,6 +295,15 @@ async function refresh() {
   }
   if (document.body.dataset.stale === "1") showBanner("");
   document.body.dataset.stale = "";
+
+  const agents = envelope.agents || [];
+  // Keep the human's pick if it still exists; otherwise fall back to the agent
+  // the dashboard was started for.
+  if (selected === null || !agents.includes(selected)) selected = envelope.selected;
+  syncAgents(agents, selected);
+
+  const s = envelope.states[selected];
+  if (!s) return;
 
   killOn = s.killSwitch;
   lastRemaining = usd(s.remainingMicro);
@@ -313,7 +359,7 @@ async function refresh() {
   renderApprovals(pending);
 
   const shown = [...s.events].reverse().slice(0, 60);
-  const signature = s.events.length + ":" + (s.events.length ? s.events[s.events.length - 1].at : "");
+  const signature = selected + ":" + s.events.length + ":" + (s.events.length ? s.events[s.events.length - 1].at : "");
   if (signature !== ledgerSignature) {
     ledgerSignature = signature;
     const list = $("events");
@@ -339,7 +385,7 @@ $("approvals").addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button[data-id]");
   if (!btn) return;
   const approve = btn.dataset.approve === "1";
-  const result = await post("/api/approvals", { id: btn.dataset.id, approve });
+  const result = await post("/api/approvals", { id: btn.dataset.id, approve, agent: selected });
   if (result) {
     decisionNote = approve
       ? "Approved " + usd(result.amountMicro) + " to " + result.host +
@@ -352,7 +398,13 @@ $("approvals").addEventListener("click", async (ev) => {
 
 $("kill").addEventListener("click", async () => {
   if (killOn && !confirm("Resume autonomous spending?\n\nThe agent will be able to spend up to " + lastRemaining + " again, immediately.")) return;
-  await post("/api/kill", { on: !killOn });
+  await post("/api/kill", { on: !killOn, agent: selected });
+  refresh();
+});
+
+$("agentPick").addEventListener("change", (ev) => {
+  selected = ev.target.value;
+  ledgerSignature = "";
   refresh();
 });
 

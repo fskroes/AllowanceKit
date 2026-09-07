@@ -86,6 +86,36 @@ test("verify posts x402 v1 contract shape with bearer jwt", async () => {
   });
 });
 
+// x402-compat.md §6.5: the facilitator body is the same three keys in both
+// versions; a CdpFacilitator constructed with x402Version:2 posts x402Version:2
+// and passes the v2 nested paymentPayload through opaquely. Default stays 1 (the
+// "verify posts x402 v1 contract shape" test above pins that), so v1 sellers are
+// unaffected.
+test("a v2 facilitator posts x402Version:2 and passes the nested paymentPayload through", async () => {
+  const captured: { body?: Record<string, unknown> } = {};
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      captured.body = JSON.parse(body || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ isValid: true, payer: "0xpayer" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address() as { port: number };
+  try {
+    const fac = new CdpFacilitator({ apiKeyId: "kid", apiKeySecret: PEM, baseUrl: `http://127.0.0.1:${addr.port}`, x402Version: 2 });
+    // A v2 nested PaymentPayload (spec §5.2.2), as the buyer would decode it.
+    const v2Payload = { x402Version: 2, accepted: { scheme: "exact", network: "eip155:84532" }, payload: { signature: "0xsig", authorization: {} } };
+    await fac.verify(v2Payload, { ...reqs, network: "eip155:84532", amount: "10000" });
+    assert.equal(captured.body?.x402Version, 2, "posts the v2 protocol version");
+    assert.deepEqual(captured.body?.paymentPayload, v2Payload, "passes the v2 nested payload through unchanged");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("settle maps success/txHash/network and errorReason", async () => {
   await withCaptureServer("settle", { success: true, txHash: "0xtx", network: "base-sepolia" }, async (cap) => {
     assert.equal(cap.path, "/platform/v2/x402/settle");

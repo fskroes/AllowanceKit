@@ -1,5 +1,7 @@
 # AllowanceKit
 
+[![CI](https://github.com/fskroes/AllowanceKit/actions/workflows/ci.yml/badge.svg)](https://github.com/fskroes/AllowanceKit/actions/workflows/ci.yml)
+
 **A spending allowance for your AI agent.** Fund it once. It pays any x402-priced API on its own — inside hard limits *you* set, with a kill switch and a receipt for every cent.
 
 Landing page: [onewallie.com](https://onewallie.com) · Follow-along tutorial: [onewallie.com/docs.html](https://onewallie.com/docs.html)
@@ -275,12 +277,32 @@ paymentGate(
 
 ### Live networks
 
+**Real money in five commands** — no code, straight from the shell. Base Sepolia is free
+testnet USDC, so prove it there first:
+
+```bash
+export AGENT_PRIVATE_KEY=0x...                     # your wallet key — read from the env, never written to disk
+npx allowance-kit init --live                      # mark the directory live, print the wallet address
+# 1. send USDC to that address (a Base Sepolia faucet, for testnet)
+npx allowance-kit topup 5.00                       # 2. set the ceiling the agent may spend
+npx allowance-kit policy perCallMaxUsd 0.10        # 3. tighten the rails
+npx allowance-kit pay https://some-live-x402-api.com/data   # 4. make a real payment
+npx allowance-kit doctor                           # checks node, viem, the key, RPC, permissions
+```
+
+Mainnet is one flag and a confirmation: `npx allowance-kit init --live --network base` (it
+asks you to type `base` back, or takes `--yes` in a script), and top-ups over $50 then need
+`--yes` too. `status` shows the wallet's real balance; `pay` exits `0` on a paid call, `2` on
+a policy block, `1` on error.
+
+Or from the SDK:
+
 ```ts
 import { payingFetch, createLiveAgent, topUp } from "allowance-kit";
 
 const live = await createLiveAgent({
   stateDir: ".allowance",
-  privateKey: process.env.AGENT_KEY!,
+  privateKey: process.env.AGENT_PRIVATE_KEY!,
   network: "base-sepolia",              // "base" is mainnet — ask for it explicitly
 });
 
@@ -339,8 +361,9 @@ See [BUSINESS.md](BUSINESS.md).
 
 ## Honest limitations
 
-- Default settlement is a local mock ledger — **all funds are simulated** until you deliberately wire a real rail. Sellers settle real USDC via `CdpFacilitator`; buyers sign real x402 v1 payments via `createLiveAgent` (needs optional `viem`).
-- **The live buyer path is proven on Base Sepolia, not yet on mainnet.** `scripts/canary.ts --buyer` settles a real testnet USDC payment through a CDP facilitator inside real rails and checks the ledger afterwards. The same command with `--network base` runs it on mainnet; nobody has run that yet. Treat the first mainnet runs as canary.
+- Default settlement is a local mock ledger — **all funds are simulated** until you deliberately wire a real rail. Sellers settle real USDC via `CdpFacilitator`; buyers sign real x402 payments via `createLiveAgent` (needs optional `viem`).
+- **The buyer speaks x402 v1 and v2, and has settled against a live third-party seller.** The live ecosystem has moved to v2 (CAIP-2 networks, `PAYMENT-*` headers — see [docs/x402-compat.md](docs/x402-compat.md)); the buyer detects the version and answers in kind. On **2026-09-07** it paid a real third-party v2 seller — [Mart402](https://mart402.dev)'s PDF parser on Base Sepolia — end to end: negotiated the multi-offer 402, selected the payable offer, signed a real EIP-3009 authorization, and the seller's facilitator settled it on-chain (tx [`0xf53b18b0…d817e`](https://sepolia.basescan.org/tx/0xf53b18b0e0effcd93f171f2cce941c0a3c1775992548a9d38829c683d18d817e), $0.004 USDC), returning the parsed document. Recorded in [docs/canary-runs/2026-09-07-base-sepolia-mart402.md](docs/canary-runs/2026-09-07-base-sepolia-mart402.md). (An earlier attempt against QuickNode reached the settlement boundary but 404'd on the testnet it advertised — [docs/x402-compat.md §8](docs/x402-compat.md).) The `CdpFacilitator` v2 body follows the spec but has not been round-tripped against real CDP.
+- **The live buyer path is proven on Base Sepolia and on Base mainnet.** `scripts/canary.ts --buyer` settles a real testnet USDC payment through a CDP facilitator inside real rails and checks the ledger afterwards; `--network base` ran the same on mainnet on **2026-09-07** — a real $0.01 USDC settlement, tx [`0x044245…2648e`](https://basescan.org/tx/0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e), recorded in [docs/canary-runs/2026-09-07-base.md](docs/canary-runs/2026-09-07-base.md). It is a single canary run, not sustained production traffic — treat early mainnet use as canary.
 - **Alerts are best-effort, not guaranteed.** Retried three times with backoff, then recorded in `notify-failures.jsonl` — but never awaited inside the ledger lock, so a payment is never delayed or failed by a broken channel. The ledger, not your inbox, is the record of what happened.
 - **Free alerts only fire while the agent is running on a machine you control.** `notify heartbeat` plus an outside monitor covers the case where it is not; genuinely hosted alerting is not built.
 - SMS needs a Twilio account and costs money per message. Push over ntfy is unauthenticated by design: anyone who knows the topic name can read your alerts.
@@ -349,53 +372,20 @@ See [BUSINESS.md](BUSINESS.md).
 - The dashboard binds to `127.0.0.1` and gates all mutations behind a token, but `GET /api/state` is unauthenticated to anything already on the loopback interface. It also shows one agent at a time.
 - npm ships compiled `dist/` (ESM + `.d.ts`, zero runtime deps).
 
-## Changes in 0.4.0
+## Changes
 
-The release that makes real money work, and makes a "yes" stop meaning "yes, forever".
+The full history is in [CHANGELOG.md](CHANGELOG.md). Current line, **0.4.0** — "real money
+works, and a yes stops meaning yes forever":
 
-Breaking:
+- **Approval grants expire and have a budget.** `approve <id>` covers exactly the amount
+  approved, for 24 hours, and draws down as payments authorize against it. `--budget` and
+  `--expires` widen it deliberately.
+- **A live agent can actually be funded**, and a live directory tells the truth: every
+  reader says `REAL MONEY — payments settle in USDC on <network>`, never "practice money".
+- **The wallet is reconciled against the chain** — a live agent refuses payments the wallet
+  cannot cover (`insufficient_funds`) before signing; `network` is a hard constraint.
+- **SMS, push, and a heartbeat dead-man's switch**; alerts retried and failures recorded.
+- **Several agents per state directory**, each with its own limits, allowance and alerts.
 
-- **Approval grants expire and have a budget.** `approve <id>` now covers exactly the amount that was approved, for 24 hours, and draws down as payments authorize against it. Previously a single yes was a standing licence for that host and price. `--budget <usd>` and `--expires <30m|2h|7d|never>` widen it deliberately; `decideApproval(rt, id, true, { budgetMicro, expiresInMs })` is the SDK equivalent.
-- `PolicyRule` gained `insufficient_funds`. Exhaustive `switch` statements over it need a new arm.
-- `topUp`, `decideApproval` and `allowanceRemaining` take `AllowanceRuntime` — a live agent and a practice agent both satisfy it. `AgentRuntime` extends it and still carries `chain: MockChain`.
-- `ApprovalStore`, `PolicyStore` and `NotifyStore` take an optional agent name and scope themselves to it.
-
-Fixed:
-
-- **A live agent could not be funded at all.** `topUp()` reached for the mock chain's faucet, which a live runtime does not have, so it threw — and every real payment was refused as `budget_exhausted` against a $0.00 allowance. The documented live snippet could not make a single payment. It now records the ceiling without a faucet.
-- **The CLI told a live directory it was practice money.** `init`, `topup` and `status` printed "no real money can move" over an allowance governing real USDC, and showed a simulated address instead of the payer. A directory is now marked when `createLiveAgent` claims it, and every reader says `REAL MONEY — payments settle in USDC on <network>`.
-
-Added:
-
-- **The wallet is reconciled against the chain.** A live agent reads its real USDC balance over plain JSON-RPC and refuses payments the wallet cannot cover (`insufficient_funds`) before signing, instead of discovering it at the facilitator. Cached for 15s and fail-open: an unreachable node falls back to the allowance rather than freezing the agent.
-- **`network` is a hard constraint on a live agent.** A seller quoting a different chain is refused before anything is signed. Defaults to `base-sepolia`.
-- **SMS and push.** `notify sms <e164>` over Twilio, `notify push <topic>` over ntfy (no account, no key).
-- **Alerts are retried and failures are recorded.** Three attempts with backoff for anything retrying can fix, none for a 401, and whatever still never arrived lands in `notify-failures.jsonl` and is surfaced by `notify` and `status`.
-- **`notify heartbeat <url>`** — a dead-man's switch pinged while the dashboard runs, so an outside monitor can alert you when this machine goes quiet.
-- **Several agents per state directory.** `--agent <name>` on every command, per-agent limits, allowances, approvals and alert settings, and `allowance-kit agents` to list them. The first agent keeps the original file names.
-- `scripts/canary.ts --buyer [--network base]` — the buyer runtime end to end: real settlement inside real rails, with the ledger checked afterwards.
-- New exports: `AllowanceRuntime`, `listAgents`, `modeOf`, `readMode`, `writeMode`, `describeMode`, `describeTopUp`, `usdcBalanceMicro`, `BalanceCache`, `RPC_DEFAULTS`, `RpcError`, `startHeartbeat`, `DEFAULT_GRANT_TTL_MS`, `policyFileName`, `TWILIO_ENV`, and the `DecideOptions` / `DeliveryResult` / `DeliveryFailure` / `ModeInfo` / `SettlementMode` types.
-
-## Changes in 0.3.0
-
-Added:
-
-- **Notifications.** `notify webhook`, `notify email`, `notify test`, `notify off`. Alerts fire at 50/80/100% of the allowance, on every block, and on every payment queued for a human. Webhook payloads carry both a Slack/Discord-shaped `text` field and flat structured detail. Email goes over Resend or Postmark's REST API; the key is read from the environment and never written to disk. New exports: `NotifyStore`, `Notifier`, `deliver()`, `defaultNotifyConfig`, `providerEnvVar()`, and the `NotifyConfig` / `NotifyEvent` / `NotifyMessage` types. `AgentRuntime` gained `notifyStore`.
-- **The CLI answers to the name you typed.** Run it as `wallie` and every hint it prints back says `npx wallie`; run it as `allowance-kit` and they say `npx allowance-kit`. The dashboard follows the same name. A bare `node dist/cli.js` falls back to the published name rather than printing `npx cli`.
-- The dashboard's Settings panel shows where alerts go, or says nobody is told.
-
-`wallie` on npm is an alias for this package: same CLI, same SDK, the name [onewallie.com](https://onewallie.com) uses.
-
-## Changes in 0.2.0
-
-Breaking:
-
-- `totalBudgetUsd` is now **enforced**. An agent funded above its configured budget stops at the budget. Previously the field was display-only and the funded amount was the real cap.
-- `PolicyStore.save()` throws `PolicyValidationError` on unknown fields, wrong types and negative amounts. Previously typos were written silently.
-- `PaidResult` gained a required `quotedMicro`; `blockedBy.rule` narrowed from `string` to the `PolicyRule` union and gained `recoverable`.
-- `buildPolicyRails()` requires `stateDir` (it owns the lock and the reservation store).
-- `recordPayment` / `recordBlocked` may return a promise.
-
-Added: `topUp()`, `DEFAULT_AGENT_NAME`, `RULE_LABELS`, `POLICY_FIELDS`, `validatePolicyPatch()`, `policyWarnings()`, `effectiveBudgetMicro()`, `ReservationStore`, `runDemo()`, and `allowance-kit` as a second bin name.
-
-Fixed: parallel `payingFetch` calls can no longer overspend the velocity or budget rails; seller-rejected payments now set `error`, log a `settlement_rejected` ledger row and release the hold; `init` prints real file paths; the dashboard allowance meter measures the allowance instead of the spend.
+See the [Unreleased](CHANGELOG.md#unreleased) section for what is landing next (a CLI live
+mode, `pay`, `doctor`, and x402 v2 compatibility).

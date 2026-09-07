@@ -14,16 +14,27 @@ import type { AcceptsEntry, DecodedPayment, SettleResult, VerifyResult } from ".
  * the CDP_API_KEY_ID / CDP_API_KEY_SECRET environment variables. The secret
  * is the full EC private key in PEM ("-----BEGIN EC PRIVATE KEY-----").
  *
- * Wire format follows the x402 v1 facilitator contract: the decoded
- * X-PAYMENT object plus the advertised PaymentRequirements are posted as
- * { x402Version, paymentPayload, paymentRequirements }; responses are
- * { isValid?, invalidReason? } and { success, txHash?, network?, error? }.
+ * The facilitator `/verify` and `/settle` bodies are the same three keys in
+ * both protocol versions — { x402Version, paymentPayload, paymentRequirements }
+ * (v1 contract; x402 v2 spec §7.1) — and this class posts the decoded payment
+ * and advertised requirements through opaquely. So it is v2-capable by
+ * construction: `x402Version` selects the envelope version and the caller
+ * supplies the matching payload/requirements shapes. It defaults to 1 so a v1
+ * seller (our `paymentGate`) keeps working; a v2 seller constructs it with
+ * `x402Version: 2` and hands it the v2 nested paymentPayload (x402-compat.md
+ * §5, §6.5). Responses are { isValid?, invalidReason? } and
+ * { success, txHash?/transaction?, network?, error? } in both versions.
+ *
+ * Honesty caveat (x402-compat.md §1): the v2 body shape here follows the spec
+ * and matches what live sellers advertise, but has not been round-tripped
+ * against a real CDP `/verify` or `/settle` (that needs CDP credentials and a
+ * signed EIP-3009 payload, out of scope for this ticket).
  */
 export interface CdpFacilitatorOptions {
   apiKeyId?: string;
   apiKeySecret?: string;
   baseUrl?: string;
-  /** x402Version advertised to the facilitator (default 1) */
+  /** x402 protocol version posted to the facilitator (default 1; pass 2 for v2 sellers). */
   x402Version?: number;
 }
 

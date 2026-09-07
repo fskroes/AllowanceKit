@@ -2,12 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AcceptsEntry } from "./types.ts";
+import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import type { PayContext, UnsignedPayment } from "./payer.ts";
 import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
-import { NotifyStore, Notifier } from "./notify.ts";
+import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
 import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
 import { writeMode } from "./mode.ts";
 import { BalanceCache, RPC_DEFAULTS, usdcBalanceMicro } from "./usdc.ts";
@@ -56,6 +57,64 @@ export const NETWORKS: Record<string, NetworkInfo> = {
     domainVersion: "2",
   },
 };
+
+/**
+ * x402 v2 identifies networks in CAIP-2 (`eip155:<chainId>`); v1 used bare
+ * names. Every live seller now quotes CAIP-2 (x402-compat.md §3, §4). Map both
+ * ways so a v2 seller quoting `eip155:84532` resolves to the same chain as a v1
+ * agent configured for `base-sepolia`, and bare names keep working unchanged.
+ */
+export const CAIP2_ALIASES: Record<string, string> = {
+  "eip155:8453": "base",
+  "eip155:84532": "base-sepolia",
+};
+
+/** Resolve a bare name or a CAIP-2 id to its NetworkInfo (undefined if unknown). */
+export function networkInfo(network: string): NetworkInfo | undefined {
+  return NETWORKS[network] ?? NETWORKS[CAIP2_ALIASES[network] ?? ""];
+}
+
+/**
+ * True when two identifiers name the same chain, whether written bare or as
+ * CAIP-2. The live agent's hard network constraint (x402-compat.md §6.3) uses
+ * this so `eip155:84532` is accepted for a `base-sepolia` agent but `eip155:8453`
+ * (a genuinely different chain) is still refused.
+ */
+export function sameChain(a: string, b: string): boolean {
+  const ia = networkInfo(a);
+  const ib = networkInfo(b);
+  return ia !== undefined && ib !== undefined && ia.chainId === ib.chainId;
+}
+
+/**
+ * Pick the offer a live agent on `network` can actually settle. A real v2 seller
+ * advertises several at once — different chains (mainnet *and* testnet), price
+ * tiers, and sometimes mechanisms this signer does not implement. Taking
+ * `accepts[0]` blindly pays the wrong one: QuickNode's first Base-Sepolia offer
+ * is a $1 "credit drawdown" tier that then demands SIWX, and a mainnet offer may
+ * sit ahead of the testnet one. Keep only `exact`-scheme offers on our chain
+ * that settle as a plain USDC `TransferWithAuthorization` — our EIP-712 domain
+ * uses the USDC asset as `verifyingContract`, so an `extra.verifyingContract`
+ * naming a *different* contract (e.g. Circle Gateway's batcher) is a mechanism
+ * we cannot sign for and is dropped. Among what remains, take the cheapest.
+ * Returns undefined when nothing is fulfillable, so the buyer reports "no
+ * acceptable payment methods" rather than signing a doomed payload.
+ */
+export function selectOffer(offers: AcceptsEntry[], network: string): AcceptsEntry | undefined {
+  const usable = (offers ?? []).filter((o) => {
+    if (o.scheme !== "exact") return false;
+    if (!sameChain(o.network, network)) return false;
+    const amount = offerAmount(o);
+    if (amount === undefined || !/^\d+$/.test(amount)) return false;
+    const extra = o.extra as { verifyingContract?: string } | undefined;
+    const asset = offerAsset(o);
+    if (extra?.verifyingContract && asset && extra.verifyingContract.toLowerCase() !== asset.toLowerCase())
+      return false;
+    return true;
+  });
+  if (!usable.length) return undefined;
+  return usable.reduce((best, o) => (BigInt(offerAmount(o)!) < BigInt(offerAmount(best)!) ? o : best));
+}
 
 const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
@@ -127,7 +186,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   const approvals = new ApprovalStore(stateDir, agentName);
   const reservations = new ReservationStore(stateDir);
   const notifyStore = new NotifyStore(stateDir, agentName);
-  const notifier = new Notifier(notifyStore, agentName);
+  const notifier = new Notifier(notifyStore, agentName, undefined, { network, mode: "live" });
 
   const readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
   const balances = new BalanceCache(readBalance, opts.balanceTtlMs ?? 15_000, (e) =>
@@ -167,8 +226,14 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       },
       balance: () => ledger.topups(agentName) - ledger.spendTotal(agentName),
     },
+    // A live seller often offers several tiers/chains at once; pick the cheapest
+    // one this agent can actually settle on its own chain, not just accepts[0].
+    chooseOffer: (offers) => selectOffer(offers, network),
     encodePayment: async (unsigned) => {
-      if (unsigned.requirements.network !== network)
+      // Same-chain, not same-string: a v2 seller quoting `eip155:84532` is the
+      // same chain as a `base-sepolia` agent and is signed; a different chain
+      // (or an unknown one) is still refused before anything is signed.
+      if (!sameChain(unsigned.requirements.network, network))
         throw new Error(
           `seller wants payment on "${unsigned.requirements.network}" but this agent is configured for "${network}" — ` +
             `nothing was signed. Create the agent with network: "${unsigned.requirements.network}" if that is what you meant.`,
@@ -179,6 +244,14 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     },
     ...rails,
   };
+
+  // A live agent is exactly the kind that runs headless on a server, so the
+  // heartbeat belongs here, not only in the dashboard. Unref'd; stop it on exit.
+  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
+    agent: agentName,
+    network,
+    mode: "live",
+  });
 
   return {
     agentName,
@@ -195,27 +268,39 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     rpcUrl,
     walletBalanceMicro: readBalance,
     policy: () => policyStore.load(),
+    stopHeartbeat,
   };
 }
 
 /**
- * Builds and signs a real x402 v1 payment payload (nested EVM shape):
- * EIP-712 TransferWithAuthorization over the USDC asset described by the
- * seller's requirements (`extra.name` / `extra.version` / `asset`).
+ * Builds and signs a real x402 payment payload: EIP-712
+ * TransferWithAuthorization over the USDC asset described by the seller's
+ * requirements (`extra.name` / `extra.version` / `asset`). The signing itself is
+ * identical between v1 and v2 — only the JSON envelope differs, so the shape is
+ * chosen from `unsigned.x402Version` (x402-compat.md §5, §6.4):
+ *   - v1: flat `{ x402Version, scheme, network, resource, payload:{…} }`
+ *   - v2: nested `{ x402Version:2, resource?, accepted:{requirements}, payload:{…} }`
  */
 export async function encodePaymentEvm(
   account: { address: string; signTypedData: (args: unknown) => Promise<string> },
   unsigned: UnsignedPayment,
 ): Promise<string> {
   const reqs = unsigned.requirements;
-  const info = NETWORKS[reqs.network];
-  if (!info) throw new Error(`unsupported network "${reqs.network}" (known: ${Object.keys(NETWORKS).join(", ")})`);
+  // Resolve either a bare name ("base-sepolia") or a CAIP-2 id ("eip155:84532").
+  const info = networkInfo(reqs.network);
+  if (!info)
+    throw new Error(
+      `unsupported network "${reqs.network}" (known: ${[...Object.keys(NETWORKS), ...Object.keys(CAIP2_ALIASES)].join(", ")})`,
+    );
+
+  const amount = offerAmount(reqs);
+  if (amount === undefined) throw new Error("seller offer carries neither `amount` nor `maxAmountRequired`");
 
   const now = Math.floor(Date.now() / 1000);
   const authorization = {
     from: account.address as `0x${string}`,
-    to: reqs.payTo as `0x${string}`,
-    value: BigInt(reqs.maxAmountRequired),
+    to: (offerPayTo(reqs) ?? "") as `0x${string}`,
+    value: BigInt(amount),
     validAfter: BigInt(now - 60),
     validBefore: BigInt(now + (reqs.maxTimeoutSeconds ?? 300)),
     nonce: `0x${crypto.randomBytes(32).toString("hex")}` as `0x${string}`,
@@ -228,33 +313,49 @@ export async function encodePaymentEvm(
     message: authorization,
   });
 
+  // signTypedData needs uint256 fields as BigInt, but the x402 wire format
+  // carries them as decimal strings — and BigInt is not JSON-serializable.
+  const wireAuthorization = {
+    ...authorization,
+    value: authorization.value.toString(),
+    validAfter: authorization.validAfter.toString(),
+    validBefore: authorization.validBefore.toString(),
+  };
+
+  if (unsigned.x402Version >= 2) {
+    // v2 PaymentPayload (spec §5.2.2): the chosen requirements go under
+    // `accepted`; scheme/network live inside it, not at the top level. Echo the
+    // seller's offer verbatim — a facilitator matches `accepted` against what it
+    // advertised, so our normalized copy's extra fields (`maxAmountRequired`, a
+    // synthesized `resource`) make it throw ("Unexpected error verifying
+    // payment"). The top-level `resource` is a ResourceInfo object, not the URL
+    // string we carry, so omit it rather than send the wrong type (it is optional).
+    const payloadV2 = {
+      x402Version: 2,
+      accepted: unsigned.acceptedOffer ?? reqs,
+      payload: { signature, authorization: wireAuthorization },
+    };
+    return Buffer.from(JSON.stringify(payloadV2)).toString("base64");
+  }
+
   const payload = {
     x402Version: unsigned.x402Version,
     scheme: reqs.scheme,
     network: reqs.network,
     resource: { url: reqs.resource, description: reqs.description ?? "", mimeType: reqs.mimeType ?? "" },
-    // signTypedData needs uint256 fields as BigInt, but the x402 wire format
-    // carries them as decimal strings — and BigInt is not JSON-serializable.
-    payload: {
-      signature,
-      authorization: {
-        ...authorization,
-        value: authorization.value.toString(),
-        validAfter: authorization.validAfter.toString(),
-        validBefore: authorization.validBefore.toString(),
-      },
-    },
+    payload: { signature, authorization: wireAuthorization },
   };
   return Buffer.from(JSON.stringify(payload)).toString("base64");
 }
 
 function evmDomain(reqs: AcceptsEntry, info: NetworkInfo): { name: string; version: string; chainId: number; verifyingContract: `0x${string}` } {
   const extra = reqs.extra as { name?: string; version?: string } | undefined;
+  const asset = offerAsset(reqs) ?? "";
   return {
     name: extra?.name ?? info.domainName,
     version: extra?.version ?? info.domainVersion,
     chainId: info.chainId,
-    verifyingContract: ((/^0x[0-9a-fA-F]{40}$/.test(reqs.asset) ? reqs.asset : info.usdc)) as `0x${string}`,
+    verifyingContract: ((/^0x[0-9a-fA-F]{40}$/.test(asset) ? asset : info.usdc)) as `0x${string}`,
   };
 }
 

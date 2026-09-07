@@ -39,7 +39,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./cli": "./dist/cli.js"
   },
   "files": [
     "dist/",

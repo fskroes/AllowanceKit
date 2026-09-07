@@ -9,7 +9,7 @@ import { withLock } from "./lock.ts";
 import { fmtUsdExact, usd } from "./money.ts";
 import type { PayContext } from "./payer.ts";
 import { CLI } from "./cli-name.ts";
-import { NotifyStore, Notifier } from "./notify.ts";
+import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
 import { readMode, type SettlementMode } from "./mode.ts";
 
 interface AgentIdentity {
@@ -39,6 +39,12 @@ export interface AllowanceRuntime {
   /** Present only on practice money: the simulated ledger that holds the balance. */
   chain?: { faucet(address: string, amountMicro: bigint): void; balance(address: string): bigint };
   policy(): RuntimePolicy;
+  /**
+   * Stops the cloud heartbeat this runtime started, if any. The timer is unref'd
+   * so a short-lived process need not call it; long-running callers (dashboard,
+   * a headless agent) should, on shutdown.
+   */
+  stopHeartbeat?(): void;
 }
 
 export interface AgentRuntime extends AllowanceRuntime {
@@ -207,6 +213,8 @@ export function buildPolicyRails(
       // write lock across a webhook call would serialise every parallel payer.
       const totals = ledger.totals(agentName, 0);
       notifier.spendChanged(totals.spendTotalMicro, effectiveBudgetMicro(policyStore.load(), totals.topupsMicro));
+      // The cloud feed gets every paid row, not just the ones that cross a threshold.
+      notifier.paid(url, host, amountMicro, txHash);
     },
 
     async recordBlocked(url, host, rule, detail, attemptedMicro) {
@@ -252,10 +260,13 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
   const approvals = new ApprovalStore(stateDir, agentName);
   const reservations = new ReservationStore(stateDir);
   const notifyStore = new NotifyStore(stateDir, agentName);
-  const notifier = new Notifier(notifyStore, agentName);
 
   const marker = readMode(stateDir);
   const live = marker.mode === "live" && Boolean(marker.address);
+  const notifier = new Notifier(notifyStore, agentName, undefined, {
+    network: marker.network,
+    mode: live ? "live" : "practice",
+  });
   const address = live ? marker.address! : loadOrCreateIdentity(chain, stateDir, agentName);
   // On a live directory the simulated balance is meaningless; the ledger is the
   // only number that means anything without a private key in hand.
@@ -275,6 +286,15 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     ...buildPolicyRails({ agentName, address, stateDir, chain: railChain, ledger, policyStore, approvals, reservations, notifier }),
   };
 
+  // A headless agent on a server is covered too: the heartbeat runs whenever a
+  // runtime exists, not only while the local dashboard is open. Unref'd, so a
+  // one-shot CLI command still exits at once.
+  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
+    agent: agentName,
+    network: marker.network,
+    mode: live ? "live" : "practice",
+  });
+
   return {
     agentName,
     address,
@@ -288,6 +308,7 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     notifyStore,
     mode: live ? "live" : "practice",
     policy: () => policyStore.load(),
+    stopHeartbeat,
   };
 }
 
