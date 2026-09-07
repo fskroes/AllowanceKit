@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20.11 is the package's engines floor; 24 is what the TypeScript sources
+        # run on natively. 22 sits between, so a regression on any supported line shows.
+        node: ["20.11.0", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # The published package is compiled dist/ for Node >= 20.11 — build and pack
+      # it on every supported line so an install-time break is caught on the floor,
+      # not only on the version the maintainer happens to run.
+      - run: npm run build
+
+      - run: npm pack --dry-run
+
+      # Zero runtime dependencies, so this should stay clean; it guards the peer/dev tree.
+      - run: npm audit --omit=dev --audit-level=high
+
+      # The tests import the .ts sources directly, which needs Node 24's native
+      # type stripping. On 20 and 22 the build + pack steps above are the gate;
+      # the full suite runs on 24.
+      - name: test
+        if: matrix.node == '24'
+        run: npm test

@@ -24,4 +24,4 @@ Look for issues labeled `good first issue` — usually docs, dashboard polish, o
 
 ## Reporting security issues
 
-Please do NOT open public issues for payment-handling vulnerabilities. Email hello@onewallie.com with details; we'll credit you in the release notes.
+Please do NOT open public issues for payment-handling vulnerabilities. Email hello@onewallie.com with details; we'll credit you in the release notes. The full policy — scope, supported versions, and the 48-hour acknowledgement — is in [SECURITY.md](SECURITY.md).
