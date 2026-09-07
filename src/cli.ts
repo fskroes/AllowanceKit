@@ -6,7 +6,16 @@ import { startDashboard } from "./dashboard-server.ts";
 import { fmtUsd, fmtUsdSmart, usd } from "./money.ts";
 import { POLICY_FIELDS, PolicyValidationError, RULE_LABELS, policyFileName, policyWarnings, type PolicyField } from "./policy.ts";
 import { runDemo } from "./demo-run.ts";
-import { deliver, providerEnvVar, startHeartbeat, NotifyStore } from "./notify.ts";
+import {
+  deliver,
+  deliverCloud,
+  providerEnvVar,
+  startHeartbeat,
+  cloudWhoami,
+  NotifyStore,
+  CLOUD_ENV,
+  CLOUD_DEFAULT_URL,
+} from "./notify.ts";
 import { describeMode, describeTopUp, readMode } from "./mode.ts";
 import { NETWORKS, createLiveAgent } from "./live.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
@@ -68,6 +77,7 @@ Alerts you can set with \`notify\`
   notify email <address>          mail every alert (needs a provider key, see below)
   notify sms +31612345678         text every alert (needs Twilio keys, see below)
   notify push <topic>             phone push over ntfy.sh — no account needed
+  notify cloud <workspace-key>    send every decision + a heartbeat to Wallie Cloud
   notify heartbeat <url>          ping a dead-man's switch while the agent runs
   notify test                     send one of each, right now, and report delivery
   notify off                      stop sending anything
@@ -487,6 +497,19 @@ async function main(): Promise<void> {
       const failures = rt.notifyStore.recentFailures(1);
       if (failures.length)
         console.log(`alerts         last delivery failed: ${failures[0].channel} — ${failures[0].detail}`);
+      const cloudCfg = rt.notifyStore.load().cloud;
+      if (cloudCfg?.enabled) {
+        if (process.env[cloudCfg.keyEnv]) {
+          const who = await cloudWhoami(cloudCfg);
+          console.log(
+            who.ok
+              ? `cloud          connected as ${who.workspace ?? "your workspace"}`
+              : `cloud          ${hostOfUrl(cloudCfg.url)} — ${who.detail}`,
+          );
+        } else {
+          console.log(`cloud          ${hostOfUrl(cloudCfg.url)} — ${cloudCfg.keyEnv} is NOT set, nothing will send`);
+        }
+      }
       printWarnings(policyWarnings(p));
       break;
     }
@@ -634,6 +657,20 @@ async function main(): Promise<void> {
           console.log(`sms       not set`);
         }
         console.log(`push      ${c.pushTopic ? `${c.pushTopic} (via ntfy)` : "not set"}`);
+        if (c.cloud?.enabled) {
+          if (process.env[c.cloud.keyEnv]) {
+            const who = await cloudWhoami(c.cloud);
+            console.log(
+              who.ok
+                ? `cloud     connected as ${who.workspace ?? "your workspace"} (${hostOfUrl(c.cloud.url)})`
+                : `cloud     ${hostOfUrl(c.cloud.url)} — ${who.detail}`,
+            );
+          } else {
+            console.log(`cloud     ${hostOfUrl(c.cloud.url)} — ${c.cloud.keyEnv} is NOT set, nothing will send`);
+          }
+        } else {
+          console.log(`cloud     not set`);
+        }
         console.log(
           c.heartbeatUrl
             ? `heartbeat every ${c.heartbeatSeconds}s to ${hostOfUrl(c.heartbeatUrl)} while the dashboard runs`
@@ -663,8 +700,34 @@ async function main(): Promise<void> {
           sms: undefined,
           pushTopic: undefined,
           heartbeatUrl: undefined,
+          cloud: undefined,
         });
         console.log(`alerts off — nothing will be sent`);
+        break;
+      }
+
+      if (sub === "cloud") {
+        if (!value)
+          throw new UserError(
+            `which workspace key? e.g.  ${CLI} notify cloud wk_live_...\n` +
+              `It is in your Wallie Cloud welcome email. Or "${CLI} notify cloud off" to disconnect.`,
+          );
+        if (value === "off") {
+          rt.notifyStore.save({ cloud: undefined });
+          console.log(`cloud off — no events or heartbeats will be sent`);
+          break;
+        }
+        if (!/^wk_(live|test)_[A-Za-z0-9]{8,}$/.test(value))
+          throw new UserError(
+            `"${value.slice(0, 12)}…" is not a Wallie Cloud workspace key — it should look like wk_live_…`,
+          );
+        // Store only the wiring, never the key: it is read from the environment
+        // at send time, so notifications.json stays safe to paste in a bug report.
+        rt.notifyStore.save({ cloud: { enabled: true, url: CLOUD_DEFAULT_URL, keyEnv: CLOUD_ENV } });
+        console.log(`cloud set — every decision and a heartbeat go to ${hostOfUrl(CLOUD_DEFAULT_URL)}`);
+        console.log(`\nThe key is never written to disk. Export it so the runtime can read it:`);
+        console.log(`  export ${CLOUD_ENV}=${value}`);
+        console.log(`\ncheck it now with:  ${CLI} notify test`);
         break;
       }
 
@@ -788,7 +851,7 @@ async function main(): Promise<void> {
 
       if (sub === "test") {
         const cfg = rt.notifyStore.load();
-        if (!cfg.webhookUrl && !cfg.email)
+        if (!rt.notifyStore.configured() && !cfg.cloud?.enabled)
           throw new UserError(`nothing to test — set a channel first:  ${CLI} notify webhook <url>`);
         console.log(`sending one test alert on every configured channel…`);
         const results = await deliver(cfg, {
@@ -800,6 +863,17 @@ async function main(): Promise<void> {
             `every payment your rails refuse, and every payment waiting on your approval.`,
           data: { agent: rt.agentName, test: true },
         });
+        // The cloud test verifies the key authenticates (GET /v1/me) rather than
+        // injecting a fake payment into the feed.
+        if (cfg.cloud?.enabled) {
+          const who = await cloudWhoami(cfg.cloud);
+          results.push({
+            channel: "cloud",
+            ok: who.ok,
+            detail: who.ok ? `connected as ${who.workspace ?? "your workspace"}` : who.detail,
+            attempts: 1,
+          });
+        }
         let failed = false;
         for (const r of results) {
           const tries = r.attempts > 1 ? ` (${r.attempts} attempts)` : "";
@@ -810,7 +884,7 @@ async function main(): Promise<void> {
         break;
       }
 
-      throw new UserError(`unknown notify command "${sub}" — try: webhook, email, sms, push, heartbeat, test, off`);
+      throw new UserError(`unknown notify command "${sub}" — try: webhook, email, sms, push, cloud, heartbeat, test, off`);
     }
 
     case "pay": {
@@ -967,6 +1041,7 @@ async function main(): Promise<void> {
       const stopHeartbeat = startHeartbeat(rt.notifyStore.load(), rt.agentName);
       process.on("SIGINT", () => {
         stopHeartbeat();
+        rt.stopHeartbeat?.();
         process.exit(0);
       });
       console.log(`dashboard → http://localhost:${port}`);

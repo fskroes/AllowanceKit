@@ -27,6 +27,44 @@ import { RULE_LABELS, defaultPolicy, slug } from "./policy.ts";
 
 export type NotifyEvent = "threshold" | "blocked" | "approval";
 
+/**
+ * Wallie Cloud — the hosted control plane at api.onewallie.com. It is one more
+ * channel, but a different kind: instead of alerting a human when a threshold is
+ * crossed, it receives *every* decision the runtime makes (paid, blocked,
+ * queued) plus a liveness heartbeat, so something off this machine can tell you
+ * when this machine goes quiet. It never sees a key, a signature, or the power
+ * to authorize a payment.
+ */
+export const CLOUD_ENV = "WALLIE_CLOUD_KEY";
+export const CLOUD_DEFAULT_URL = "https://api.onewallie.com";
+
+export interface CloudConfig {
+  enabled: boolean;
+  /** Base URL of the control plane. */
+  url: string;
+  /**
+   * Name of the environment variable holding the workspace key — the key itself
+   * is read at send time and never written to disk, exactly like the email and
+   * SMS provider keys.
+   */
+  keyEnv: string;
+}
+
+/** The kinds the cloud feed carries. Unlike local alerts it wants every payment, not just threshold crossings. */
+export type CloudEventKind = "payment" | "blocked" | "approval";
+
+export interface CloudEvent {
+  kind: CloudEventKind;
+  agent: string;
+  network?: string;
+  mode?: "practice" | "live";
+  subject: string;
+  body: string;
+  /** Structured detail. Any URL field is stripped of its query string before it leaves the machine (plan D-6). */
+  data: Record<string, unknown>;
+  at: string;
+}
+
 export interface NotifyConfig {
   /** Any URL that accepts a JSON POST: Slack, Discord, Zapier, your own server. */
   webhookUrl?: string;
@@ -49,6 +87,8 @@ export interface NotifyConfig {
   heartbeatUrl?: string;
   /** How often to ping it. Defaults to every 60 seconds. */
   heartbeatSeconds?: number;
+  /** Wallie Cloud: an outbound feed of every decision + a liveness heartbeat. Off unless set. */
+  cloud?: CloudConfig;
   /** Percentages of the allowance that trigger a heads-up. */
   thresholds: number[];
   onBlock: boolean;
@@ -89,7 +129,7 @@ export interface DeliveryResult {
 export interface DeliveryFailure {
   at: string;
   agent: string;
-  event: NotifyEvent | "heartbeat";
+  event: NotifyEvent | "heartbeat" | "payment";
   subject: string;
   channel: string;
   detail: string;
@@ -385,6 +425,118 @@ async function pingHeartbeat(url: string): Promise<void> {
 }
 
 /**
+ * Strips the query string from a URL so a value that may be personal — `?city=lisbon`,
+ * `?token=…` — never leaves the machine on its way to the cloud (plan D-6). Falls
+ * back to a plain split for anything that is not a parseable URL.
+ */
+export function stripQuery(value: string): string {
+  try {
+    const u = new URL(value);
+    u.search = "";
+    return u.toString();
+  } catch {
+    const q = value.indexOf("?");
+    return q === -1 ? value : value.slice(0, q);
+  }
+}
+
+function cloudUrl(base: string, route: string): string {
+  return base.replace(/\/+$/, "") + route;
+}
+
+/** POSTs one decision to the cloud's event feed. The key is read from the environment at send time. */
+async function postCloudEvent(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.ProcessEnv): Promise<Attempt> {
+  const key = env[cloud.keyEnv];
+  if (!key) return { ok: false, detail: `${cloud.keyEnv} is not set, so nothing reached the cloud`, retryable: false };
+  try {
+    const res = await fetch(cloudUrl(cloud.url, "/v1/events"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(evt),
+      signal: AbortSignal.timeout(8000),
+    });
+    return res.ok
+      ? { ok: true, detail: `sent to ${hostOf(cloud.url)}`, retryable: false }
+      : { ok: false, detail: `HTTP ${res.status} from ${hostOf(cloud.url)}`, retryable: retryableStatus(res.status) };
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e), retryable: true };
+  }
+}
+
+/** Sends one cloud event with the same retry policy as every other channel. Exported for `notify test`. */
+export function deliverCloud(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.ProcessEnv = process.env): Promise<DeliveryResult> {
+  return withRetry("cloud", () => postCloudEvent(cloud, evt, env));
+}
+
+/** What a heartbeat tells the cloud about the agent that is still alive. */
+export interface CloudHeartbeat {
+  agent: string;
+  network?: string;
+  mode?: "practice" | "live";
+  version?: string;
+}
+
+/**
+ * Beats to the cloud's `/v1/heartbeat` while this process lives, so the watchdog
+ * on the other end can raise the alarm this machine cannot raise about itself.
+ * The timer is unref'd — it never keeps a process alive on its own — and returns
+ * a stop function. A no-op when the cloud channel is off.
+ */
+export function startCloudHeartbeat(
+  cloud: CloudConfig | undefined,
+  meta: CloudHeartbeat,
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    everyMs?: number;
+    send?: (cloud: CloudConfig, meta: CloudHeartbeat, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  } = {},
+): () => void {
+  if (!cloud?.enabled) return () => undefined;
+  const env = opts.env ?? process.env;
+  const send = opts.send ?? postCloudHeartbeat;
+  const everyMs = Math.max(250, opts.everyMs ?? 60_000);
+  const beat = () => void Promise.resolve(send(cloud, meta, env)).catch(() => undefined);
+  beat();
+  const timer = setInterval(beat, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+async function postCloudHeartbeat(cloud: CloudConfig, meta: CloudHeartbeat, env: NodeJS.ProcessEnv): Promise<void> {
+  const key = env[cloud.keyEnv];
+  if (!key) return;
+  await fetch(cloudUrl(cloud.url, "/v1/heartbeat"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify(meta),
+    signal: AbortSignal.timeout(8000),
+  }).catch(() => undefined);
+}
+
+/**
+ * Asks the cloud who this key belongs to (`GET /v1/me`), so `notify` and `status`
+ * can say "connected as <workspace>" rather than just "a key is set".
+ */
+export async function cloudWhoami(
+  cloud: CloudConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ ok: boolean; workspace?: string; detail: string }> {
+  const key = env[cloud.keyEnv];
+  if (!key) return { ok: false, detail: `${cloud.keyEnv} is not set` };
+  try {
+    const res = await fetch(cloudUrl(cloud.url, "/v1/me"), {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return { ok: false, detail: `HTTP ${res.status} from ${hostOf(cloud.url)}` };
+    const body = (await res.json().catch(() => ({}))) as { workspace?: { name?: string }; name?: string };
+    return { ok: true, workspace: body.workspace?.name ?? body.name, detail: "connected" };
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
  * Decides what is worth telling a human about, and remembers what it already
  * said.
  *
@@ -397,15 +549,92 @@ export class Notifier {
   private agentName: string;
   /** Overridable so tests can assert without reaching the network. */
   private send: (cfg: NotifyConfig, msg: Message) => Promise<unknown>;
+  /** The cloud transport, overridable for tests, separate from the human channels. */
+  private sendCloud: (cloud: CloudConfig, evt: CloudEvent) => Promise<DeliveryResult>;
+  /** Tagged onto every cloud event so the feed knows which rail this agent runs on. */
+  private network?: string;
+  private mode?: "practice" | "live";
 
   constructor(
     store: NotifyStore,
     agentName: string,
     send: (cfg: NotifyConfig, msg: Message) => Promise<unknown> = deliver,
+    opts: {
+      sendCloud?: (cloud: CloudConfig, evt: CloudEvent) => Promise<DeliveryResult>;
+      network?: string;
+      mode?: "practice" | "live";
+    } = {},
   ) {
     this.store = store;
     this.agentName = agentName;
     this.send = send;
+    this.sendCloud = opts.sendCloud ?? ((cloud, evt) => deliverCloud(cloud, evt));
+    this.network = opts.network;
+    this.mode = opts.mode;
+  }
+
+  /**
+   * Sends one decision to the cloud feed, if the channel is on. Independent of
+   * the human channels and of the threshold logic: the cloud wants every paid,
+   * blocked and queued row, not only the ones worth waking a human for. Never
+   * awaited, never able to fail a payment; a failure is warned and written down.
+   */
+  private emitCloud(
+    cfg: NotifyConfig,
+    kind: CloudEventKind,
+    subject: string,
+    body: string,
+    data: Record<string, unknown>,
+  ): void {
+    const cloud = cfg.cloud;
+    if (!cloud?.enabled) return;
+    const clean = { ...data };
+    if (typeof clean.url === "string") clean.url = stripQuery(clean.url);
+    const evt: CloudEvent = {
+      kind,
+      agent: this.agentName,
+      network: this.network,
+      mode: this.mode,
+      subject,
+      body,
+      data: clean,
+      at: new Date().toISOString(),
+    };
+    void Promise.resolve(this.sendCloud(cloud, evt))
+      .then((res) => {
+        if (!res || res.ok) return;
+        console.warn(`cloud event not delivered: ${res.detail}`);
+        this.store.recordFailures([
+          {
+            at: new Date().toISOString(),
+            agent: this.agentName,
+            event: kind,
+            subject,
+            channel: "cloud",
+            detail: res.detail,
+            attempts: res.attempts ?? 1,
+          },
+        ]);
+      })
+      .catch((e: unknown) => {
+        console.warn(`cloud event not delivered: ${e instanceof Error ? e.message : String(e)}`);
+      });
+  }
+
+  /**
+   * Call after a payment settles. The cloud feed records every paid row (the
+   * local channels do not — they only speak up at a threshold). Cloud-only.
+   */
+  paid(url: string, host: string, amountMicro: bigint, txHash?: string): void {
+    const cfg = this.store.load();
+    if (!cfg.cloud?.enabled) return;
+    this.emitCloud(
+      cfg,
+      "payment",
+      `${this.agentName} paid ${fmtUsdSmart(amountMicro)} to ${host}`,
+      `${fmtUsdSmart(amountMicro)} settled to ${host}.` + (txHash ? `\ntx ${txHash}` : ""),
+      { agent: this.agentName, host, url, amountMicro: amountMicro.toString(), txHash },
+    );
   }
 
   private dispatch(cfg: NotifyConfig, msg: Message): void {
@@ -476,39 +705,36 @@ export class Notifier {
   /** Call whenever a rail refuses a payment. */
   blocked(host: string, rule: string, detail: string, attemptedMicro: bigint): void {
     const cfg = this.store.load();
-    if (!cfg.onBlock || !this.store.configured()) return;
-    // An approval block already sends its own, more actionable message.
+    // An approval block already sends its own, more actionable message — on both
+    // the human channels and the cloud — so this one stays quiet for it.
     if (rule === "human_approval_required") return;
 
     const label = RULE_LABELS[rule as keyof typeof RULE_LABELS] ?? rule;
-    this.dispatch(cfg, {
-      event: "blocked",
-      subject: `${this.agentName} was stopped: ${label.toLowerCase()}`,
-      body:
-        `It tried to pay ${fmtUsdSmart(attemptedMicro)} to ${host} and your rails refused.\n\n` +
-        `${detail}\n\nNothing moved. No action is needed unless you want to raise a limit.`,
-      data: {
-        agent: this.agentName,
-        host,
-        rule,
-        detail,
-        attemptedMicro: attemptedMicro.toString(),
-      },
-    });
+    const subject = `${this.agentName} was stopped: ${label.toLowerCase()}`;
+    const body =
+      `It tried to pay ${fmtUsdSmart(attemptedMicro)} to ${host} and your rails refused.\n\n` +
+      `${detail}\n\nNothing moved. No action is needed unless you want to raise a limit.`;
+    const data = { agent: this.agentName, host, rule, detail, attemptedMicro: attemptedMicro.toString() };
+
+    // The cloud feed gets every block, regardless of the human alert preferences.
+    this.emitCloud(cfg, "blocked", subject, body, data);
+    if (!cfg.onBlock || !this.store.configured()) return;
+    this.dispatch(cfg, { event: "blocked", subject, body, data });
   }
 
   /** Call when a payment is parked for a human decision. */
   approvalQueued(id: string, host: string, amountMicro: bigint, cli: string): void {
     const cfg = this.store.load();
+    const subject = `${this.agentName} is waiting on you: ${fmtUsdSmart(amountMicro)} to ${host}`;
+    const body =
+      `It wants to pay ${fmtUsdSmart(amountMicro)} to ${host} and that is at or above your approval threshold.\n\n` +
+      `Nothing has moved yet. It waits until you decide.\n\n` +
+      `Approve:  ${cli} approve ${id}\nDeny:     ${cli} deny ${id}\nOr use the dashboard: ${cli} dashboard`;
+    const data = { agent: this.agentName, requestId: id, host, amountMicro: amountMicro.toString() };
+
+    // The cloud feed gets every queued payment, regardless of the human alert preferences.
+    this.emitCloud(cfg, "approval", subject, body, data);
     if (!cfg.onApproval || !this.store.configured()) return;
-    this.dispatch(cfg, {
-      event: "approval",
-      subject: `${this.agentName} is waiting on you: ${fmtUsdSmart(amountMicro)} to ${host}`,
-      body:
-        `It wants to pay ${fmtUsdSmart(amountMicro)} to ${host} and that is at or above your approval threshold.\n\n` +
-        `Nothing has moved yet. It waits until you decide.\n\n` +
-        `Approve:  ${cli} approve ${id}\nDeny:     ${cli} deny ${id}\nOr use the dashboard: ${cli} dashboard`,
-      data: { agent: this.agentName, requestId: id, host, amountMicro: amountMicro.toString() },
-    });
+    this.dispatch(cfg, { event: "approval", subject, body, data });
   }
 }

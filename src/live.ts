@@ -8,7 +8,7 @@ import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
-import { NotifyStore, Notifier } from "./notify.ts";
+import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
 import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
 import { writeMode } from "./mode.ts";
 import { BalanceCache, RPC_DEFAULTS, usdcBalanceMicro } from "./usdc.ts";
@@ -186,7 +186,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   const approvals = new ApprovalStore(stateDir, agentName);
   const reservations = new ReservationStore(stateDir);
   const notifyStore = new NotifyStore(stateDir, agentName);
-  const notifier = new Notifier(notifyStore, agentName);
+  const notifier = new Notifier(notifyStore, agentName, undefined, { network, mode: "live" });
 
   const readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
   const balances = new BalanceCache(readBalance, opts.balanceTtlMs ?? 15_000, (e) =>
@@ -245,6 +245,14 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     ...rails,
   };
 
+  // A live agent is exactly the kind that runs headless on a server, so the
+  // heartbeat belongs here, not only in the dashboard. Unref'd; stop it on exit.
+  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
+    agent: agentName,
+    network,
+    mode: "live",
+  });
+
   return {
     agentName,
     address: account.address,
@@ -260,6 +268,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     rpcUrl,
     walletBalanceMicro: readBalance,
     policy: () => policyStore.load(),
+    stopHeartbeat,
   };
 }
 
