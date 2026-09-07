@@ -86,6 +86,36 @@ export function sameChain(a: string, b: string): boolean {
   return ia !== undefined && ib !== undefined && ia.chainId === ib.chainId;
 }
 
+/**
+ * Pick the offer a live agent on `network` can actually settle. A real v2 seller
+ * advertises several at once — different chains (mainnet *and* testnet), price
+ * tiers, and sometimes mechanisms this signer does not implement. Taking
+ * `accepts[0]` blindly pays the wrong one: QuickNode's first Base-Sepolia offer
+ * is a $1 "credit drawdown" tier that then demands SIWX, and a mainnet offer may
+ * sit ahead of the testnet one. Keep only `exact`-scheme offers on our chain
+ * that settle as a plain USDC `TransferWithAuthorization` — our EIP-712 domain
+ * uses the USDC asset as `verifyingContract`, so an `extra.verifyingContract`
+ * naming a *different* contract (e.g. Circle Gateway's batcher) is a mechanism
+ * we cannot sign for and is dropped. Among what remains, take the cheapest.
+ * Returns undefined when nothing is fulfillable, so the buyer reports "no
+ * acceptable payment methods" rather than signing a doomed payload.
+ */
+export function selectOffer(offers: AcceptsEntry[], network: string): AcceptsEntry | undefined {
+  const usable = (offers ?? []).filter((o) => {
+    if (o.scheme !== "exact") return false;
+    if (!sameChain(o.network, network)) return false;
+    const amount = offerAmount(o);
+    if (amount === undefined || !/^\d+$/.test(amount)) return false;
+    const extra = o.extra as { verifyingContract?: string } | undefined;
+    const asset = offerAsset(o);
+    if (extra?.verifyingContract && asset && extra.verifyingContract.toLowerCase() !== asset.toLowerCase())
+      return false;
+    return true;
+  });
+  if (!usable.length) return undefined;
+  return usable.reduce((best, o) => (BigInt(offerAmount(o)!) < BigInt(offerAmount(best)!) ? o : best));
+}
+
 const TRANSFER_WITH_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
     { name: "from", type: "address" },
@@ -196,6 +226,9 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       },
       balance: () => ledger.topups(agentName) - ledger.spendTotal(agentName),
     },
+    // A live seller often offers several tiers/chains at once; pick the cheapest
+    // one this agent can actually settle on its own chain, not just accepts[0].
+    chooseOffer: (offers) => selectOffer(offers, network),
     encodePayment: async (unsigned) => {
       // Same-chain, not same-string: a v2 seller quoting `eip155:84532` is the
       // same chain as a `base-sepolia` agent and is signed; a different chain
@@ -282,11 +315,15 @@ export async function encodePaymentEvm(
 
   if (unsigned.x402Version >= 2) {
     // v2 PaymentPayload (spec §5.2.2): the chosen requirements go under
-    // `accepted`; scheme/network live inside it, not at the top level.
+    // `accepted`; scheme/network live inside it, not at the top level. Echo the
+    // seller's offer verbatim — a facilitator matches `accepted` against what it
+    // advertised, so our normalized copy's extra fields (`maxAmountRequired`, a
+    // synthesized `resource`) make it throw ("Unexpected error verifying
+    // payment"). The top-level `resource` is a ResourceInfo object, not the URL
+    // string we carry, so omit it rather than send the wrong type (it is optional).
     const payloadV2 = {
       x402Version: 2,
-      resource: reqs.resource,
-      accepted: reqs,
+      accepted: unsigned.acceptedOffer ?? reqs,
       payload: { signature, authorization: wireAuthorization },
     };
     return Buffer.from(JSON.stringify(payloadV2)).toString("base64");

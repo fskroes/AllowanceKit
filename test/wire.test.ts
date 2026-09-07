@@ -8,6 +8,8 @@ import path from "node:path";
 import { paymentGate } from "../src/seller.ts";
 import { MockChain } from "../src/chain.ts";
 import { payingFetch, type PayContext } from "../src/payer.ts";
+import { selectOffer } from "../src/live.ts";
+import { offerAmount, type AcceptsEntry } from "../src/types.ts";
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-test-"));
@@ -141,6 +143,30 @@ test("nested x402 v1 EVM shape passes the gate's sanity checks", async () => {
   const receipt = JSON.parse(Buffer.from(res.headers.get("x-payment-response") ?? "", "base64").toString("utf8")) as { amountMicro?: string };
   assert.equal(receipt.amountMicro, PRICE.toString());
   await api.close();
+});
+
+test("selectOffer picks the cheapest plain-USDC offer on the agent's own chain", () => {
+  // Shaped after QuickNode's real Base-Sepolia 402 (x402-compat / L-02): a $1
+  // credit-drawdown tier first, a $0.001 per-request tier, a $0.0001 Circle
+  // Gateway tier (different verifyingContract), then a mainnet tier.
+  const USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+  const USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const payTo = "0xF46394aDdDA95A3d5bCC1124605E3d15D204623C";
+  const offers: AcceptsEntry[] = [
+    { scheme: "exact", network: "eip155:84532", amount: "1000000", payTo, asset: USDC_SEPOLIA, extra: { name: "USDC", version: "2" } },
+    { scheme: "exact", network: "eip155:84532", amount: "1000", payTo, asset: USDC_SEPOLIA, extra: { name: "USDC", version: "2" } },
+    { scheme: "exact", network: "eip155:84532", amount: "100", payTo, asset: USDC_SEPOLIA, extra: { name: "GatewayWalletBatched", version: "1", verifyingContract: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9" } },
+    { scheme: "exact", network: "eip155:8453", amount: "10000000", payTo, asset: USDC_MAINNET, extra: { name: "USD Coin", version: "2" } },
+  ];
+
+  // A base-sepolia agent takes the $0.001 per-request tier — not the $1 tier,
+  // not the Gateway tier, not the mainnet tier.
+  assert.equal(offerAmount(selectOffer(offers, "base-sepolia")!), "1000");
+  // A base (mainnet) agent takes the mainnet USDC offer.
+  assert.equal(offerAmount(selectOffer(offers, "base")!), "10000000");
+  // Nothing fulfillable → undefined (buyer then reports "no acceptable methods").
+  assert.equal(selectOffer([offers[2]], "base-sepolia"), undefined); // Gateway-only
+  assert.equal(selectOffer([], "base-sepolia"), undefined);
 });
 
 test("payingFetch surfaces policy blocks pre-flight without any network call", async () => {

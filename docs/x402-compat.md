@@ -305,3 +305,39 @@ curl -sS -D - https://x402uselessfacts.vercel.app/api/useless-fact   # body is {
 # the spec
 curl -s https://raw.githubusercontent.com/coinbase/x402/main/specs/x402-specification-v2.md
 ```
+
+---
+
+## 8. L-02 live run against a real third-party seller (2026-09-07)
+
+Ran the live buyer runtime against **`https://x402.quicknode.com/api/ping`** — a real
+third-party x402 **v2** seller (not our `paymentGate`) that advertises a 20-offer 402 across
+Base, Base Sepolia, Polygon, Amoy, X Layer, and Solana. Harness: `scripts/l02-thirdparty.ts`.
+Two real buyer bugs surfaced, each fixed with a wire test; each fix moved the seller's
+response to the next failure layer, which is how we know they were real:
+
+1. **Blind `accepts[0]` selection.** The buyer paid the first offer, which was QuickNode's
+   `$1.00` "credit drawdown" tier → `400 auth_required` ("Credit drawdown payments require
+   SIWX authentication"). Fix: `selectOffer` (src/live.ts) — keep only `exact`-scheme offers
+   on the agent's own chain that settle as a plain USDC `TransferWithAuthorization` (an
+   `extra.verifyingContract` naming a different contract, e.g. Circle Gateway, is dropped),
+   then take the cheapest. Now selects the `$0.001` per-request tier on `eip155:84532`.
+
+2. **Normalized offer + wrong-typed `resource` on the v2 wire.** Our v2 `accepted` carried
+   fields the seller never sent (`maxAmountRequired`, a synthesized `resource` string) and a
+   top-level `resource` string where the spec wants a ResourceInfo object → `400 "Unexpected
+   error verifying payment"`. Fix: echo the seller's chosen offer **verbatim** under
+   `accepted` (src/payer.ts `acceptedOffer`), and omit the optional top-level `resource`.
+   This got the payment **past QuickNode's signature verification** — the error advanced to a
+   settlement-routing decision.
+
+**Where it stopped:** with a spec-valid, verified payload, QuickNode answers
+`404 unsupported_network` for `eip155:84532` — a network it advertised itself in the same
+402. That is a seller-side testnet-settlement limitation, not a buyer defect: the buyer
+negotiated the real v2 402, selected the right offer, signed a real EIP-3009 authorization,
+and produced a payload their verifier accepted.
+
+**L-02 status:** the buyer is proven against a real third-party v2 seller up to the
+settlement boundary, but a fully-**settled** third-party testnet payment (200 + tx hash,
+recorded under `docs/canary-runs/`) has **not** happened yet — it needs a Base-Sepolia seller
+that actually settles what it advertises. L-02 remains open on that last step.

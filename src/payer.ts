@@ -43,7 +43,16 @@ export interface UnsignedPayment {
   amount: string;
   nonce: string;
   timestamp: number;
+  /** The offer normalized to one field set (both `amount` and `maxAmountRequired`). */
   requirements: AcceptsEntry;
+  /**
+   * The seller's chosen offer exactly as it arrived, before normalization. A v2
+   * facilitator echoes `payload.accepted` back against what it advertised and can
+   * throw on fields it never sent (our v1-compat `maxAmountRequired`, a
+   * synthesized `resource`), so the v2 wire echoes this verbatim, not the
+   * normalized copy.
+   */
+  acceptedOffer?: AcceptsEntry;
 }
 
 export type AuthorizeResult = { allowed: true; reservationId?: string } | ({ allowed: false } & BlockedBy);
@@ -61,6 +70,14 @@ export interface PayContext {
    * x402 v1 payloads via src/live.ts).
    */
   encodePayment?(unsigned: UnsignedPayment): Promise<string>;
+  /**
+   * Choose which of a seller's advertised offers to pay. A real v2 seller lists
+   * several — different chains, price tiers, settlement mechanisms — and the
+   * first is not always one this agent can settle. A live agent picks the
+   * cheapest plain-USDC offer on its own chain (src/live.ts). The default, used
+   * by the mock ctx and single-offer v1 sellers, is simply the first offer.
+   */
+  chooseOffer?(offers: AcceptsEntry[]): AcceptsEntry | undefined;
   /** The rails currently in force — lets a self-correcting agent read its own limits. */
   policy?(): RuntimePolicy;
   authorize(amountMicro: bigint, url: string): Promise<AuthorizeResult>;
@@ -145,7 +162,8 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
     bodyJson;
   const isV2 = Number(headerJson?.x402Version ?? bodyJson?.x402Version ?? 1) >= 2;
 
-  const rawOffer = challenge?.accepts?.[0];
+  const offers = challenge?.accepts ?? [];
+  const rawOffer = ctx.chooseOffer ? ctx.chooseOffer(offers) : offers[0];
   if (!rawOffer)
     return {
       ok: false,
@@ -210,6 +228,8 @@ export async function payingFetch(ctx: PayContext, url: string, init?: RequestIn
     nonce,
     timestamp: Date.now(),
     requirements: offer,
+    // Echo exactly what the seller sent on the v2 wire (see UnsignedPayment).
+    acceptedOffer: rawOffer,
   };
 
   // v2 renamed the wire headers: the payment goes up in `PAYMENT-SIGNATURE`
@@ -317,8 +337,7 @@ function encodeDefaultPayment(unsigned: UnsignedPayment, signature: string): str
   if (unsigned.x402Version >= 2) {
     const payloadV2 = {
       x402Version: 2,
-      resource: unsigned.resource,
-      accepted: unsigned.requirements,
+      accepted: unsigned.acceptedOffer ?? unsigned.requirements,
       payload: {
         signature,
         authorization: { from: unsigned.from, to: unsigned.payTo, value: unsigned.amount },

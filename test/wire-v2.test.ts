@@ -155,6 +155,24 @@ test("buyer answers a v2 seller with x402Version:2, PAYMENT-SIGNATURE, nested {a
   await seller.close();
 });
 
+test("buyer echoes the seller's chosen offer verbatim under `accepted` (no v1 normalization on the wire)", async () => {
+  // A real facilitator (QuickNode, L-02) matches `payload.accepted` against the
+  // offer it advertised and throws on fields it never sent. So the wire must
+  // carry the seller's offer byte-for-byte — not our internal normalized copy
+  // that adds `maxAmountRequired` and a synthesized `resource` — and no
+  // top-level `resource` string (v2's is a ResourceInfo object; ours would be
+  // the wrong type).
+  const seller = await listenV2(USELESS_FACT_CHALLENGE);
+  const { ctx } = captureCtx();
+  await payingFetch(ctx, `${seller.url}/api/useless-fact`);
+
+  const sent = seller.lastPayment()!;
+  assert.deepEqual(sent.accepted, USELESS_FACT_CHALLENGE.accepts[0], "accepted matches the seller's offer byte-for-byte");
+  assert.equal((sent.accepted as AcceptsEntry).maxAmountRequired, undefined, "no synthesized v1 price field on the v2 wire");
+  assert.equal((sent as Record<string, unknown>).resource, undefined, "no malformed top-level resource string");
+  await seller.close();
+});
+
 test("a v2 seller that echoes the challenge in the body too is still parsed", async () => {
   const seller = await listenV2(USELESS_FACT_CHALLENGE, { emptyBody: false });
   const { ctx, authorized } = captureCtx();
