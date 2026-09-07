@@ -1,0 +1,43 @@
+{
+  "name": "wallie",
+  "version": "0.4.0",
+  "description": "Wallie — a spending allowance for your AI agent. A thin alias for allowance-kit: same CLI, same SDK.",
+  "type": "module",
+  "license": "MIT",
+  "author": "fskroes",
+  "homepage": "https://onewallie.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fskroes/AllowanceKit.git",
+    "directory": "packages/wallie"
+  },
+  "bugs": {
+    "url": "https://github.com/fskroes/AllowanceKit/issues"
+  },
+  "keywords": [
+    "x402",
+    "agentic-payments",
+    "ai-agents",
+    "micropayments",
+    "usdc",
+    "allowance",
+    "spend-controls"
+  ],
+  "bin": {
+    "wallie": "cli.js"
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "cli.js",
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "allowance-kit": "^0.4.0"
+  }
+}
