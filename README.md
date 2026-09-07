@@ -277,12 +277,32 @@ paymentGate(
 
 ### Live networks
 
+**Real money in five commands** — no code, straight from the shell. Base Sepolia is free
+testnet USDC, so prove it there first:
+
+```bash
+export AGENT_PRIVATE_KEY=0x...                     # your wallet key — read from the env, never written to disk
+npx allowance-kit init --live                      # mark the directory live, print the wallet address
+# 1. send USDC to that address (a Base Sepolia faucet, for testnet)
+npx allowance-kit topup 5.00                       # 2. set the ceiling the agent may spend
+npx allowance-kit policy perCallMaxUsd 0.10        # 3. tighten the rails
+npx allowance-kit pay https://some-live-x402-api.com/data   # 4. make a real payment
+npx allowance-kit doctor                           # checks node, viem, the key, RPC, permissions
+```
+
+Mainnet is one flag and a confirmation: `npx allowance-kit init --live --network base` (it
+asks you to type `base` back, or takes `--yes` in a script), and top-ups over $50 then need
+`--yes` too. `status` shows the wallet's real balance; `pay` exits `0` on a paid call, `2` on
+a policy block, `1` on error.
+
+Or from the SDK:
+
 ```ts
 import { payingFetch, createLiveAgent, topUp } from "allowance-kit";
 
 const live = await createLiveAgent({
   stateDir: ".allowance",
-  privateKey: process.env.AGENT_KEY!,
+  privateKey: process.env.AGENT_PRIVATE_KEY!,
   network: "base-sepolia",              // "base" is mainnet — ask for it explicitly
 });
 
