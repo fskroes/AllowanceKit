@@ -101,7 +101,10 @@ step "git tag -a v$VERSION -m \"v$VERSION\""
 
 say "Publish"
 # prepublishOnly (test + build + demo) runs inside npm publish for allowance-kit.
-step "npm publish $PROV --access public"
+# Pass --userconfig so publish uses the repo .npmrc ($NPM_ACCESS_TOKEN) and never
+# falls back to a stale token in ~/.npmrc — the same reason the wallie step does
+# (memory: a 404 on PUT here is that fallback, not a dead token in .env).
+step "npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\""
 # The alias lives inside the repo, so the root .npmrc (which interpolates
 # \$NPM_ACCESS_TOKEN) applies; pass it explicitly so publish never falls back to
 # the dead token in ~/.npmrc.
