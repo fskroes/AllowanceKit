@@ -50,8 +50,13 @@ export interface CloudConfig {
   keyEnv: string;
 }
 
-/** The kinds the cloud feed carries. Unlike local alerts it wants every payment, not just threshold crossings. */
-export type CloudEventKind = "payment" | "blocked" | "approval";
+/**
+ * The kinds the cloud feed carries. Unlike local alerts it wants every payment,
+ * not just threshold crossings. `threshold` was added in 0.5.1 (C-10): the cloud
+ * wants the 50/80/100 % rows too, and its "budget 100 %" SMS depends on them. A
+ * 0.5.0 client simply never sends it, which the server tolerates.
+ */
+export type CloudEventKind = "payment" | "blocked" | "approval" | "threshold";
 
 export interface CloudEvent {
   kind: CloudEventKind;
@@ -215,7 +220,13 @@ export interface Message {
 }
 
 /** One attempt at one channel. `retryable` separates "the network blinked" from "your key is wrong". */
-type Attempt = { ok: boolean; detail: string; retryable: boolean };
+type Attempt = {
+  ok: boolean;
+  detail: string;
+  retryable: boolean;
+  /** A server-requested wait before the next try (from a 429 `Retry-After`), in ms. Cloud only, 0.5.1+. */
+  retryAfterMs?: number;
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -230,9 +241,29 @@ async function withRetry(channel: string, attempt: () => Promise<Attempt>, attem
     last = await attempt();
     if (last.ok) return { channel, ok: true, detail: last.detail, attempts: i };
     if (!last.retryable) return { channel, ok: false, detail: last.detail, attempts: i };
-    if (i < attempts) await sleep(500 * 2 ** (i - 1));
+    if (i < attempts) {
+      // A server that asked us to wait (429 Retry-After, cloud only) is honoured,
+      // bounded to 60 s so a hostile or broken header can't park a payment's alert
+      // for minutes. Otherwise fall back to the exponential 500 ms · 2^n backoff.
+      const backoff = 500 * 2 ** (i - 1);
+      await sleep(Math.min(60_000, last.retryAfterMs ?? backoff));
+    }
   }
   return { channel, ok: false, detail: `${last.detail} (after ${attempts} attempts)`, attempts };
+}
+
+/**
+ * Parses a `Retry-After` header — an integer number of seconds, or an HTTP-date —
+ * into a millisecond delay bounded to [0, 60 s]. Returns undefined if absent or
+ * unparseable, so the caller falls back to its own backoff.
+ */
+export function parseRetryAfter(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const secs = Number(header.trim());
+  if (Number.isFinite(secs)) return Math.max(0, Math.min(60_000, Math.round(secs * 1000)));
+  const when = Date.parse(header);
+  if (Number.isNaN(when)) return undefined;
+  return Math.max(0, Math.min(60_000, when - now));
 }
 
 /** HTTP status codes worth trying again. */
@@ -455,9 +486,14 @@ async function postCloudEvent(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.P
       body: JSON.stringify(evt),
       signal: AbortSignal.timeout(8000),
     });
-    return res.ok
-      ? { ok: true, detail: `sent to ${hostOf(cloud.url)}`, retryable: false }
-      : { ok: false, detail: `HTTP ${res.status} from ${hostOf(cloud.url)}`, retryable: retryableStatus(res.status) };
+    if (res.ok) return { ok: true, detail: `sent to ${hostOf(cloud.url)}`, retryable: false };
+    return {
+      ok: false,
+      detail: `HTTP ${res.status} from ${hostOf(cloud.url)}`,
+      retryable: retryableStatus(res.status),
+      // Honour a 429's Retry-After (0.5.1, C-10); ignored for every other status.
+      retryAfterMs: res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : undefined,
+    };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e), retryable: true };
   }
@@ -666,8 +702,10 @@ export class Notifier {
   /** Call after a payment settles. Announces 50/80/100% of the allowance once each. */
   spendChanged(spentMicro: bigint, budgetMicro: bigint): void {
     const cfg = this.store.load();
-    if (!this.store.configured()) return;
     if (budgetMicro <= 0n) return;
+    const cloudOn = !!cfg.cloud?.enabled;
+    // Nothing to do if neither a human channel nor the cloud is listening.
+    if (!this.store.configured() && !cloudOn) return;
 
     const pct = Number((spentMicro * 10000n) / budgetMicro) / 100;
     const ladder = [...cfg.thresholds].sort((a, b) => a - b);
@@ -675,31 +713,35 @@ export class Notifier {
     const highest = crossed.length ? crossed[crossed.length - 1]! : 0;
 
     if (highest === cfg.highWater) return;
+    const goingUp = highest > cfg.highWater;
     this.store.save({ highWater: highest });
     // Falling below a mark (a top-up raised the budget) just rearms it quietly.
-    if (highest < cfg.highWater || highest === 0) return;
+    if (!goingUp || highest === 0) return;
 
     const left = budgetMicro - spentMicro;
     const subject =
       highest >= 100
         ? `${this.agentName} has used its whole allowance`
         : `${this.agentName} has spent ${highest}% of its allowance`;
-    this.dispatch(cfg, {
-      event: "threshold",
-      subject,
-      body:
-        highest >= 100
-          ? `${fmtUsdSmart(spentMicro)} of ${fmtUsdSmart(budgetMicro)} is gone and no further payments will go through.\n` +
-            `Top up to keep it working, or leave it — it cannot spend anything more on its own.`
-          : `${fmtUsdSmart(spentMicro)} of ${fmtUsdSmart(budgetMicro)} spent. ${fmtUsdSmart(left)} left.`,
-      data: {
-        agent: this.agentName,
-        percent: highest,
-        spentMicro: spentMicro.toString(),
-        budgetMicro: budgetMicro.toString(),
-        remainingMicro: left.toString(),
-      },
-    });
+    const body =
+      highest >= 100
+        ? `${fmtUsdSmart(spentMicro)} of ${fmtUsdSmart(budgetMicro)} is gone and no further payments will go through.\n` +
+          `Top up to keep it working, or leave it — it cannot spend anything more on its own.`
+        : `${fmtUsdSmart(spentMicro)} of ${fmtUsdSmart(budgetMicro)} spent. ${fmtUsdSmart(left)} left.`;
+    const data = {
+      agent: this.agentName,
+      percent: highest,
+      spentMicro: spentMicro.toString(),
+      budgetMicro: budgetMicro.toString(),
+      remainingMicro: left.toString(),
+    };
+
+    // The cloud feed gets every crossing (C-10), independent of the human alert
+    // preferences — the same rule the payment/blocked/approval kinds follow.
+    this.emitCloud(cfg, "threshold", subject, body, data);
+
+    if (!this.store.configured()) return;
+    this.dispatch(cfg, { event: "threshold", subject, body, data });
   }
 
   /** Call whenever a rail refuses a payment. */

@@ -11,6 +11,7 @@ import type { PayContext } from "./payer.ts";
 import { CLI } from "./cli-name.ts";
 import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
 import { readMode, type SettlementMode } from "./mode.ts";
+import { runtimeVersion } from "./version.ts";
 
 interface AgentIdentity {
   address: string;
@@ -293,6 +294,7 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     agent: agentName,
     network: marker.network,
     mode: live ? "live" : "practice",
+    version: runtimeVersion(),
   });
 
   return {

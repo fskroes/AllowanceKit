@@ -11,21 +11,28 @@ It is written for implementing agents. Every ticket has an owner, a dependency l
 files it touches, and a "done when" that can be checked mechanically. Terms in **bold
 italics** on first use are defined in [GLOSSARY.md](GLOSSARY.md). Read the glossary first.
 
-**Status (2026-09-08, post-0.5.0).** Deliverable **A is shipped**: every `R`, `M`, `L` ticket
-and `C-05` is done and marked `✓` below with its commit. Deliverable **C's core now exists**:
-the cloud repo `~/dev/wallie-cloud` was created and pushed to the private GitHub repo
-`fskroes/wallie-cloud` (D-10, CI green on `main` 2026-09-08) and `C-01` (schema + migrations) and
-`C-03` (ingest endpoints + `/v1/me`) are done; `C-04` (fan-out + watchdog) is **code-complete
-and tested with fakes** — the watchdog silent/back transitions and the delivery retry
-classification pass, but the real Resend/Twilio sends are unverified because they need
-Fernando's provider credentials. The suite is 21/21 including a `runtime-compat` test that
-drives the *actual published 0.5.0 client* against the new handlers (the C-03 "done when"
-proof). Still open: `C-02`, `C-06`–`C-08`, `C-10`, the Neon-branch half of `C-09`, `B-*`,
-`S-*`, and any step needing a live `api.onewallie.com` (Stripe, DNS, deploy). **New blocker
-found 2026-09-08 (C-08):** the Vercel team is on the **Hobby** plan, which refuses the
-per-minute cron the watchdog needs and forbids commercial use; upgrading to Pro is a human
-step (§6 item 3) before anything can be deployed. The §7 gate is still half met — released,
-the cloud core is built and CI-tested but not yet deployed or buyable.
+**Status (2026-09-08, post-0.5.0; updated later the same day — cloud build-out).** Deliverable
+**A is shipped**: every `R`, `M`, `L` ticket and `C-05` is done and marked `✓` below with its
+commit. Deliverable **C is now built end to end in code, blocked only on the deploy**: on top of
+the earlier `C-01`/`C-03`/`C-04`/`D-10`, the following are now done and tested (PGlite, 66/66 in
+`~/dev/wallie-cloud`): **`C-02`** Stripe webhook → provisioning (HMAC verify, no SDK; mints a
+`wk_…` key, stores only its hash; welcome email) **+ `B-03`** refund/cancellation with a 7-day
+grace window; **`C-06`** transactional email templates; **`C-07`** magic-link auth + the static
+account app (Overview/Key/Events/Alerts/Billing/Welcome under `public/`, session-gated, every
+mutation endpoint 401s without a session); the **`C-08` groundwork** (the cron now requires
+`CRON_SECRET`; `NODEJS_HELPERS=0` documented; `vercel.json` clean-URLs + all functions); and the
+**`C-09`** "broken webhook signature fails CI" clause (in the suite) plus a real, secret-gated
+Neon-migrate CI job. Deliverable **A's follow-ups (`C-10`)** are implemented in `~/dev/wallet_pay`
+(threshold cloud events, heartbeat `version`, `Retry-After` on a cloud 429, `doctor` cloud row;
+96/96 tests) and staged under CHANGELOG `[Unreleased]` — they ship as `0.5.1` via
+`scripts/release.sh 0.5.1` (human npm publish). **Site**: `B-02` (terms/privacy for Cloud),
+`S-01` (welcome page, in the cloud app), `S-02` (pricing/claims), `S-03` (real-money + cloud
+tutorial chapters) are done in `~/dev/onewallie-site` (uncommitted; human review before deploy).
+**The one thing left is the deploy itself (`C-08`), still blocked on the Vercel plan:** the team
+is on **Hobby**, which refuses the per-minute cron and forbids commercial use; upgrading to Pro
+is the human step (§6 item 3). Once deployed, the `§7` gate's remaining lines (Stripe purchase →
+email, `notify test` → `delivered cloud` against a live host, silent-agent email, site alias)
+can be checked. `S-04` (site alias) and the npm publish of `0.5.1` are the other human steps.
 
 **One rule that changed because 0.5.0 is public:** the runtime side of the cloud (`C-05`) is
 published and cannot be reshaped without a release, so **the server adapts to the runtime's
@@ -90,7 +97,7 @@ the implementation order. Workstreams can run in parallel where the dependency l
 | Facilitator | Coinbase CDP only (`facilitator-cdp.ts`, ES256 JWT). Sellers' side. Buyers depend on whatever facilitator the seller uses. |
 | Dashboard | Loopback only; reads **and** mutations token-gated; state carries every agent and the UI has an agent switcher (L-06, `01b8cdb`). |
 | Cloud channel (runtime) | **Shipped in 0.5.0** (C-05, `49d5610`): `notify cloud <wk_…>`, `CloudEvent` feed to `POST /v1/events`, 60 s heartbeat to `POST /v1/heartbeat` from `createAgent`/`createLiveAgent`, `GET /v1/me` for "connected as". Default URL `https://api.onewallie.com`, which **does not resolve to anything yet**. Exact contract in §3.1.1. |
-| Wallie Cloud (service) | **Core built and CI-green, not deployed.** Repo `~/dev/wallie-cloud` (own git, `15689aa`) is pushed to the **private** GitHub repo `fskroes/wallie-cloud`; CI (Node 24: test + typecheck + audit) passed on `main` 2026-09-08. Built: schema + migrations (C-01), ingest `POST /v1/events`, `POST /v1/heartbeat`, `GET /v1/me` (C-03), fan-out + watchdog (C-04, tested with fake fetch). 21/21 tests on in-memory PGlite incl. a runtime-compat test against the published 0.5.0 client. **No Vercel project, no deploy, no DNS** for `api.`/`app.onewallie.com`; no Stripe (C-02), templates (C-06), app (C-07), or live provider sends yet. The Vercel team (`fernando-silva-kroes-projects`) is on **Hobby**, which cannot run the `* * * * *` cron and is non-commercial — Pro upgrade required before C-08. |
+| Wallie Cloud (service) | **Built end to end in code, CI-green, not deployed.** Repo `~/dev/wallie-cloud` (private `fskroes/wallie-cloud`). Now built on top of C-01/C-03/C-04: Stripe provisioning + refund grace (C-02/B-03), email templates (C-06), magic-link auth + the static account app under `public/` (C-07/S-01), the C-08 groundwork (cron `CRON_SECRET`, `NODEJS_HELPERS=0`, `vercel.json`), and the C-09 webhook-signature CI clause + a secret-gated Neon-migrate job. **66/66** on in-memory PGlite incl. the runtime-compat test against the published 0.5.0 client and the "every account endpoint 401s without a session" gate. **No Vercel project, no deploy, no DNS** for `api.`/`app.onewallie.com` yet, and no live provider sends. The Vercel team (`fernando-silva-kroes-projects`) is on **Hobby**, which cannot run the `* * * * *` cron and is non-commercial — Pro upgrade is the one remaining blocker (C-08). |
 | Website | `~/dev/onewallie-site` (Vercel, static + 2 functions), unchanged since `3d7d848`. Sells **"€20 /mo workspace + 1% volume"** through one Stripe Payment Link (`buy.stripe.com/14AcN4…`) in six places (3× `index.html`, 3× `docs.html`). The pricing card lists **multi-agent allowances & team roles, Slack alerts, fiat top-up, spend analytics, managed facilitator routing, free under $25/mo** — none of which is in any `C` ticket. The "How Wallie Cloud works" block describes a policy plane and managed settlement, not the §3.2 control plane. A buyer today gets a Stripe receipt and a "personal onboarding within 24h" promise (`index.html:287`, `:373`). `terms.html:52` also states the 1% volume fee. `api/waitlist.js` creates Stripe customers; `api/mrr.js` reads MRR. |
 | Site docs | `docs.html:178` roadmap note still says "CDP facilitator adapter → npm package → Wallie Cloud … subscribers vote on the roadmap" although the first two shipped. The tutorial ends at "the road to real money" (`docs.html:171`) with no `init --live` / `pay` / `notify cloud` chapter (S-03). The site half of M-03 is folded into S-02. |
 | Business model | BUSINESS.md: Cloud = hosted alerting that fires when your machine is off + SMS + escalation; compliance pack (enterprise, by email); facilitator revenue share (future). Price settled at €20. |
@@ -502,11 +509,15 @@ A `scripts/migrate.js` that applies files in order and records them in `schema_m
 *Done when:* `node scripts/migrate.js` is idempotent against an empty Neon branch.
 
 **C-02 Stripe webhook → provisioning.** `agent+human` · M · depends: C-01
-> ○ not started (2026-09-08). Groundwork in place: `stripe_events` table, `readBody` raw-body
-> helper, key hashing/lookup in `lib/auth.ts`. Write it as `api/v1/stripe/webhook.ts` (the repo
-> is TS with `.ts` imports, not `.js`). **Vercel note:** if Vercel's Node helpers pre-parse the
-> body the raw bytes for the HMAC check are gone — C-08 must set `NODEJS_HELPERS=0` (or verify
-> the helper leaves the stream untouched) before this can be signature-tested on a preview.
+> ✓ done (code + tests, not yet deployed) — `wallie-cloud`. `api/v1/stripe/webhook.ts` +
+> `lib/stripe.ts` (HMAC-SHA256 over the raw body, no SDK, timestamp tolerance, constant-time
+> compare) + `lib/provision.ts`. `checkout.session.completed` upserts the workspace by customer
+> id, mints `wk_(live|test)_<base32>` (matches the runtime's `KEY_RE`), stores only the hash,
+> sends the welcome email (C-06) with the key once + the sign-in link. `customer.subscription.updated`
+> maps status; `.deleted` → 7-day grace (B-03). Idempotent on the Stripe event id. Tests in
+> `test/stripe.test.ts` + `test/provision.test.ts` (18) incl. the HTTP handler answering 400 to a
+> bad signature and 200 to a good one. **Human/deploy:** set `STRIPE_WEBHOOK_SECRET` + `NODEJS_HELPERS=0`
+> in Vercel, create the Stripe webhook endpoint, and confirm the raw body survives on a preview.
 `api/v1/stripe/webhook.js` verifies the signature with `STRIPE_WEBHOOK_SECRET` (implement
 HMAC-SHA256 over the raw body per Stripe docs; no SDK). On `checkout.session.completed`:
 upsert workspace by customer id, generate a workspace key (`wk_live_` + 32 random bytes
@@ -589,9 +600,12 @@ event and two heartbeats arrive with the right shape; the key never appears in
 `notifications.json`; the demo run with `WALLIE_CLOUD_KEY` unset behaves exactly as today.
 
 **C-06 Transactional email templates.** `agent` · S · depends: C-02
-> ○ not started (2026-09-08). No `templates/` dir exists; `lib/senders.ts` currently sends the
-> event's `subject`/`body` as plain text. Templates should feed `sendEmail` there so the fan-out
-> tests keep passing with a fake fetch.
+> ✓ done — `wallie-cloud` `lib/templates.ts` + `test/templates.test.ts` (7). Plain-text-first with
+> an inline-styled HTML twin in the site's typography: `welcomeEmail` (key + the three setup
+> commands + sign-in link), `magicLinkEmail`, `alertEmail` (the one template fan-out uses for every
+> kind incl. silent/back), `subscriptionCanceledEmail`. All escape user-controlled values; all link
+> terms + privacy (satisfies B-02's "welcome email links to them"). `sendEmail` gained an optional
+> `html`; fan-out attaches the alert HTML twin so webhook/SMS stay plain.
 Plain-text-first, with a minimal HTML twin in the site's typography: welcome (key, the three
 commands `npm i -g allowance-kit`, `export WALLIE_CLOUD_KEY=…`, `allowance-kit notify cloud …`,
 sign-in link), magic link, alert (one template, the `text` body from fan-out), silent /
@@ -599,10 +613,15 @@ back, subscription canceled. All from `alerts@onewallie.com`, reply-to hello@.
 *Done when:* each template renders with fixture data in a `templates.test.js`.
 
 **C-07 Magic-link auth and the account app.** `agent` · L · depends: C-01, C-06
-> ○ not started (2026-09-08). `magic_links` and `sessions` tables exist (C-01); no `api/v1/auth/*`
-> handlers, no static pages, no `SESSION_SECRET` use yet. `GET /v1/me` already returns
-> `{workspace, agents, key}` and can back the Overview page. Design system source:
-> `~/dev/onewallie-site/assets/wallie.css` + `wallie.js`.
+> ✓ done (code + tests, not yet deployed) — `wallie-cloud`. `lib/session.ts` (HMAC-signed cookie
+> over a DB session id, 30-day, HttpOnly/Secure/SameSite=Lax, `requireSession` choke point),
+> `lib/magiclink.ts` (single-use, 15-min, hash-stored, no account enumeration), `api/v1/auth/{magic-link,callback,logout}.ts`,
+> `lib/account.ts` + `api/v1/account/{overview,events,rules,key,billing}.ts` (all session-gated).
+> Static app under `public/` (Overview/Key/Events/Alerts/Billing + Welcome/S-01), no framework,
+> `fetch` on the same origin, **`textContent` only, never `innerHTML`**, `wallie.css`/`wallie.js`
+> copied from the site. Tests in `test/account.test.ts` (15) incl. **every account endpoint 401s
+> without a session**. Manual QA script: `docs/qa-cloud.md`. **One project, two hostnames** (see
+> the cloud README): the app calls `/v1/*` on its own origin, so the cookie is first-party, no CORS.
 `app.onewallie.com` static pages + `api/v1/auth/*`: enter email → magic link (15 min,
 single use) → session cookie (`HttpOnly; Secure; SameSite=Lax`, 30 days). Pages: **Overview**
 (workspace name, status, agents with last-seen and mode/network badge, REAL MONEY badge when
@@ -616,10 +635,13 @@ only, never `innerHTML` (the local dashboard rule).
 end on a preview deploy, and every mutation endpoint rejects a request without a session.
 
 **C-08 Deployment, domains, environment.** `agent+human` · M · depends: C-01..C-07
-> ○ not started (2026-09-08); no Vercel project exists for the cloud. `vercel.json` is written
-> (rewrite `/v1/(.*)` → `/api/v1/$1`, cron `/api/cron/watchdog` at `* * * * *`, `maxDuration`
-> 10 s for the API, 60 s for the cron). **Verified Vercel platform facts (docs, 2026-09-08)** that
-> change this ticket:
+> ◐ groundwork done; the deploy is the ONE blocked step (Vercel plan). Done in code: the cron now
+> **requires `CRON_SECRET`** when set (`cronAuthorized` in `api/cron/watchdog.ts`, tested in
+> `test/cron-auth.test.ts` — closes finding 3); `NODEJS_HELPERS=0` documented as required for the
+> Stripe raw-body check (finding 4); `vercel.json` written with `cleanUrls`, the `/v1/(.*)` rewrite,
+> the `* * * * *` cron, and every function's `maxDuration` (API+auth+account 10 s, cron 60 s). No
+> Vercel project exists yet; the deploy, DNS, and env are the human step below. **Verified Vercel
+> platform facts (docs, 2026-09-08)** that shape it:
 > 1. **Plan.** Per-minute crons need **Pro**; Hobby allows one run per day with ±59 min precision
 >    and the deployment *fails* with a `* * * * *` schedule. Hobby is also **non-commercial** —
 >    "requesting or processing payment" is explicitly commercial use. The team
@@ -651,19 +673,32 @@ cloud project's are too after first deploy.
 `app.onewallie.com` loads the sign-in page over HTTPS.
 
 **C-09 Cloud test suite and CI.** `agent` · M · depends: C-03, C-04
-> ◐ partial — `wallie-cloud@15689aa`. The `node --test` suite exists and is 21/21 (auth, ingest,
-> ratelimit, watchdog, fanout, migrate, runtime-compat) but runs against **in-memory PGlite**, not
-> a Neon branch, so it needs no secret and runs anywhere. `.github/workflows/ci.yml` mirrors R-02
-> (Node 24, test + typecheck + audit). Repo pushed 2026-09-08; **CI has run and is green** on
-> `main` (run `34201788502`). **Open:** the Neon-branch job (stubbed as a comment in the workflow)
-> once a `NEON_API_KEY` secret exists, and the "broken webhook signature fails CI" clause, which
-> lands with C-02.
+> ✓ done (the parts that don't need a human secret) — `wallie-cloud`. The `node --test` suite is now
+> 66/66 against PGlite (auth, ingest, ratelimit, watchdog, fanout, migrate, runtime-compat, templates,
+> stripe, provision, account, cron-auth, threshold). The **"broken webhook signature fails CI" clause
+> is satisfied**: `test/provision.test.ts` asserts the webhook endpoint answers 400 to a bad signature
+> and 200 to a good one, so breaking `verifyStripeSignature` turns CI red. `.github/workflows/ci.yml`
+> keeps the R-02 mirror job and adds a real **`neon-migrate` job** that creates a throwaway Neon
+> branch and proves `scripts/migrate.ts` is idempotent on real Postgres — gated on `NEON_API_KEY` +
+> `NEON_PROJECT_ID`, a clean no-op until a human adds those secrets. **Open (needs a human):** those
+> Neon secrets; and porting the whole suite (not just migrate) to run against `DATABASE_URL` is a
+> noted follow-up (the suite's global-count assertions assume an isolated DB per test).
 `node --test` suite against a Neon branch created in CI (`neonctl branches create`), covering
 webhook idempotency, key hashing/rotation, ingest validation, watchdog transitions, delivery
 retry classification. GitHub Actions on the cloud repo mirrors R-02.
 *Done when:* CI is green on the cloud repo and a broken webhook signature check fails it.
 
 **C-10 Runtime follow-ups the cloud needs (0.5.1).** `agent` · S · depends: — (not gate)
+> ✓ done in code (`~/dev/wallet_pay`), staged for a `0.5.1` publish. All four parts implemented and
+> tested (`test/cloud.test.ts`, 96/96 suite): (1) `"threshold"` added to `CloudEventKind`, emitted
+> from `spendChanged` on every 50/80/100 % crossing, cloud-only and independent of the human alert
+> config; the cloud accepts it (`INGEST_KINDS`) and texts only on the 100 % crossing. (2) the
+> heartbeat carries `version` from the new `src/version.ts` (the value `--version` prints), wired
+> into `createAgent`/`createLiveAgent`. (3) `Retry-After` on a cloud 429 is honoured, bounded to
+> 60 s (`parseRetryAfter`). (4) `doctor` shows the cloud row (key set? `/v1/me` reachable?) as a
+> warning, so it never flips the exit code. Documented under CHANGELOG `[Unreleased]`; **human:**
+> `scripts/release.sh 0.5.1` (npm publish). Tests assert the beat carries `runtimeVersion()` rather
+> than a hardcoded string, so they stay green across releases.
 In `allowance-kit`: (1) add `"threshold"` to `CloudEventKind` and emit it from
 `Notifier.spent()` for every crossing (the cloud wants 50/80/100 % rows and C-04's
 "budget 100 %" SMS needs them); (2) pass `version` (from `package.json`, the same value
@@ -686,6 +721,13 @@ email receipts. Record the price id in the cloud repo README.
 *Done when:* a test-mode purchase shows VAT on the receipt and lands on the welcome page.
 
 **B-02 Terms and privacy for Cloud.** `agent+human` · S · depends: C-03
+> ✓ done (agent part; human review before deploy) — `~/dev/onewallie-site`, uncommitted.
+> `privacy.html` now lists what the cloud stores (host, amount, rule, tx hash, agent name; no query
+> strings, no keys/signed payloads), the retention (events 90 days, deletable on request, deleted 30
+> days after cancellation), and the sub-processors Vercel, Neon, Stripe, Resend, Twilio; states
+> non-custodial. `terms.html` replaces "no partial-period refunds" with a 14-day first-month refund,
+> keeps governing law NL, and (with S-02) the 1 % volume bullet is gone. Both pages carry the
+> sub-processor + retention numbers. **Human:** read both before they go live.
 Update `terms.html` and `privacy.html`: what event data the cloud stores (host, amount,
 rule, tx hash, agent name, no query strings, no keys), retention (90 days of events,
 deletable on request, deleted 30 days after cancellation), sub-processors (Vercel, Neon,
@@ -697,6 +739,12 @@ Human reviews before deploy.
 welcome email links to them.
 
 **B-03 Refund and cancellation handling.** `agent` · S · depends: C-02
+> ✓ done — `wallie-cloud` `lib/provision.ts` `cancelWorkspace`, shared by
+> `customer.subscription.deleted` and `charge.refunded`. Both mark the workspace `canceled`, open a
+> 7-day grace (`workspaces.access_ends_at`, migration `sql/002_grace.sql`), and set every live key's
+> `revoked_at` to the same instant; `authenticate` grants ingest while inside the grace and refuses
+> after (402/401). The account app shows the state and the access-end date. Tested in
+> `test/provision.test.ts` (both triggers → expected status; ingest survives the window then stops).
 `customer.subscription.deleted` and `charge.refunded` both mark the workspace and stop
 ingest after the grace period; the account app shows the state and the date access ends.
 *Done when:* Stripe CLI triggers for both events produce the expected workspace status.
@@ -704,12 +752,23 @@ ingest after the grace period; the account app shows the state and the date acce
 ### S — Site and docs (gate)
 
 **S-01 Post-purchase page.** `agent` · S · depends: B-01, C-02
+> ✓ done — built as `public/welcome.html` in the cloud app (it lives at `app.onewallie.com/welcome`,
+> not the marketing site). Renders with no session: "check your inbox for your key", the three setup
+> commands, a link to the tutorial's cloud step, a sign-in link, hello@ for anything wrong. No key on
+> the page. **Human (B-01):** set Stripe's success URL to `https://app.onewallie.com/welcome`.
 `app.onewallie.com/welcome`: "Check your inbox for your key", the three setup commands,
 link to the tutorial's cloud step, hello@ for anything wrong. No key on the page (it is in
 the email, once).
 *Done when:* Stripe's success redirect lands here and the page renders without a session.
 
 **S-02 Pricing and claims.** `agent` · S · depends: D-2
+> ✓ done — `~/dev/onewallie-site`, uncommitted. `grep -rn "1%" index.html docs.html terms.html` is
+> empty and `grep -c vote docs.html` is 0. The price line is "€20 /mo per workspace"; the pricing
+> bullets are the five shipped features (one feed, email/SMS/webhook alerts, silent-agent watchdog,
+> any number of agents, non-custodial); the "24h onboarding" copy became automatic provisioning; the
+> "How Wallie Cloud works" flow became notify-cloud → feed → alerts+watchdog → non-custodial; the
+> roadmap note lost the voting clause; the "x402 v1 today" FAQ became "v1 and v2". Note: that FAQ
+> lives in `index.html` (line 338), not `docs.html` — the plan's `docs.html:339` pointer was off.
 In `~/dev/onewallie-site`. Every "€20 /mo workspace + 1% volume" becomes "€20/mo per
 workspace" (footnote: usage pricing may come later, with notice): `index.html:286` price
 line, `:322` footnote, and the `terms.html:52` bullet (with B-02). The pricing card bullets
@@ -729,6 +788,12 @@ Also the `docs.html:339` "x402 v1 today" sentence → "x402 v1 and v2".
 is 0 (or D-4 says keep), and every Cloud claim on the pricing card maps to a shipped ticket.
 
 **S-03 Tutorial: real money and cloud chapters.** `agent` · M · depends: L-03, L-04, C-05, M-02
+> ✓ done (writing; the fresh-machine QA run is a human step) — `~/dev/onewallie-site`, uncommitted.
+> `docs.html` gains "Go live on Base Sepolia" (`init --live`, Circle faucet, `topup`, `policy`, `pay`,
+> copy-pastable, REAL MONEY banner) and "Get told when it stops" (`notify cloud` → export →
+> `notify test` → `delivered cloud`), plus a mainnet paragraph linking the 2026-09-07 BaseScan tx.
+> The manual run is captured in `docs/qa-tutorial.md` (flags that the live `notify test` cloud
+> round-trip needs a deployed `api.onewallie.com`, which is the C-08 blocker).
 `docs.html` gains two steps after the practice chapters: "Go live on Base Sepolia" (`init
 --live`, faucet link, `topup`, `policy`, `pay`) and "Get told when it stops" (`notify cloud`).
 Each block copy-pastable. Mainnet gets one paragraph pointing at the canary record.
@@ -818,14 +883,24 @@ agent does not serialise the others.
 
 1. ~~M-01: fund the canary wallet on Base with USDC.~~ Done 2026-09-07.
 2. B-01: Stripe Tax, Customer Portal, success URL, statement descriptor.
-3. C-08 first: **upgrade the Vercel team `fernando-silva-kroes-projects` to Pro** (Hobby refuses
-   the per-minute watchdog cron and forbids commercial use), create the `wallie-cloud` Vercel
-   project from the GitHub repo, set `CRON_SECRET` and `NODEJS_HELPERS=0` with the other env vars.
-   Then C-02 / C-08: create the Stripe webhook, paste secrets and all env vars into Vercel, DNS
-   for `api.` and `app.onewallie.com`, verify `onewallie.com` in Resend, buy a Twilio number.
+3. **C-08 — the one blocker for everything cloud (all the code is done and tested):**
+   **upgrade the Vercel team `fernando-silva-kroes-projects` to Pro** (Hobby refuses the
+   per-minute watchdog cron and forbids commercial use), create the `wallie-cloud` Vercel project
+   from the GitHub repo, and set the env vars from the cloud `README.md`: `DATABASE_URL` (Neon via
+   Marketplace), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `TWILIO_*`,
+   `SESSION_SECRET` (≥16 chars), `APP_ORIGIN`/`API_ORIGIN`, `CRON_SECRET`, `NODEJS_HELPERS=0`.
+   Then: create the Stripe webhook endpoint → `/v1/stripe/webhook`, DNS for `api.` + `app.onewallie.com`
+   (expect a pinned alias like the site — memory), verify `onewallie.com` in Resend, buy a Twilio
+   number, enable the Stripe Customer Portal + success URL `…/welcome` (B-01). First-deploy checks
+   from the README: `.ts` imports resolve, the raw body survives (`NODEJS_HELPERS=0`), crons only
+   tick on production. Optional CI secrets: `NEON_API_KEY` + `NEON_PROJECT_ID` light up the C-09
+   Neon-migrate job.
 4. ~~R-06: export `NPM_ACCESS_TOKEN` and run the release script.~~ Done 2026-09-07.
-5. S-04: run the alias commands after the site deploy.
-6. B-02: read the updated terms and privacy pages before they go live.
+   **New: `scripts/release.sh 0.5.1`** to publish the C-10 runtime follow-ups (code done, staged in
+   CHANGELOG `[Unreleased]`). The cloud already accepts both 0.5.0 and 0.5.1 clients.
+5. S-04: run the alias commands after the site deploy (site tickets B-02/S-01/S-02/S-03 are done
+   and uncommitted in `~/dev/onewallie-site`).
+6. B-02: read the updated terms and privacy pages before they go live (done, awaiting your review).
 7. ~~O-03: enable GitHub Discussions if it is off.~~ Already on.
 
 ## 7. Launch gate

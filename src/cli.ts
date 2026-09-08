@@ -18,6 +18,7 @@ import {
 } from "./notify.ts";
 import { describeMode, describeTopUp, readMode } from "./mode.ts";
 import { NETWORKS, createLiveAgent } from "./live.ts";
+import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
 import { DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
@@ -191,13 +192,7 @@ function required(value: string | undefined, usage: string): string {
 class UserError extends Error {}
 
 function version(): string {
-  for (const rel of ["../package.json", "../../package.json"]) {
-    try {
-      const file = path.join(import.meta.dirname ?? ".", rel);
-      return (JSON.parse(fs.readFileSync(file, "utf8")) as { version: string }).version;
-    } catch {}
-  }
-  return "unknown";
+  return runtimeVersion();
 }
 
 function agent(stateDir: string, agentName = DEFAULT_AGENT_NAME) {
@@ -1010,6 +1005,20 @@ async function main(): Promise<void> {
         missing.length
           ? warn("sms", `${cfg.sms} — ${missing.join(" and ")} NOT set, no text will send`)
           : ok("sms", `${cfg.sms} — Twilio keys set`);
+      }
+
+      // Cloud channel (C-10): report the key and whether the workspace answers.
+      // A warn, never a fail — the cloud is optional, so a misconfigured cloud
+      // channel must not flip `doctor`'s exit code (L-05: fail only on the wallet key).
+      if (cfg.cloud?.enabled) {
+        if (!process.env[cfg.cloud.keyEnv]) {
+          warn("cloud", `${cfg.cloud.keyEnv} is NOT set — nothing will reach ${hostOfUrl(cfg.cloud.url)}`);
+        } else {
+          const who = await cloudWhoami(cfg.cloud);
+          who.ok
+            ? ok("cloud", `connected as ${who.workspace ?? "your workspace"} (${hostOfUrl(cfg.cloud.url)})`)
+            : warn("cloud", `${hostOfUrl(cfg.cloud.url)} — ${who.detail}`);
+        }
       }
 
       console.log(lines.join("\n"));

@@ -10,6 +10,31 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+Runtime follow-ups that Wallie Cloud needs (RELEASE-PLAN ticket C-10). Ships as
+`0.5.1` via `scripts/release.sh 0.5.1`; the cloud keeps accepting 0.5.0 clients
+that send none of the below.
+
+### Added
+
+- **`threshold` cloud events.** The `cloud` channel now sends a `threshold` event
+  on every 50/80/100 % allowance crossing (not just the human alert), so the cloud
+  feed has the budget rows and its "budget 100 %" SMS has something to fire on.
+  These are cloud-only, on the same fire-once-per-crossing high-water logic; the
+  local threshold alert is unchanged.
+- **Heartbeat carries `version`.** `createAgent` and `createLiveAgent` now include
+  the runtime version (the value `--version` prints) in the cloud heartbeat, so the
+  control plane can show which runtime an agent is on. Resolved once from
+  `package.json` via the new `src/version.ts`.
+- **`doctor` reports the cloud row.** When the `cloud` channel is enabled, `doctor`
+  now shows whether `WALLIE_CLOUD_KEY` is set and whether `GET /v1/me` answers. It
+  is a warning, never a failure, so `doctor`'s exit code still turns only on the
+  wallet key.
+
+### Fixed
+
+- **`Retry-After` is honoured on a cloud 429**, bounded to 60 s (0.5.0 ignored it
+  and used its own backoff). Other channels are unaffected.
+
 ## [0.5.0] - 2026-09-07
 
 Working toward `0.5.0` — "mainnet-proven": a CLI front door for real money, x402

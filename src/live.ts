@@ -9,6 +9,7 @@ import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
 import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
+import { runtimeVersion } from "./version.ts";
 import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
 import { writeMode } from "./mode.ts";
 import { BalanceCache, RPC_DEFAULTS, usdcBalanceMicro } from "./usdc.ts";
@@ -251,6 +252,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     agent: agentName,
     network,
     mode: "live",
+    version: runtimeVersion(),
   });
 
   return {

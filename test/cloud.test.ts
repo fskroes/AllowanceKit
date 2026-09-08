@@ -6,9 +6,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { NotifyStore, Notifier, startCloudHeartbeat, CLOUD_DEFAULT_URL } from "../src/notify.ts";
+import { NotifyStore, Notifier, startCloudHeartbeat, deliverCloud, parseRetryAfter, CLOUD_DEFAULT_URL } from "../src/notify.ts";
 import { createAgent } from "../src/wallet.ts";
 import { usd } from "../src/money.ts";
+import { runtimeVersion } from "../src/version.ts";
 
 /**
  * Wallie Cloud channel (ticket C-05). The cloud is a different kind of channel
@@ -237,4 +238,107 @@ test("cloud on but the key unset fails safe: no throw, no network, recorded", as
   await new Promise((r) => setTimeout(r, 50)); // let the fire-and-forget settle
   const fails = store.recentFailures(5);
   assert.ok(fails.some((f) => f.channel === "cloud" && /not set/.test(f.detail)), "an unset key is recorded, not thrown");
+});
+
+// ---- C-10 (0.5.1) runtime follow-ups -----------------------------------------
+
+test("C-10: threshold crossings reach the cloud feed even with no human channel", async () => {
+  const srv = await cloudServer();
+  const keyEnv = "WALLIE_CLOUD_TEST_KEY_THRESH";
+  process.env[keyEnv] = "wk_test_threshold01";
+  try {
+    const store = new NotifyStore(tmpDir());
+    // Cloud only — no webhook/email/sms/push. threshold must still fire to the cloud.
+    store.save({ cloud: { enabled: true, url: srv.url, keyEnv } });
+    const notifier = new Notifier(store, "spender", undefined, { network: "base", mode: "live" });
+
+    notifier.spendChanged(usd(5), usd(10)); // 50%
+    notifier.spendChanged(usd(10), usd(10)); // 100%
+
+    await srv.waitFor("events", 2);
+    assert.ok(srv.events.every((e) => e.kind === "threshold"), "both are threshold events");
+    const percents = srv.events.map((e) => e.data.percent).sort((a, b) => a - b);
+    assert.deepEqual(percents, [50, 100]);
+    const e50 = srv.events.find((e) => e.data.percent === 50)!;
+    assert.equal(e50.data.spentMicro, usd(5).toString());
+    assert.equal(e50.data.budgetMicro, usd(10).toString());
+    assert.equal(e50.mode, "live");
+  } finally {
+    delete process.env[keyEnv];
+    await srv.close();
+  }
+});
+
+test("C-10: createAgent's heartbeat carries the runtime version", async () => {
+  const srv = await cloudServer();
+  const keyEnv = "WALLIE_CLOUD_TEST_KEY_VER";
+  process.env[keyEnv] = "wk_test_versionbeat1";
+  try {
+    const dir = tmpDir();
+    new NotifyStore(dir).save({ cloud: { enabled: true, url: srv.url, keyEnv } });
+    const rt = createAgent(dir);
+    try {
+      await srv.waitFor("heartbeats", 1);
+    } finally {
+      rt.stopHeartbeat?.();
+    }
+    assert.notEqual(runtimeVersion(), "unknown", "the version resolves from package.json");
+    assert.equal(srv.heartbeats[0]!.version, runtimeVersion(), "the beat carries exactly what --version prints");
+  } finally {
+    delete process.env[keyEnv];
+    await srv.close();
+  }
+});
+
+test("C-10: parseRetryAfter reads seconds and dates, bounded to 60s", () => {
+  assert.equal(parseRetryAfter("5"), 5000);
+  assert.equal(parseRetryAfter("0"), 0);
+  assert.equal(parseRetryAfter("120"), 60_000, "bounded to 60 s");
+  assert.equal(parseRetryAfter(null), undefined);
+  assert.equal(parseRetryAfter("garbage"), undefined);
+  const ms = parseRetryAfter(new Date(Date.now() + 3000).toUTCString())!;
+  assert.ok(ms > 500 && ms <= 60_000, "an HTTP-date resolves to a bounded delay");
+});
+
+test("C-10: a cloud 429 with Retry-After is honoured and the retry can succeed", async () => {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits++;
+    if (hits === 1) {
+      res.writeHead(429, { "Retry-After": "0" }); // ask for an (immediate) wait, then let the retry through
+      res.end("{}");
+    } else {
+      res.writeHead(200);
+      res.end("{}");
+    }
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as { port: number }).port;
+  const keyEnv = "WALLIE_CLOUD_TEST_KEY_429";
+  process.env[keyEnv] = "wk_test_retry429ab";
+  try {
+    const evt = { kind: "payment" as const, agent: "a", subject: "s", body: "b", data: {}, at: new Date().toISOString() };
+    const res = await deliverCloud({ enabled: true, url: `http://127.0.0.1:${port}`, keyEnv }, evt);
+    assert.equal(res.ok, true, "the second attempt succeeded");
+    assert.equal(res.attempts, 2, "it took exactly two tries");
+    assert.equal(hits, 2);
+  } finally {
+    delete process.env[keyEnv];
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test("C-10: doctor reports the cloud row when the channel is enabled", async () => {
+  const srv = await cloudServer({ workspace: "Acme Research" });
+  try {
+    const dir = tmpDir();
+    new NotifyStore(dir).save({ cloud: { enabled: true, url: srv.url, keyEnv: "WALLIE_CLOUD_KEY" } });
+    const connected = await run(["doctor", "--state", dir], { WALLIE_CLOUD_KEY: "wk_test_okdoctor" });
+    assert.match(connected.stdout, /cloud\s+connected as Acme Research/, "shows the workspace when reachable");
+    const missing = await run(["doctor", "--state", dir], { WALLIE_CLOUD_KEY: undefined });
+    assert.match(missing.stdout, /cloud.*NOT set/, "flags a missing key");
+    assert.equal(missing.code, 0, "a cloud problem is a warning, not a doctor failure");
+  } finally {
+    await srv.close();
+  }
 });
