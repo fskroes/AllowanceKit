@@ -2,6 +2,10 @@
 
 Terms as used in this repo, on onewallie.com, and in [RELEASE-PLAN.md](RELEASE-PLAN.md).
 Where a term names a file or export, it is given so an agent can grep for it. Alphabetical.
+Current as of `allowance-kit@0.5.0` and `wallie-cloud@15689aa` (2026-09-08): "planned" marks
+what Wallie Cloud's service side still needs (Stripe provisioning, email templates, the account
+app, deployment); "built" marks cloud code that exists and is CI-tested in the private repo
+`fskroes/wallie-cloud` but is not deployed; everything else describes shipped code.
 
 **Agent** — a program that calls paid APIs through `payingFetch`. Also **agent name**: the
 label every ledger row, top-up and policy is filed under (`DEFAULT_AGENT_NAME` is
@@ -56,19 +60,34 @@ an agent can act on it, not just log it.
 CDP auth; `--full` settles through a local seller; `--buyer` runs the real buyer runtime
 (allowance, balance check, approval gate, ledger) and asserts the ledger afterwards.
 `--network base` runs it with real money. A **canary run** is a recorded, dated result of
-that script (`docs/canary-runs/`, to be created).
+that script in `docs/canary-runs/`. Two exist (2026-09-07): Base mainnet, and Base Sepolia
+against a third-party seller (`scripts/l02-thirdparty.ts`, Mart402).
 
 **CDP / CdpFacilitator** — Coinbase Developer Platform. `facilitator-cdp.ts` implements the
 x402 facilitator contract (`verify`, `settle`) against CDP's API, authenticated with an
 ES256 JWT built from `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET`. Used by sellers.
 
 **Channel (notify)** — one destination for alerts: `webhook`, `email` (Resend or Postmark),
-`sms` (Twilio), `push` (ntfy), `heartbeat` (an outside monitor URL), and, planned, `cloud`
-(Wallie Cloud). Configured in `.allowance/notifications.json` by `notify <channel> …`. Config
-holds addresses and provider names, never keys.
+`sms` (Twilio), `push` (ntfy), `heartbeat` (an outside monitor URL), and `cloud` (Wallie
+Cloud). Configured in `.allowance/notifications.json` by `notify <channel> …`. Config holds
+addresses and provider names, never keys. The first four are **human channels**: they fire on
+a threshold, a block or a queued approval, per `onBlock` / `onApproval`. The cloud channel is
+different in kind — see *Cloud channel*.
 
-**Cloud channel** — planned: the notify channel that posts every ledger event and a 60 s
-heartbeat to Wallie Cloud using a *workspace key* read from `WALLIE_CLOUD_KEY`. Ticket C-05.
+**Cloud channel** — shipped in 0.5.0 (`notify cloud <key>`, `CloudConfig` in `notify.ts`):
+the notify channel that posts every *decision* — a `CloudEvent` of kind `payment`, `blocked`
+or `approval`, regardless of the human alert preferences — to `POST /v1/events`, and a 60 s
+*cloud heartbeat* to `POST /v1/heartbeat`, using a *workspace key* read at send time from the
+environment variable named in `keyEnv` (`WALLIE_CLOUD_KEY`, `CLOUD_ENV`). `notifications.json`
+stores only `{enabled, url, keyEnv}`. Threshold heads-ups are not sent yet (RELEASE-PLAN C-10).
+The wire contract is RELEASE-PLAN §3.1.1; the server side is built (`api/v1/{events,heartbeat,me}.ts`
+in the cloud repo, proven against this client by `test/runtime-compat.test.ts`) but not deployed,
+so `api.onewallie.com` still resolves to nothing.
+
+**CloudEvent** — the shape on the wire to Wallie Cloud: `{kind, agent, network?, mode?,
+subject, body, data, at}`. `subject`/`body` are the same text a webhook would get; `data`
+carries the per-kind fields (`host`, `url`, `amountMicro`, `txHash`, `rule`, `detail`,
+`attemptedMicro`, `requestId`) with `url` stripped of its query string by `stripQuery`.
 
 **Control plane** — Wallie Cloud's hosted side: it receives decisions and liveness, stores
 them, and alerts. It never decides, signs or pays. Contrast with the *runtime*, which does.
@@ -77,12 +96,29 @@ them, and alerts. It never decides, signs or pays. Contrast with the *runtime*, 
 into its page and requires on mutating endpoints (kill switch, approvals). Mode 0600.
 
 **Dashboard (local)** — `allowance-kit dashboard`: `dashboard-server.ts` + `public/dashboard.html`
-on `127.0.0.1:4030`. Shows allowance, ledger, approvals, kill switch. Distinct from the
-planned hosted **account app** at `app.onewallie.com`.
+on `127.0.0.1:4030`. Shows allowance, ledger, approvals, kill switch, with an agent switcher;
+reads and mutations are both gated by the *control token* (0.5.0). Distinct from the planned
+hosted **account app** at `app.onewallie.com`.
 
 **Dead-man's switch / heartbeat** — a periodic ping to an outside URL (`notify heartbeat`,
 `startHeartbeat`) so that a monitor such as healthchecks.io alerts when pings stop. The only
-way a machine can tell you it is off. Wallie Cloud's **watchdog** is the hosted version.
+way a machine can tell you it is off. Pings only while `dashboard` runs. Distinct from the
+**cloud heartbeat** (`startCloudHeartbeat`), which every runtime created by `createAgent` or
+`createLiveAgent` sends to Wallie Cloud on its own, headless or not, and stops via
+`rt.stopHeartbeat()`; the timer is unref'd so a one-shot CLI command still exits. Wallie
+Cloud's **watchdog** turns missing cloud heartbeats into an alert.
+
+**Delivery (cloud)** — one attempt by Wallie Cloud to send one stored event to one *alert
+rule*'s target (email, SMS, webhook), recorded in `deliveries` with status
+(`pending|sent|failed`), attempts and last error. Built: `lib/fanout.ts` drains up to 100
+pending rows per *watchdog tick*, three attempts with 500 ms·2ⁿ backoff, never on a
+non-retryable status (same 408/425/429/5xx rule as the runtime). SMS deliveries are only
+enqueued for `blocked`, `approval` and `silent`.
+
+**Doctor** — `allowance-kit doctor` (0.5.0): one line per check (Node version, `viem`, the
+wallet key by env-var name, RPC reachability and balance, state-dir permissions, email and
+SMS provider keys), each with a fix; non-zero exit on a broken setup. Does not yet check the
+cloud key (RELEASE-PLAN C-10).
 
 **Demo** — `allowance-kit demo` (`demo-run.ts`, `demo-servers.ts`): five local x402 sellers
 and a scripted story (pay-per-use, runaway loop, attack, approval, kill switch) into
@@ -98,7 +134,10 @@ the seller's behalf. Interface `Facilitator { verify, settle }` in `chain.ts`. `
 is the practice implementation; `CdpFacilitator` the real one.
 
 **Fan-out** — in Wallie Cloud, turning one stored event into one delivery per matching
-alert rule (email, SMS, webhook), with retries and a delivery record.
+alert rule (email, SMS, webhook), with retries and a delivery record. Built: enqueue happens
+at ingest (`lib/ingest.ts`, copying channel and target from the rule), sending happens later
+in `lib/fanout.ts` via `lib/senders.ts` (Resend, Twilio, plain webhook POST) — never inline in
+the request path.
 
 **Gate (release)** — a ticket without which the product is not released or buyable. Listed
 in RELEASE-PLAN section 7.
@@ -119,7 +158,12 @@ real x402 payments with a private key on a real network. The directory is marked
 **Lock (state-dir)** — `lock.ts`: an in-process and cross-process mutex over a state
 directory. Authorization, reservation and ledger writes happen inside it. Alerts never do.
 
-**Magic link** — planned Wallie Cloud sign-in: an emailed single-use link, no password.
+**Magic link** — planned Wallie Cloud sign-in: an emailed single-use link (15 min), no
+password; produces a *session* cookie (30 days). Ticket C-07. The `magic_links` and `sessions`
+tables already exist in `sql/001_init.sql`; no handler uses them yet.
+
+**Mainnet-proven** — the 0.5.0 claim: the buyer path has settled real USDC on Base once
+(`docs/canary-runs/2026-09-07-base.md`). One canary run, not sustained production traffic.
 
 **Micro (micro-dollar)** — the integer unit for all money in the code: 1 USD = 1_000_000
 micro, as `bigint`. Equals atomic USDC units (6 decimals). `money.ts`. Suffix `Micro` on any
@@ -148,6 +192,11 @@ handler. The seller side of the protocol.
 receipt. Returns `PaidResult` (`ok`, `status`, `body`, `costMicro`, `quotedMicro`, `txHash`,
 `blockedBy`, `error`).
 
+**PGlite** — Postgres compiled to WebAssembly (`@electric-sql/pglite`), the cloud repo's
+test-only database: `configureDb` in `lib/db.ts` swaps it for the `pg` pool, so the exact
+`sql/001_init.sql` and queries run in `node --test` with no live Neon and no secrets. Never used
+in production.
+
 **Policy / rails** — `policy.ts`: the per-agent limits in `config.json` (`totalBudgetUsd`,
 `perCallMaxUsd`, `windowLimitUsd` + `windowSeconds`, `requireApprovalAboveUsd`,
 `allowHostSuffixes`, `blockedHosts`, `killSwitch`), hot-reloaded by `PolicyStore`, evaluated
@@ -162,14 +211,32 @@ that shadow each other.
 and every money touchpoint says so (`PRACTICE_BANNER`). Formerly "simulated funds".
 
 **Provenance (npm)** — publishing with `--provenance` so the registry shows which commit and
-CI run built the tarball. Planned in R-04.
+CI run built the tarball. `scripts/release.sh` adds the flag only under GitHub Actions;
+0.5.0 was published locally and carries no provenance badge.
+
+**Pay (command)** — `allowance-kit pay <url> [--method] [--body]` (0.5.0): one `payingFetch`
+from the shell in the directory's mode. Exit 0 paid, 2 blocked, 1 error. How a non-coder
+proves a first real payment.
+
+**Rate limit (cloud)** — built, RELEASE-PLAN D-8: `lib/ratelimit.ts` keeps one `rate_limits`
+row per *workspace key* per minute in Postgres, allows 600 requests a minute on `/v1/events`
+and `/v1/heartbeat`, answers `429` with a `Retry-After` of the seconds left in the window
+(the 0.5.0 client ignores the header and retries on its own schedule). `GET /v1/me` is exempt.
 
 **Reservation** — `reservations.ts`: an authorized-but-unsettled amount that counts as spent
 until `recordPayment` or `recordBlocked` resolves it. Why a retry storm cannot fan out past
 the velocity breaker.
 
-**Seller** — an API that prices its routes over x402. Ours: `paymentGate`. Third-party: any
-live x402 endpoint; L-01 verifies which wire version they speak.
+**Seller** — an API that prices its routes over x402. Ours: `paymentGate` (speaks v1 only).
+Third-party: any live x402 endpoint; as of 2026-09-07 every live seller found speaks v2
+(`docs/x402-compat.md`), and the buyer answers whichever version the seller sent.
+
+**Silent / back** — the two event kinds Wallie Cloud creates itself (never the runtime):
+`silent` when an agent's cloud heartbeats have been missing longer than the rule's
+`silent_after_seconds` (default 300), `back` when they resume. Built: `lib/watchdog.ts` sets
+`agents.silent_since` and emits `silent`; `lib/heartbeat.ts` clears it and emits `back`.
+Ingested events also refresh `last_seen_at`, so an agent that is paying is never "silent".
+Laptop sleep is the expected false positive.
 
 **State directory** — `.allowance` by default (`--state`, `ALLOWANCE_STATE_DIR`). Everything
 the runtime persists lives there. Safe to back up; contains no keys.
@@ -182,20 +249,37 @@ the runtime persists lives there. Safe to back up; contains no keys.
 EIP-712 signing. Not required for anything else; imported dynamically.
 
 **Wallie** — the product name (onewallie.com), a 1YC product. On npm, an alias for
-`allowance-kit`. **Wallie Cloud** — the paid hosted control plane (planned, RELEASE-PLAN
-section 3.2). **Compliance pack** — planned enterprise offering of signed audit exports (X-02).
+`allowance-kit`. **Wallie Cloud** — the paid (€20/mo per workspace) hosted control plane,
+RELEASE-PLAN section 3.2: the runtime half (*cloud channel*) shipped in 0.5.0; the service
+half lives in the private repo `fskroes/wallie-cloud` (`~/dev/wallie-cloud`), where ingest,
+fan-out and the watchdog are built and CI-tested, and Stripe provisioning, email templates,
+the account app and the deploy to `api.onewallie.com` / `app.onewallie.com` are still planned
+(C-02, C-06, C-07, C-08). Deploy is blocked on a Vercel Pro upgrade (per-minute cron,
+commercial use).
+**Compliance pack** — planned enterprise offering of signed audit exports (X-02).
 
-**Watchdog** — planned Wallie Cloud cron that raises an "agent silent" alert when an agent's
+**Watchdog** — the Wallie Cloud cron that raises an "agent silent" alert when an agent's
 heartbeats stop for longer than the workspace's threshold, and an "agent back" alert when
-they resume.
+they resume. Built: `api/cron/watchdog.ts` is one **watchdog tick** per minute (`vercel.json`,
+`* * * * *`) that first flags silent agents (`lib/watchdog.ts`) and then drains pending
+*deliveries* (`lib/fanout.ts`). Vercel only runs crons on production deployments and only on
+the Pro plan at this frequency; the handler still needs a `CRON_SECRET` check (C-08).
 
-**Workspace / workspace key** — planned: the Cloud tenant created by a Stripe subscription,
-and its bearer credential (`wk_live_…`, shown once, stored hashed, rotatable) that the
-runtime presents on `/v1/events` and `/v1/heartbeat`.
+**Workspace / workspace key** — the Cloud tenant (`workspaces` row, created by a Stripe
+subscription — the minting side is planned, C-02) and its bearer credential that the runtime
+presents on `/v1/events`, `/v1/heartbeat` and `/v1/me`. The 0.5.0 CLI accepts only keys
+matching `wk_(live|test)_[A-Za-z0-9]{8,}`, so the cloud must mint in that alphabet. Shown once
+in the welcome email, stored as a SHA-256 hash with a visible 12-character *prefix*, rotatable
+(old key valid 24 h more). Lookup, hashing and the rotation grace are built (`lib/auth.ts`,
+`workspace_keys`); an unknown key is `401`, a known key on a non-`active` workspace is `402`.
+`wk_test_` is for staging and tests; `scripts/dev-server.ts` seeds `wk_test_devkey0123456789`.
 
 **x402** — the HTTP-native payment protocol: a server answers `402 Payment Required` with an
 `accepts[]` list of prices/networks; the client retries with a signed payment header; the
 server verifies and settles through a facilitator and returns the resource plus a receipt
-header. **v1** (implemented here): `X-PAYMENT` / `X-PAYMENT-RESPONSE`, `x402Version: 1`,
-bare network names (`base-sepolia`). **v2** (to be verified in L-01): newer header names and
-CAIP-2 network ids (`eip155:8453`); support to be added alongside v1, never instead.
+header. **v1** (buyer and seller here): `X-PAYMENT` / `X-PAYMENT-RESPONSE`, `x402Version: 1`,
+bare network names (`base-sepolia`), `maxAmountRequired`. **v2** (buyer here since 0.5.0;
+what the live ecosystem speaks): challenge in the `PAYMENT-REQUIRED` header, reply in
+`PAYMENT-SIGNATURE`, receipt in `PAYMENT-RESPONSE`, `x402Version: 2`, CAIP-2 network ids
+(`eip155:8453`), `amount`, and the seller's offer echoed verbatim under `accepted`. Supported
+alongside v1, never instead (D-5). Exact diff: `docs/x402-compat.md` §5.

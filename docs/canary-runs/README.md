@@ -14,4 +14,6 @@ Record a run here as `YYYY-MM-DD-<network>.md` with:
 - anything that failed and how it was fixed (every fix gets a test — see CONTRIBUTING.md).
 
 Referenced by RELEASE-PLAN.md tickets **M-02** (mainnet proof) and **L-02** (the buyer canary
-against a real third-party x402 seller on Base Sepolia). No runs are recorded yet.
+against a real third-party x402 seller on Base Sepolia). Both are recorded:
+`2026-09-07-base.md` (mainnet, $0.01 USDC) and `2026-09-07-base-sepolia-mart402.md`
+(third-party v2 seller, $0.004 USDC via `scripts/l02-thirdparty.ts`).
