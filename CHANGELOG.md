@@ -10,6 +10,8 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-08
+
 Runtime follow-ups that Wallie Cloud needs (RELEASE-PLAN ticket C-10). Ships as
 `0.5.1` via `scripts/release.sh 0.5.1`; the cloud keeps accepting 0.5.0 clients
 that send none of the below.
@@ -187,7 +189,8 @@ The release that makes real money work, and makes a "yes" stop meaning "yes, for
   rails (budget, per-call cap, velocity circuit breaker, host allowlist, kill switch),
   the append-only audit ledger, and practice-money settlement on a local mock chain.
 
-[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fskroes/AllowanceKit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fskroes/AllowanceKit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/fskroes/AllowanceKit/compare/v0.2.0...v0.3.0

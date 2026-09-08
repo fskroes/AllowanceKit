@@ -1,6 +1,6 @@
 {
   "name": "wallie",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Wallie — a spending allowance for your AI agent. A thin alias for allowance-kit: same CLI, same SDK.",
   "type": "module",
   "license": "MIT",
@@ -38,6 +38,6 @@
     "node": ">=20.11"
   },
   "dependencies": {
-    "allowance-kit": "^0.5.0"
+    "allowance-kit": "^0.5.1"
   }
 }
