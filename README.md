@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/fskroes/AllowanceKit/actions/workflows/ci.yml/badge.svg)](https://github.com/fskroes/AllowanceKit/actions/workflows/ci.yml)
 
-**A spending allowance for your AI agent.** Fund it once. It pays any x402-priced API on its own — inside hard limits *you* set, with a kill switch and a receipt for every cent.
+**A spending allowance for your AI agent.** Fund it once. It pays supported x402-priced APIs on its own — inside hard limits *you* set, with a kill switch and a receipt for every cent.
 
 Landing page: [onewallie.com](https://onewallie.com) · Follow-along tutorial: [onewallie.com/docs.html](https://onewallie.com/docs.html)
 
@@ -84,25 +84,11 @@ switch (res.blockedBy?.rule) {
 
 ---
 
-## Why this exists (research, Aug 2026)
+## Why spending allowances
 
-The agentic payment infrastructure **is live and scaling**:
+A payment facilitator verifies and settles a payment. Wallie checks the configured spending policy before signing it: total allowance, per-payment cap, approved destinations, and spending-rate limits. A local ledger records payments and policy decisions so operators can investigate what happened.
 
-| Signal | Number |
-|---|---|
-| x402 network volume (last 30 days) | **75.4M payments · $24.2M** (~$0.32 avg — true micropayments) |
-| x402 Foundation | Linux Foundation; founding members incl. Visa, Mastercard, Stripe, Google, AWS, Cloudflare |
-| Alipay AI-initiated payments | 120M in one week (Feb 2026) |
-| MPP (Stripe/Tempo) | mainnet Mar 2026, 100+ services |
-
-But the buyer side is broken. Verified evidence from primary sources:
-
-1. **x402 issue #1759 (open): "agent onboarding is too complex"** — a top-10 ecosystem operator reports users abandoning x402 because there is *"no install-and-go experience"*: manual wallet setup, funding, config, and *"no wallet UI showing balance, transaction history."*
-2. **Runaway agents are real**: documented cases of agents burning $8,400+ in overnight retry loops. Facilitators verify payments are *valid*; nothing checks whether they're *sane*.
-3. **EU AI Act Article 26 (in force Aug 2, 2026)**: deployers of spending agents must keep tamper-evident logs, enforce human oversight, and can be fined up to 3% of global turnover. x402 settles inline with zero audit trail.
-4. Every existing fix (Crossmint guardrails, Coinbase Agentic Wallets, XPay firewall) is a proprietary platform account. Nothing is open, self-hostable, protocol-native, and installable in one command.
-
-AllowanceKit is that missing piece: the **allowance layer between the human and the agent's wallet**.
+Try the practice-money tutorial before funding a live wallet. Controls apply to payments routed through Wallie; they do not cap existing metered LLM API bills or spending that bypasses the runtime.
 
 ## The rails
 
@@ -137,7 +123,7 @@ Grants draw down as payments authorize against them, and a payment that never se
 
 The kill switch and approval queue are **token-gated**: mutating dashboard endpoints require the local control token (auto-generated into `.allowance/dashboard-token`, injected into the served UI).
 
-Every decision — paid or blocked, with rule, reason and tx hash — lands in an append-only JSONL ledger (`.allowance/ledger.jsonl`) that satisfies EU AI Act Art. 26 §5 logging. Read it as a table with `allowance-kit audit`, or as raw JSONL with `allowance-kit audit --json`.
+Every decision — paid or blocked, with rule, reason and tx hash — lands in an append-only JSONL ledger (`.allowance/ledger.jsonl`) for reviewing the runtime’s decisions. Read it as a table with `allowance-kit audit`, or as raw JSONL with `allowance-kit audit --json`.
 
 ## CLI
 
@@ -256,7 +242,7 @@ src/
 test/               zero-dependency node --test suite
 ```
 
-The wire format follows x402 v1 (`HTTP 402` + `accepts[]` + base64 `X-PAYMENT` / `X-PAYMENT-RESPONSE` headers).
+The buyer supports x402 v1 and v2 for exact USDC payments on Base and Base Sepolia. Seller middleware remains v1. See [the compatibility guide](docs/x402-compat.md) for supported shapes and limitations.
 
 ### Sellers
 
@@ -365,27 +351,13 @@ See [BUSINESS.md](BUSINESS.md).
 - **The buyer speaks x402 v1 and v2, and has settled against a live third-party seller.** The live ecosystem has moved to v2 (CAIP-2 networks, `PAYMENT-*` headers — see [docs/x402-compat.md](docs/x402-compat.md)); the buyer detects the version and answers in kind. On **2026-09-07** it paid a real third-party v2 seller — [Mart402](https://mart402.dev)'s PDF parser on Base Sepolia — end to end: negotiated the multi-offer 402, selected the payable offer, signed a real EIP-3009 authorization, and the seller's facilitator settled it on-chain (tx [`0xf53b18b0…d817e`](https://sepolia.basescan.org/tx/0xf53b18b0e0effcd93f171f2cce941c0a3c1775992548a9d38829c683d18d817e), $0.004 USDC), returning the parsed document. Recorded in [docs/canary-runs/2026-09-07-base-sepolia-mart402.md](docs/canary-runs/2026-09-07-base-sepolia-mart402.md). (An earlier attempt against QuickNode reached the settlement boundary but 404'd on the testnet it advertised — [docs/x402-compat.md §8](docs/x402-compat.md).) The `CdpFacilitator` v2 body follows the spec but has not been round-tripped against real CDP.
 - **The live buyer path is proven on Base Sepolia and on Base mainnet.** `scripts/canary.ts --buyer` settles a real testnet USDC payment through a CDP facilitator inside real rails and checks the ledger afterwards; `--network base` ran the same on mainnet on **2026-09-07** — a real $0.01 USDC settlement, tx [`0x044245…2648e`](https://basescan.org/tx/0x044245c0eb2d88350bf80d936e53185056f78f3afcf28eac942332894302648e), recorded in [docs/canary-runs/2026-09-07-base.md](docs/canary-runs/2026-09-07-base.md). It is a single canary run, not sustained production traffic — treat early mainnet use as canary.
 - **Alerts are best-effort, not guaranteed.** Retried three times with backoff, then recorded in `notify-failures.jsonl` — but never awaited inside the ledger lock, so a payment is never delayed or failed by a broken channel. The ledger, not your inbox, is the record of what happened.
-- **Free alerts only fire while the agent is running on a machine you control.** `notify heartbeat` plus an outside monitor covers the case where it is not; genuinely hosted alerting is not built.
+- **Local alerts require your infrastructure to be running.** [Wallie Cloud](https://www.onewallie.com/cloud.html) adds a hosted event feed, heartbeat monitoring, and email rules for connected agents.
 - SMS needs a Twilio account and costs money per message. Push over ntfy is unauthenticated by design: anyone who knows the topic name can read your alerts.
 - The on-chain balance check reads USDC over a public RPC and caches it for 15 seconds, so a payment can be authorized against a reading that is up to 15 seconds stale. Bring your own `rpcUrl` for anything busy.
 - Several agents can share a state dir, but they share one lock, so a very busy agent serialises the others' authorizations.
-- The dashboard binds to `127.0.0.1` and gates all mutations behind a token, but `GET /api/state` is unauthenticated to anything already on the loopback interface. It also shows one agent at a time.
+- The dashboard binds to `127.0.0.1`; reads and mutations require its token. Its agent switcher selects among agents in the state directory.
 - npm ships compiled `dist/` (ESM + `.d.ts`, zero runtime deps).
 
 ## Changes
 
-The full history is in [CHANGELOG.md](CHANGELOG.md). Current line, **0.4.0** — "real money
-works, and a yes stops meaning yes forever":
-
-- **Approval grants expire and have a budget.** `approve <id>` covers exactly the amount
-  approved, for 24 hours, and draws down as payments authorize against it. `--budget` and
-  `--expires` widen it deliberately.
-- **A live agent can actually be funded**, and a live directory tells the truth: every
-  reader says `REAL MONEY — payments settle in USDC on <network>`, never "practice money".
-- **The wallet is reconciled against the chain** — a live agent refuses payments the wallet
-  cannot cover (`insufficient_funds`) before signing; `network` is a hard constraint.
-- **SMS, push, and a heartbeat dead-man's switch**; alerts retried and failures recorded.
-- **Several agents per state directory**, each with its own limits, allowance and alerts.
-
-See the [Unreleased](CHANGELOG.md#unreleased) section for what is landing next (a CLI live
-mode, `pay`, `doctor`, and x402 v2 compatibility).
+See [CHANGELOG.md](CHANGELOG.md) for release history and current limitations. The published package version at this update is **0.5.1**.
