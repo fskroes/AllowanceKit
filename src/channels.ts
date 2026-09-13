@@ -231,10 +231,25 @@ export class ChannelStore {
     return found;
   }
 
-  /** Total micro-dollars still escrowed on-chain (opened + unknown + orphaned). */
-  escrowedMicro(agent?: string): bigint {
+  /**
+   * Total micro-dollars still escrowed on-chain (opened + unknown + orphaned).
+   *
+   * Pass `excludeReservationIds` — the still-open reservation ids — to skip a
+   * channel whose opening reservation has not closed yet. During the network
+   * round trip of an `upto` open the reservation (the ceiling) and the escrow
+   * row coexist; the budget rail counts the reservation, so counting the escrow
+   * too would subtract the same locked capital twice and wrongly block a
+   * concurrent payment (§5). Once the reservation closes — on settle (the escrow
+   * also leaves `active`) or on an orphan/refund (the escrow carries the money) —
+   * the deposit is counted here instead. Reserved and escrowed never overlap.
+   */
+  escrowedMicro(agent?: string, opts: { excludeReservationIds?: ReadonlySet<string> } = {}): bigint {
+    const exclude = opts.excludeReservationIds;
     let sum = 0n;
-    for (const c of this.active(agent)) sum += BigInt(c.depositMicro);
+    for (const c of this.active(agent)) {
+      if (exclude && c.reservationId !== undefined && exclude.has(c.reservationId)) continue;
+      sum += BigInt(c.depositMicro);
+    }
     return sum;
   }
 

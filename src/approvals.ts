@@ -148,6 +148,21 @@ export class ApprovalStore {
     this.adjust(id, -amountMicro);
   }
 
+  /**
+   * Reconcile a grant that was drawn down by a ceiling but spent less. Solana
+   * `upto` commits the whole ceiling at authorize (so a grant cannot be
+   * over-committed while the channel is in flight), then the seller settles the
+   * actual and the rest refunds. This returns `committed − actual` to the grant
+   * so its budget reflects what was truly spent, not what was escrowed (§5).
+   *
+   * A no-op when nothing came back (`exact`, where committed equals actual), so
+   * the settle path can call it for every grant-backed payment.
+   */
+  settleCommitment(id: string, committedMicro: bigint, actualMicro: bigint): void {
+    const back = committedMicro - actualMicro;
+    if (back > 0n) this.refund(id, back);
+  }
+
   private adjust(id: string, deltaMicro: bigint): void {
     const f = this.read();
     const req = f.requests.find((r) => r.id === id);

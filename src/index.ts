@@ -28,7 +28,17 @@
  * (MockChain for local/simulated, CdpFacilitator for Coinbase CDP).
  */
 export { payingFetch } from "./payer.ts";
-export type { PaidResult, PayContext, UnsignedPayment, BlockedBy, AuthorizeResult } from "./payer.ts";
+export type {
+  PaidResult,
+  PayContext,
+  UnsignedPayment,
+  BlockedBy,
+  AuthorizeResult,
+  PaymentAnnotations,
+  UptoBuyer,
+  UptoOpen,
+  UptoOutcome,
+} from "./payer.ts";
 
 export {
   createAgent,
@@ -56,8 +66,9 @@ export {
   usdcBalanceMicroSolana,
   solBalanceLamportsSolana,
   encodePaymentSolanaExact,
+  encodePaymentSolanaUpto,
 } from "./solana.ts";
-export type { SolanaNetworkInfo, SolanaSigner } from "./solana.ts";
+export type { SolanaNetworkInfo, SolanaSigner, UptoOpenResult, UptoChannelFacts } from "./solana.ts";
 
 // SOL-03: the Solana `upto` channel primitives and the buyer's escrow store.
 export {

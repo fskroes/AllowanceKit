@@ -7,8 +7,10 @@ import {
   SOLANA_NETWORKS,
   solanaSigner,
   encodePaymentSolanaExact,
+  encodePaymentSolanaUpto,
   usdcBalanceMicroSolana,
 } from "../src/solana.ts";
+import { PAYMENT_CHANNELS_PROGRAM } from "../src/channels.ts";
 import { selectOffer } from "../src/live.ts";
 import type { AcceptsEntry } from "../src/types.ts";
 import type { UnsignedPayment } from "../src/payer.ts";
@@ -267,6 +269,142 @@ test("the decoded exact transaction: 2 signatures, payer signed, feePayer unsign
   } finally {
     restore();
   }
+});
+
+// An `upto` offer whose `extra` pins the blockhash and slot, so the buyer's
+// `open` scheme makes zero RPC calls (docs/SOLANA-ARCHITECTURE.md §4.3, SOL-05).
+function uptoOffer(overrides: Partial<AcceptsEntry> = {}): AcceptsEntry {
+  return {
+    scheme: "upto",
+    network: DEVNET_CAIP2,
+    amount: "100000",
+    maxAmountRequired: "100000",
+    asset: DEVNET_MINT,
+    payTo: randomAddress(),
+    maxTimeoutSeconds: 300,
+    extra: {
+      paymentFlow: "escrow",
+      feePayer: randomAddress(),
+      receiverAuthorizer: randomAddress(),
+      withdrawDelay: 900,
+      tokenProgram: SPL_TOKEN,
+      recentBlockhash: getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32))),
+      recentSlot: 123456789,
+      lastValidBlockHeight: 123456999,
+    },
+    ...overrides,
+  };
+}
+
+// Fails the test loudly if any network call happens — proves the encode is
+// hermetic when the seller pins the blockhash/slot.
+function forbidFetch(): () => void {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    throw new Error(`upto open made an unexpected network call to ${url} — blockhash/slot were pinned, so it must not`);
+  }) as never;
+  return () => {
+    globalThis.fetch = real;
+  };
+}
+
+test("encodePaymentSolanaUpto builds the open envelope and channel facts with zero RPC when blockhash/slot are pinned", async () => {
+  const restore = forbidFetch();
+  try {
+    const signer = solanaSigner(makeSecret());
+    const offer = uptoOffer();
+    const { header, channel } = await encodePaymentSolanaUpto(
+      signer,
+      unsignedFrom(offer, 2, signer.address),
+      { rpcUrl: "https://api.devnet.solana.com" },
+    );
+
+    // The channel facts the buyer records before the send.
+    assert.equal(channel.depositMicro, 100000n, "deposit is the ceiling");
+    assert.equal(channel.withdrawDelay, 900);
+    assert.equal(channel.payer, signer.address);
+    assert.equal(channel.payee, (offer.extra as { feePayer: string }).feePayer, "payee is the seller feePayer");
+    assert.equal(channel.authorizedSigner, (offer.extra as { receiverAuthorizer: string }).receiverAuthorizer);
+    assert.equal(channel.mint, DEVNET_MINT);
+    assert.ok(channel.channelId.length > 0, "a channelId (PDA) was derived");
+    assert.ok(channel.expiresAt > 0, "a non-zero expiry");
+
+    // The X-PAYMENT envelope the self-facilitated seller reads.
+    const env = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+    assert.equal(env.x402Version, 2);
+    assert.deepEqual(env.accepted, offer, "the seller offer is echoed verbatim");
+    assert.equal(env.payload.channelId, channel.channelId);
+    assert.equal(String(env.payload.deposit ?? env.payload.maxAmount), "100000", "deposit == maxAmount == ceiling");
+    assert.equal(typeof env.payload.openTransaction, "string");
+    assert.ok(env.payload.openTransaction.length > 0);
+  } finally {
+    restore();
+  }
+});
+
+test("the decoded upto open transaction: 2 signatures, payer signed, feePayer unsigned, an open to the channels program", async () => {
+  const restore = forbidFetch();
+  try {
+    const signer = solanaSigner(makeSecret());
+    const feePayer = randomAddress();
+    const offer = uptoOffer({ extra: { ...uptoOffer().extra, feePayer } });
+    const { header } = await encodePaymentSolanaUpto(signer, unsignedFrom(offer, 2, signer.address));
+    const b64 = JSON.parse(Buffer.from(header, "base64").toString("utf8")).payload.openTransaction;
+
+    const wire = new Uint8Array(getBase64Encoder().encode(b64));
+    const tx = getTransactionDecoder().decode(wire);
+    const sigs = tx.signatures as Record<string, Uint8Array | null>;
+    assert.equal(Object.keys(sigs).length, 2, "feePayer + payer");
+    assert.equal(sigs[feePayer], null, "feePayer is left unsigned for the seller to co-sign");
+    assert.ok(sigs[signer.address] != null, "payer signed the open");
+
+    const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+    const message = decompileTransactionMessage(compiled);
+    assert.equal((message.feePayer as { address: string }).address, feePayer);
+    assert.ok(
+      message.instructions.some((ix: { programAddress: string }) => ix.programAddress === PAYMENT_CHANNELS_PROGRAM),
+      "an instruction to the payment-channels program is present",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("encodePaymentSolanaUpto refuses an offer missing the seller's self-facilitation keys", async () => {
+  const signer = solanaSigner(makeSecret());
+  const noFee = uptoOffer({ extra: { receiverAuthorizer: randomAddress() } });
+  await assert.rejects(
+    () => encodePaymentSolanaUpto(signer, unsignedFrom(noFee, 2, signer.address)),
+    /feePayer/,
+  );
+});
+
+test("selectOffer weighs exact against upto by the per-call cap and preferScheme (§4.2)", () => {
+  const payTo = randomAddress();
+  const feePayer = randomAddress();
+  const receiverAuthorizer = randomAddress();
+  const exact: AcceptsEntry = { scheme: "exact", network: DEVNET_CAIP2, amount: "80000", asset: DEVNET_MINT, payTo };
+  const upto: AcceptsEntry = {
+    scheme: "upto",
+    network: DEVNET_CAIP2,
+    amount: "100000",
+    asset: DEVNET_MINT,
+    payTo,
+    extra: { feePayer, receiverAuthorizer, withdrawDelay: 900 },
+  };
+  const offers = [exact, upto];
+
+  // Default: exact wins when its price is at or below the per-call cap.
+  assert.equal(selectOffer(offers, "solana-devnet", { perCallMaxMicro: 100000n })?.scheme, "exact");
+  // Exact over the cap → fall back to upto (whose ceiling the policy still checks).
+  assert.equal(selectOffer(offers, "solana-devnet", { perCallMaxMicro: 50000n })?.scheme, "upto");
+  // Explicit override in either direction.
+  assert.equal(selectOffer(offers, "solana-devnet", { preferScheme: "upto" })?.scheme, "upto");
+  assert.equal(selectOffer(offers, "solana-devnet", { preferScheme: "exact", perCallMaxMicro: 1n })?.scheme, "exact");
+
+  // An upto offer with no self-facilitation keys is unbuildable and dropped.
+  const brokenUpto: AcceptsEntry = { scheme: "upto", network: DEVNET_CAIP2, amount: "100000", asset: DEVNET_MINT, payTo };
+  assert.equal(selectOffer([brokenUpto], "solana-devnet", { preferScheme: "upto" }), undefined);
 });
 
 test("usdcBalanceMicroSolana sums matching token accounts over plain JSON-RPC", async () => {

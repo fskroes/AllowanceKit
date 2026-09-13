@@ -341,6 +341,159 @@ export async function encodePaymentSolanaExact(
 }
 
 // ---------------------------------------------------------------------------
+// Buyer `upto` — the open transaction, plus the channel facts the buyer records
+// before the send (docs/SOLANA-ARCHITECTURE.md §4.3, SOL-05).
+// ---------------------------------------------------------------------------
+
+/**
+ * The channel facts the buyer must persist as an escrow row *before* the `open`
+ * is broadcast (§4.3): if a crash follows the send, the row is what
+ * `reconcileChannels` reads the chain against. These are read from the payload
+ * `@x402/svm` built plus the self-facilitation keys the seller advertised in
+ * `extra` — the buyer never invents them.
+ */
+export interface UptoChannelFacts {
+  /** The channel PDA — the store's primary key, unique per incarnation. */
+  channelId: string;
+  /** The escrowed ceiling, micro-dollars (`deposit == maxAmount == accepts.amount`). */
+  depositMicro: bigint;
+  /** The channel `grace_period` in seconds — also the payer's reclaim wait. */
+  withdrawDelay: number;
+  /** Unix seconds the channel/voucher authorisation expires. */
+  expiresAt: number;
+  /** The slot the channel opened at; a PDA seed and the rent-reclaim gate. */
+  openSlot?: number;
+  /** The payer (this wallet). */
+  payer?: string;
+  /** The seller's `feePayer`, which becomes the channel `payee`. */
+  payee?: string;
+  /** The seller's `receiverAuthorizer` (the channel `authorized_signer`). */
+  authorizedSigner?: string;
+  /** The USDC mint the channel escrows. */
+  mint?: string;
+}
+
+/** What {@link encodePaymentSolanaUpto} returns: the wire header and the row to record. */
+export interface UptoOpenResult {
+  /** The base64 `X-PAYMENT` envelope `{ x402Version, accepted, payload }`. */
+  header: string;
+  /** The escrow row to write before the send. */
+  channel: UptoChannelFacts;
+}
+
+/** The buyer `open` payload `@x402/svm`'s `UptoSvmScheme` produces (a superset of {@link UptoPayload}). */
+interface BuiltUptoPayload {
+  channelId?: unknown;
+  deposit?: unknown;
+  maxAmount?: unknown;
+  expiresAt?: unknown;
+  from?: unknown;
+  openSlot?: unknown;
+  openTransaction?: unknown;
+  nonce?: unknown;
+  authorizedSigner?: unknown;
+  validAfter?: unknown;
+}
+
+/**
+ * Build and sign the buyer's `upto` `open` transaction and wrap it in the
+ * `X-PAYMENT` envelope the self-facilitated seller reads (`{ x402Version,
+ * accepted, payload }`), *and* return the channel facts to record before the
+ * send. Unlike `exact`, the buyer's authorization here is the deposit: the
+ * `open` escrows the whole ceiling, and the seller's honesty is bounded by it
+ * (§1, §4.3).
+ *
+ * `@x402/svm`'s `UptoSvmScheme` builds a v0 transaction (compute budget ×2, the
+ * `open` instruction, memo), signs the payer with our `node:crypto` signer and
+ * leaves the seller's `feePayer` unsigned for the seller to co-sign and
+ * broadcast. It makes **zero** RPC calls when the seller's `extra` carries
+ * `recentBlockhash`/`recentSlot` (and it always may, since the seller quotes
+ * them); otherwise it fetches a blockhash from `rpcUrl`.
+ */
+export async function encodePaymentSolanaUpto(
+  signer: SolanaSigner,
+  unsigned: UnsignedPayment,
+  config: SolanaEncodeConfig = {},
+): Promise<UptoOpenResult> {
+  const reqs = unsigned.requirements;
+  const info = solanaNetworkInfo(reqs.network);
+  if (!info)
+    throw new Error(`unsupported Solana network "${reqs.network}" (known: ${Object.keys(SOLANA_NETWORKS).join(", ")})`);
+  if (reqs.scheme !== "upto") throw new Error(`encodePaymentSolanaUpto needs an \`upto\` offer, got "${reqs.scheme}"`);
+
+  const amount = offerAmount(reqs);
+  if (amount === undefined) throw new Error("seller upto offer carries no ceiling `amount`");
+  const asset = offerAsset(reqs);
+  if (!asset) throw new Error("seller upto offer carries no `asset` (the USDC mint)");
+  const payTo = offerPayTo(reqs);
+  if (!payTo) throw new Error("seller upto offer carries no `payTo`");
+
+  const extra = (reqs.extra as Record<string, unknown>) ?? {};
+  // A self-facilitated seller supplies both keys; without them the buyer cannot
+  // build the open, so fail loudly here rather than send a half-formed deposit.
+  if (!extra.feePayer)
+    throw new Error("seller upto offer `extra` carries no `feePayer` — the seller must self-facilitate the open");
+  if (!extra.receiverAuthorizer) throw new Error("seller upto offer `extra` carries no `receiverAuthorizer`");
+  const withdrawDelay = Number(extra.withdrawDelay ?? 900) || 900;
+
+  // Lazy — a Base agent never reaches this line, so it never resolves these.
+  let UptoSvmScheme: new (
+    signer: unknown,
+    config?: { rpcUrl?: string },
+  ) => {
+    createPaymentPayload(
+      x402Version: number,
+      requirements: Record<string, unknown>,
+    ): Promise<{ x402Version?: number; payload: BuiltUptoPayload }>;
+  };
+  try {
+    ({ UptoSvmScheme } = (await import("@x402/svm/upto/client")) as never);
+  } catch {
+    throw new Error("Solana `upto` needs @x402/svm and @solana/kit: npm i @x402/svm @solana/kit");
+  }
+
+  const scheme = new UptoSvmScheme(signer, config.rpcUrl ? { rpcUrl: config.rpcUrl } : undefined);
+  const requirements = {
+    scheme: "upto",
+    network: reqs.network,
+    asset,
+    amount,
+    maxAmountRequired: amount,
+    payTo,
+    maxTimeoutSeconds: reqs.maxTimeoutSeconds ?? 300,
+    extra,
+  };
+
+  const version = unsigned.x402Version >= 2 ? 2 : 1;
+  const built = await scheme.createPaymentPayload(version, requirements);
+  const payload = built.payload;
+
+  const channelId = typeof payload.channelId === "string" ? payload.channelId : String(payload.channelId ?? "");
+  if (!channelId) throw new Error("the upto scheme did not return a channelId");
+  const depositRaw = payload.deposit ?? payload.maxAmount ?? amount;
+  const expiresAt = Number(payload.expiresAt);
+
+  const channel: UptoChannelFacts = {
+    channelId,
+    depositMicro: BigInt(String(depositRaw)),
+    withdrawDelay,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0,
+    openSlot: payload.openSlot === undefined ? undefined : Number(payload.openSlot),
+    payer: typeof payload.from === "string" ? payload.from : signer.address,
+    payee: String(extra.feePayer),
+    authorizedSigner: String(extra.receiverAuthorizer),
+    mint: asset,
+  };
+
+  // The seller reads the nested `{ x402Version, accepted, payload }` envelope
+  // and matches `accepted` against what it advertised, so echo the offer
+  // verbatim (like the v2 `exact` shape). The header codec stays ours.
+  const envelope = { x402Version: version, accepted: unsigned.acceptedOffer ?? reqs, payload };
+  const header = Buffer.from(JSON.stringify(envelope)).toString("base64");
+  return { header, channel };
+}
+
+// ---------------------------------------------------------------------------
 // doctor rows (SOL-01 scope: libs + key format only; SOL-for-reclaim and the
 // seller treasury ATA rows belong to later tickets). Wired into `doctor` by a
 // follow-up; kept here so the check text lives with the rail.

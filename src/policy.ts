@@ -193,6 +193,12 @@ export type PolicyDecision =
 
 export interface PolicyContext {
   host: string;
+  /**
+   * The price to enforce against every rail. On `exact` this is the amount that
+   * will settle; on `upto` it is the *ceiling* the buyer authorizes and escrows
+   * (the seller may charge up to it), so every cap — per-call, velocity, budget,
+   * wallet balance, approval — is checked against the ceiling (§5).
+   */
   amountMicro: bigint;
   spendTotalMicro: bigint;
   topupsMicro: bigint;
@@ -204,6 +210,20 @@ export interface PolicyContext {
    * allowance ledger is the only ceiling.
    */
   walletBalanceMicro?: bigint;
+  /**
+   * Micro-USDC that has left the wallet into open payment channels but is
+   * neither spent nor returned (Solana `upto`; from `ChannelStore.escrowedMicro`).
+   * The budget rail subtracts it alongside spend and reservations, so a locked
+   * deposit lowers the remaining allowance the moment the channel opens and
+   * returns to it the moment the receipt settles (§5). Defaults to zero.
+   */
+  escrowedMicro?: bigint;
+  /**
+   * Which rail this call settles on. Only changes the wording of a refusal —
+   * "ceiling" instead of "price" — so the same block reads correctly for a
+   * metered channel. Defaults to `exact`.
+   */
+  scheme?: "exact" | "upto";
 }
 
 /** The spendable ceiling: you can never exceed what you funded, nor the configured budget. */
@@ -220,6 +240,11 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       detail: "human paused all spending for this agent",
       recoverable: true,
     };
+
+  // `upto` authorizes a ceiling, not a settled amount; every refusal below is
+  // measured against `ctx.amountMicro` regardless, so only the wording changes.
+  const isUpto = ctx.scheme === "upto";
+  const priced = isUpto ? "ceiling" : "price";
 
   const bare = ctx.host.split(":")[0].toLowerCase();
   const matches = (suffix: string) => suffix === "*" || bare === suffix || bare.endsWith("." + suffix);
@@ -245,7 +270,7 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
     return {
       allowed: false,
       rule: "per_call_cap",
-      detail: `price ${fmtUsd(ctx.amountMicro)} exceeds per-call cap of $${policy.perCallMaxUsd.toFixed(2)}`,
+      detail: `${priced} ${fmtUsd(ctx.amountMicro)} exceeds per-call cap of $${policy.perCallMaxUsd.toFixed(2)}`,
       recoverable: false,
       quotedMicro: ctx.amountMicro,
       capMicro: perCallCap,
@@ -263,15 +288,20 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       retryAfterMs: policy.windowSeconds * 1000,
     };
 
+  // Escrow is the third leg beside spend and reservations: a deposit locked in
+  // an open channel is money committed but not yet a `payment` row, so the
+  // budget must subtract it or a channel-heavy agent overspends (§5).
   const budget = effectiveBudgetMicro(policy, ctx.topupsMicro);
-  const remaining = budget - ctx.spendTotalMicro;
+  const escrowed = ctx.escrowedMicro ?? 0n;
+  const remaining = budget - ctx.spendTotalMicro - escrowed;
   if (remaining < ctx.amountMicro) {
     const boundByConfig = usd(policy.totalBudgetUsd) < ctx.topupsMicro;
     return {
       allowed: false,
       rule: "budget_exhausted",
       detail:
-        `remaining allowance ${fmtUsd(remaining < 0n ? 0n : remaining)} is below the ${fmtUsd(ctx.amountMicro)} price ` +
+        `remaining allowance ${fmtUsd(remaining < 0n ? 0n : remaining)} is below the ${fmtUsd(ctx.amountMicro)} ${priced} ` +
+        (escrowed > 0n ? `(${fmtUsd(escrowed)} is locked in open channels) ` : "") +
         (boundByConfig
           ? `(capped by totalBudgetUsd $${policy.totalBudgetUsd.toFixed(2)}; ${fmtUsd(ctx.topupsMicro)} funded)`
           : `(${fmtUsd(ctx.topupsMicro)} funded — top up with \`allowance topup <usd>\`)`),
@@ -287,7 +317,9 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       rule: "insufficient_funds",
       detail:
         `the wallet holds ${fmtUsd(ctx.walletBalanceMicro < 0n ? 0n : ctx.walletBalanceMicro)} of spendable USDC, ` +
-        `below the ${fmtUsd(ctx.amountMicro)} price. The allowance allows this payment; the wallet cannot cover it. ` +
+        `below the ${fmtUsd(ctx.amountMicro)} ` +
+        (isUpto ? `deposit the channel escrows (the ceiling leaves the wallet when it opens). ` : `price. `) +
+        `The allowance allows this payment; the wallet cannot cover it. ` +
         `Send USDC to the agent's wallet.`,
       recoverable: true,
       quotedMicro: ctx.amountMicro,

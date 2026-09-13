@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AcceptsEntry } from "./types.ts";
 import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
-import type { PayContext, UnsignedPayment } from "./payer.ts";
+import type { PayContext, UnsignedPayment, UptoBuyer } from "./payer.ts";
 import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
@@ -20,7 +20,11 @@ import {
   normalizeSolanaKey,
   usdcBalanceMicroSolana,
   encodePaymentSolanaExact,
+  encodePaymentSolanaUpto,
 } from "./solana.ts";
+import { ChannelStore } from "./channels.ts";
+import { withLock } from "./lock.ts";
+import { usd } from "./money.ts";
 
 /**
  * Live-network agent runtime: same policy rails, approvals and audit ledger
@@ -150,10 +154,22 @@ export function sameChain(a: string, b: string): boolean {
  * we cannot sign for and is dropped. Among what remains, take the cheapest.
  * Returns undefined when nothing is fulfillable, so the buyer reports "no
  * acceptable payment methods" rather than signing a doomed payload.
+ *
+ * A Solana seller may advertise `upto` (a metered payment channel) beside
+ * `exact` (§4.2). Both are kept; the preference is: `exact` when it exists and
+ * its price is at or below the per-call cap, otherwise `upto` (whose ceiling the
+ * policy still checks). `opts.preferScheme` overrides. An `upto` offer with no
+ * self-facilitation keys in `extra` is unbuildable and dropped. On an EVM agent
+ * there are no `upto` offers, so this returns the cheapest `exact` exactly as
+ * before — no behaviour change for Base.
  */
-export function selectOffer(offers: AcceptsEntry[], network: string): AcceptsEntry | undefined {
+export function selectOffer(
+  offers: AcceptsEntry[],
+  network: string,
+  opts: { preferScheme?: "exact" | "upto"; perCallMaxMicro?: bigint } = {},
+): AcceptsEntry | undefined {
   const usable = (offers ?? []).filter((o) => {
-    if (o.scheme !== "exact") return false;
+    if (o.scheme !== "exact" && o.scheme !== "upto") return false;
     if (!sameChain(o.network, network)) return false;
     const amount = offerAmount(o);
     if (amount === undefined || !/^\d+$/.test(amount)) return false;
@@ -162,15 +178,34 @@ export function selectOffer(offers: AcceptsEntry[], network: string): AcceptsEnt
       // Solana: the asset must be the USDC mint for that cluster (base58, case
       // matters). There is no verifyingContract on this rail.
       const sinfo = solanaNetworkInfo(o.network);
-      return sinfo !== undefined && asset === sinfo.mint;
+      if (!(sinfo !== undefined && asset === sinfo.mint)) return false;
+    } else {
+      const extra = o.extra as { verifyingContract?: string } | undefined;
+      if (extra?.verifyingContract && asset && extra.verifyingContract.toLowerCase() !== asset.toLowerCase())
+        return false;
     }
-    const extra = o.extra as { verifyingContract?: string } | undefined;
-    if (extra?.verifyingContract && asset && extra.verifyingContract.toLowerCase() !== asset.toLowerCase())
-      return false;
+    // `upto` needs the seller's self-facilitation keys to build the open; an
+    // offer missing them is a doomed payload, so drop it.
+    if (o.scheme === "upto") {
+      const extra = o.extra as { feePayer?: unknown; receiverAuthorizer?: unknown } | undefined;
+      if (!extra?.feePayer || !extra?.receiverAuthorizer) return false;
+    }
     return true;
   });
   if (!usable.length) return undefined;
-  return usable.reduce((best, o) => (BigInt(offerAmount(o)!) < BigInt(offerAmount(best)!) ? o : best));
+
+  const cheapest = (list: AcceptsEntry[]): AcceptsEntry | undefined =>
+    list.length ? list.reduce((best, o) => (BigInt(offerAmount(o)!) < BigInt(offerAmount(best)!) ? o : best)) : undefined;
+  const bestExact = cheapest(usable.filter((o) => o.scheme === "exact"));
+  const bestUpto = cheapest(usable.filter((o) => o.scheme === "upto"));
+
+  if (opts.preferScheme === "upto") return bestUpto ?? bestExact;
+  if (opts.preferScheme === "exact") return bestExact ?? bestUpto;
+  if (bestExact) {
+    if (opts.perCallMaxMicro === undefined || BigInt(offerAmount(bestExact)!) <= opts.perCallMaxMicro) return bestExact;
+    return bestUpto ?? bestExact;
+  }
+  return bestUpto;
 }
 
 const TRANSFER_WITH_AUTHORIZATION_TYPES = {
@@ -207,6 +242,12 @@ export interface LiveAgentOptions {
    * wallet can actually cover it. Only sensible when an RPC is unreachable.
    */
   checkOnChainBalance?: boolean;
+  /**
+   * Solana only: force a scheme when a seller advertises both `exact` and
+   * `upto` (§4.2). The default prefers `exact` at or below the per-call cap and
+   * falls back to `upto` above it. No effect on EVM (there is no `upto`).
+   */
+  preferScheme?: "exact" | "upto";
 }
 
 export interface LiveAgentRuntime extends AllowanceRuntime {
@@ -236,6 +277,12 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   let readBalance: () => Promise<bigint>;
   let encode: (unsigned: UnsignedPayment) => Promise<string>;
   let rpcUrl: string;
+  // Solana `upto` buyer hooks — built only on a Solana network (§4.3). A Base
+  // agent leaves this undefined, so `payingFetch` never takes the upto path.
+  let upto: UptoBuyer | undefined;
+  // Reads the escrow locked in open channels for the budget rail (§5). Set only
+  // on Solana; a Base agent has no channels, so the rails see zero escrow.
+  let escrowedMicro: ((openReservationIds?: ReadonlySet<string>) => bigint) | undefined;
 
   if (fam === "solana") {
     const sinfo = solanaNetworkInfo(network)!;
@@ -244,6 +291,46 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     address = signer.address;
     readBalance = () => usdcBalanceMicroSolana(rpcUrl, sinfo.mint, address);
     encode = (unsigned) => encodePaymentSolanaExact(signer, unsigned, { rpcUrl });
+
+    // Escrow is a third money state (§0, §3.3): the channel store is the buyer's
+    // book of open deposits. It shares the allowance lock so a channel mutation
+    // and a reservation never interleave. The store loads no Solana library.
+    const channels = new ChannelStore(stateDir);
+    escrowedMicro = (openReservationIds) =>
+      channels.escrowedMicro(agentName, openReservationIds ? { excludeReservationIds: openReservationIds } : {});
+    const lockPath = path.join(stateDir, "allowance.lock");
+    upto = {
+      open: async (unsigned, meta) => {
+        // Encode outside the lock (it may build a transaction / read a
+        // blockhash), then persist the escrow row under the lock before the send.
+        const { header, channel } = await encodePaymentSolanaUpto(signer, unsigned, { rpcUrl });
+        await withLock(lockPath, () =>
+          channels.add({
+            channelId: channel.channelId,
+            agent: agentName,
+            url: meta.url,
+            host: meta.host,
+            network,
+            depositMicro: channel.depositMicro,
+            withdrawDelay: channel.withdrawDelay,
+            openSlot: channel.openSlot,
+            payer: channel.payer ?? address,
+            payee: channel.payee,
+            authorizedSigner: channel.authorizedSigner,
+            mint: channel.mint,
+            reservationId: meta.reservationId,
+          }),
+        );
+        return { header, channelId: channel.channelId, depositMicro: channel.depositMicro };
+      },
+      resolve: async (channelId, outcome) => {
+        await withLock(lockPath, () => {
+          if (outcome.kind === "settled") channels.settle(channelId, outcome.settledMicro);
+          else if (outcome.kind === "refunded") channels.refund(channelId);
+          else channels.markUnknown(channelId);
+        });
+      },
+    };
   } else {
     const info = NETWORKS[network];
     if (!info)
@@ -301,6 +388,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     reservations,
     notifier,
     walletBalance: opts.checkOnChainBalance === false ? undefined : () => balances.get(),
+    escrowedMicro,
   });
 
   const ctx: PayContext = {
@@ -314,7 +402,13 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     },
     // A live seller often offers several tiers/chains at once; pick the cheapest
     // one this agent can actually settle on its own chain, not just accepts[0].
-    chooseOffer: (offers) => selectOffer(offers, network),
+    // On Solana it may also weigh `exact` against `upto` (§4.2), so the per-call
+    // cap is read live from the policy at selection time.
+    chooseOffer: (offers) =>
+      selectOffer(offers, network, {
+        preferScheme: opts.preferScheme,
+        perCallMaxMicro: usd(policyStore.load().perCallMaxUsd),
+      }),
     encodePayment: async (unsigned) => {
       // Same-chain, not same-string: a v2 seller quoting `eip155:84532` is the
       // same chain as a `base-sepolia` agent and is signed; a different chain
@@ -329,6 +423,8 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       return encode(unsigned);
     },
     ...rails,
+    // Present only on a Solana network; a Base agent never opens a channel.
+    ...(upto ? { upto } : {}),
   };
 
   // A live agent is exactly the kind that runs headless on a server, so the
@@ -355,6 +451,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     rpcUrl,
     walletBalanceMicro: readBalance,
     policy: () => policyStore.load(),
+    ...(escrowedMicro ? { escrowedMicro } : {}),
     stopHeartbeat,
   };
 }
