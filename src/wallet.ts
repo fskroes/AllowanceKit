@@ -339,12 +339,19 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
   // A headless agent on a server is covered too: the heartbeat runs whenever a
   // runtime exists, not only while the local dashboard is open. Unref'd, so a
   // one-shot CLI command still exits at once.
-  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
-    agent: agentName,
-    network: marker.network,
-    mode: live ? "live" : "practice",
-    version: runtimeVersion(),
-  });
+  const stopHeartbeat = startCloudHeartbeat(
+    notifyStore.load().cloud,
+    {
+      agent: agentName,
+      network: marker.network,
+      mode: live ? "live" : "practice",
+      version: runtimeVersion(),
+    },
+    // Report locked value so the cloud overview shows escrow without waiting for
+    // an event (SOL-08, §6). No chain reconcile here — this generic runtime holds
+    // no RPC; the live Solana agent (createLiveAgent) does that in its own beat.
+    { beat: () => ({ escrowedMicro: escrowedMicro().toString() }) },
+  );
 
   return {
     agentName,

@@ -12,6 +12,23 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ### Added
 
+- **Cloud channel events + escrow watchdog (SOL-08).** Solana `upto` escrow is now
+  a first-class thing the cloud and the dashboard track. A new `channel`
+  `CloudEventKind` carries every phase — `opened`, `settled`, `refunded`,
+  `orphaned`, `reclaimed` — with the deposit, settled and refund amounts, so the
+  feed sees locked money the moment it locks. The cloud heartbeat gains
+  `escrowedMicro`, so the overview shows locked value without an event. The local
+  dashboard grows an "In escrow" card and a channels table (status, host, deposit,
+  settled, refund, age) with a token-gated reclaim button; its state tick
+  reconciles open channels against the chain and emits `orphaned` once each. The
+  buyer runtime emits `opened`/`settled`/`refunded` inline, and `channels
+  reconcile`/`sweep`/`reclaim` emit `orphaned`/`settled`/`reclaimed`. On the cloud
+  (`~/dev/wallie-cloud`): `channel` joins `INGEST_KINDS` (routine phases are
+  feed-only, `orphaned` alerts, email + SMS), the escrow watchdog raises
+  `escrow_stale` for a deposit opened and never resolved past N minutes (default
+  10), and the account overview + event feed surface escrow. An older client is
+  still accepted unchanged.
+
 - **MCP server (SOL-07).** A new `allowance-kit/mcp` subpath and the `wallie-mcp`
   bin serve the allowance runtime over the Model Context Protocol (stdio), so an
   MCP client pays x402 APIs inside the same policy rails, ledger and escrow book.

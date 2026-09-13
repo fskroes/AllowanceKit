@@ -1,14 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { AcceptsEntry } from "./types.ts";
+import type { AcceptsEntry, ChannelRecord } from "./types.ts";
 import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import type { PayContext, UnsignedPayment, UptoBuyer } from "./payer.ts";
 import { Ledger } from "./ledger.ts";
 import { PolicyStore } from "./policy.ts";
 import { ApprovalStore } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
-import { NotifyStore, Notifier, startCloudHeartbeat } from "./notify.ts";
+import { NotifyStore, Notifier, startCloudHeartbeat, type CloudHeartbeat, type ChannelPhase } from "./notify.ts";
 import { runtimeVersion } from "./version.ts";
 import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
 import { writeMode } from "./mode.ts";
@@ -22,7 +22,7 @@ import {
   encodePaymentSolanaExact,
   encodePaymentSolanaUpto,
 } from "./solana.ts";
-import { ChannelStore } from "./channels.ts";
+import { ChannelStore, reconcileAndNotify, solanaAccountRpc } from "./channels.ts";
 import { withLock } from "./lock.ts";
 import { usd } from "./money.ts";
 
@@ -283,6 +283,15 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   // Reads the escrow locked in open channels for the budget rail (§5). Set only
   // on Solana; a Base agent has no channels, so the rails see zero escrow.
   let escrowedMicro: ((openReservationIds?: ReadonlySet<string>) => bigint) | undefined;
+  // The per-beat heartbeat hook: on Solana it reconciles the chain, emits
+  // `channel/orphaned`/`settled` once each, and reports live escrow (SOL-08, §6).
+  let heartbeatBeat: (() => Promise<Partial<CloudHeartbeat>>) | undefined;
+
+  // Alerts and the cloud feed need to exist before the Solana branch builds the
+  // channel hooks, so an `upto` open/settle can emit a `channel` event and the
+  // heartbeat can carry escrow. The notifier only reads config from disk.
+  const notifyStore = new NotifyStore(stateDir, agentName);
+  const notifier = new Notifier(notifyStore, agentName, undefined, { network, mode: "live" });
 
   if (fam === "solana") {
     const sinfo = solanaNetworkInfo(network)!;
@@ -299,12 +308,13 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     escrowedMicro = (openReservationIds) =>
       channels.escrowedMicro(agentName, openReservationIds ? { excludeReservationIds: openReservationIds } : {});
     const lockPath = path.join(stateDir, "allowance.lock");
+    const reconcileRpc = solanaAccountRpc(rpcUrl);
     upto = {
       open: async (unsigned, meta) => {
         // Encode outside the lock (it may build a transaction / read a
         // blockhash), then persist the escrow row under the lock before the send.
         const { header, channel } = await encodePaymentSolanaUpto(signer, unsigned, { rpcUrl });
-        await withLock(lockPath, () =>
+        const rec = await withLock(lockPath, () =>
           channels.add({
             channelId: channel.channelId,
             agent: agentName,
@@ -321,15 +331,34 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
             reservationId: meta.reservationId,
           }),
         );
+        // The feed gets the escrow the moment it is locked (§6), outside the lock.
+        notifier.channel("opened", rec);
         return { header, channelId: channel.channelId, depositMicro: channel.depositMicro };
       },
       resolve: async (channelId, outcome) => {
+        let resolved: { phase: ChannelPhase; rec: ChannelRecord } | undefined;
         await withLock(lockPath, () => {
-          if (outcome.kind === "settled") channels.settle(channelId, outcome.settledMicro);
-          else if (outcome.kind === "refunded") channels.refund(channelId);
-          else channels.markUnknown(channelId);
+          if (outcome.kind === "settled") resolved = { phase: "settled", rec: channels.settle(channelId, outcome.settledMicro) };
+          else if (outcome.kind === "refunded") resolved = { phase: "refunded", rec: channels.refund(channelId) };
+          else channels.markUnknown(channelId); // no event: `unknown` is transient, reconcile resolves it
         });
+        if (resolved) notifier.channel(resolved.phase, resolved.rec);
       },
+    };
+    // Escrow watchdog, runtime half (§6): each heartbeat reconciles any in-flight
+    // channel, emits its resolution once, and reports live escrow. Reconcile only
+    // touches the chain when something is actually open, so an idle agent's beat
+    // stays a plain liveness ping.
+    heartbeatBeat = async () => {
+      if (channels.active(agentName).length) {
+        await reconcileAndNotify(reconcileRpc, channels, (phase, rec) => notifier.channel(phase, rec), {
+          agent: agentName,
+          // Share the allowance lock with `upto.open`/`resolve`, so a 60 s reconcile
+          // write never clobbers a channel opened or settled during its RPC read.
+          lock: (fn) => withLock(lockPath, fn),
+        });
+      }
+      return { escrowedMicro: channels.escrowedMicro(agentName).toString() };
     };
   } else {
     const info = NETWORKS[network];
@@ -359,8 +388,6 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   const policyStore = new PolicyStore(stateDir, agentName);
   const approvals = new ApprovalStore(stateDir, agentName);
   const reservations = new ReservationStore(stateDir);
-  const notifyStore = new NotifyStore(stateDir, agentName);
-  const notifier = new Notifier(notifyStore, agentName, undefined, { network, mode: "live" });
 
   const balances = new BalanceCache(readBalance, opts.balanceTtlMs ?? 15_000, (e) =>
     console.warn(`could not read the wallet's USDC balance: ${e instanceof Error ? e.message : String(e)}`),
@@ -429,12 +456,16 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
 
   // A live agent is exactly the kind that runs headless on a server, so the
   // heartbeat belongs here, not only in the dashboard. Unref'd; stop it on exit.
-  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
-    agent: agentName,
-    network,
-    mode: "live",
-    version: runtimeVersion(),
-  });
+  const stopHeartbeat = startCloudHeartbeat(
+    notifyStore.load().cloud,
+    {
+      agent: agentName,
+      network,
+      mode: "live",
+      version: runtimeVersion(),
+    },
+    heartbeatBeat ? { beat: heartbeatBeat } : {},
+  );
 
   return {
     agentName,

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fmtUsdSmart } from "./money.ts";
 import { RULE_LABELS, defaultPolicy, slug } from "./policy.ts";
+import type { ChannelRecord } from "./types.ts";
 
 /**
  * Notifications: the difference between a dashboard someone has to watch and a
@@ -55,8 +56,16 @@ export interface CloudConfig {
  * not just threshold crossings. `threshold` was added in 0.5.1 (C-10): the cloud
  * wants the 50/80/100 % rows too, and its "budget 100 %" SMS depends on them. A
  * 0.5.0 client simply never sends it, which the server tolerates.
+ *
+ * `channel` was added by SOL-08 for Solana `upto` escrow: one row per channel
+ * phase (`data.phase` ∈ opened|settled|refunded|orphaned|reclaimed), so the
+ * cloud can show locked value and raise the escrow watchdog. An older client
+ * never sends it; the server tolerates a kind it does not know.
  */
-export type CloudEventKind = "payment" | "blocked" | "approval" | "threshold";
+export type CloudEventKind = "payment" | "blocked" | "approval" | "threshold" | "channel";
+
+/** The phase of a Solana `upto` channel a `channel` cloud event reports (SOL-08, §6). */
+export type ChannelPhase = "opened" | "settled" | "refunded" | "orphaned" | "reclaimed";
 
 export interface CloudEvent {
   kind: CloudEventKind;
@@ -134,7 +143,7 @@ export interface DeliveryResult {
 export interface DeliveryFailure {
   at: string;
   agent: string;
-  event: NotifyEvent | "heartbeat" | "payment";
+  event: NotifyEvent | "heartbeat" | CloudEventKind;
   subject: string;
   channel: string;
   detail: string;
@@ -510,6 +519,13 @@ export interface CloudHeartbeat {
   network?: string;
   mode?: "practice" | "live";
   version?: string;
+  /**
+   * Micro-dollars locked in open Solana `upto` channels, as a decimal string
+   * (SOL-08, §6). Lets the cloud overview show locked value without waiting for
+   * a `channel` event. Absent on an EVM agent and on an older client, which the
+   * server tolerates.
+   */
+  escrowedMicro?: string;
 }
 
 /**
@@ -525,15 +541,39 @@ export function startCloudHeartbeat(
     env?: NodeJS.ProcessEnv;
     everyMs?: number;
     send?: (cloud: CloudConfig, meta: CloudHeartbeat, env: NodeJS.ProcessEnv) => Promise<unknown>;
+    /**
+     * Runs once per beat before the ping. Its return is merged into the body, so
+     * a Solana agent can attach a live `escrowedMicro`; it is also where the
+     * escrow watchdog reconciles the chain and emits `channel/orphaned` (SOL-08,
+     * §6). Errors are swallowed — a chain read must never stop the liveness beat —
+     * and a slow beat never overlaps itself.
+     */
+    beat?: () => Partial<CloudHeartbeat> | void | Promise<Partial<CloudHeartbeat> | void>;
   } = {},
 ): () => void {
   if (!cloud?.enabled) return () => undefined;
   const env = opts.env ?? process.env;
   const send = opts.send ?? postCloudHeartbeat;
   const everyMs = Math.max(250, opts.everyMs ?? 60_000);
-  const beat = () => void Promise.resolve(send(cloud, meta, env)).catch(() => undefined);
-  beat();
-  const timer = setInterval(beat, everyMs);
+  let running = false;
+  const tick = async () => {
+    if (running) return; // never let a slow reconcile pile beats on top of each other
+    running = true;
+    try {
+      let extra: Partial<CloudHeartbeat> | void;
+      try {
+        extra = opts.beat ? await opts.beat() : undefined;
+      } catch {
+        extra = undefined; // the beat hook (chain read) must not stop the ping
+      }
+      const body = extra ? { ...meta, ...extra } : meta;
+      await Promise.resolve(send(cloud, body, env)).catch(() => undefined);
+    } finally {
+      running = false;
+    }
+  };
+  void tick();
+  const timer = setInterval(() => void tick(), everyMs);
   timer.unref?.();
   return () => clearInterval(timer);
 }
@@ -569,6 +609,56 @@ export async function cloudWhoami(
     return { ok: true, workspace: body.workspace?.name ?? body.name, detail: "connected" };
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Plain-English subject and body for each Solana `upto` channel phase (SOL-08). */
+function channelMessage(
+  agent: string,
+  phase: ChannelPhase,
+  rec: ChannelRecord,
+  deposit: bigint,
+  settled: bigint,
+  refund: bigint,
+): { subject: string; body: string } {
+  const tx = rec.txHash ? `\ntx ${rec.txHash}` : "";
+  switch (phase) {
+    case "opened":
+      return {
+        subject: `${agent} opened a channel to ${rec.host}`,
+        body:
+          `${fmtUsdSmart(deposit)} is escrowed for one metered request to ${rec.host}. ` +
+          `The seller settles the actual amount, up to that ceiling; anything unused comes back.` +
+          tx,
+      };
+    case "settled":
+      return {
+        subject: `${agent} settled ${fmtUsdSmart(settled)} to ${rec.host}`,
+        body:
+          `${fmtUsdSmart(settled)} of the ${fmtUsdSmart(deposit)} escrow went to ${rec.host}; ` +
+          `${fmtUsdSmart(refund)} came back to your wallet.` +
+          tx,
+      };
+    case "refunded":
+      return {
+        subject: `${agent}: ${rec.host} charged nothing`,
+        body: `The ${fmtUsdSmart(deposit)} escrow to ${rec.host} was returned in full: the seller settled with amount 0.` + tx,
+      };
+    case "orphaned":
+      return {
+        subject: `${agent} has an unsettled channel to ${rec.host}`,
+        body:
+          `${fmtUsdSmart(deposit)} is still escrowed to ${rec.host} and the seller has not settled. ` +
+          `The reclaim clock (${rec.withdrawDelay}s) is running; the deposit can be taken back once it elapses.`,
+      };
+    case "reclaimed":
+      return {
+        subject: `${agent} reclaimed ${fmtUsdSmart(refund)} from ${rec.host}`,
+        body:
+          `The escape path returned ${fmtUsdSmart(refund)} of the ${fmtUsdSmart(deposit)} escrow to ` +
+          `${rec.host} back to your wallet.` +
+          tx,
+      };
   }
 }
 
@@ -671,6 +761,33 @@ export class Notifier {
       `${fmtUsdSmart(amountMicro)} settled to ${host}.` + (txHash ? `\ntx ${txHash}` : ""),
       { agent: this.agentName, host, url, amountMicro: amountMicro.toString(), txHash },
     );
+  }
+
+  /**
+   * Call after a Solana `upto` channel changes phase (SOL-08, §6). Cloud-only,
+   * like `paid`: escrow is a third money state the feed tracks in its own right,
+   * so the cloud can show locked value and the watchdog can flag a deposit the
+   * seller never settled. The `data` fields are exactly §6's list.
+   */
+  channel(phase: ChannelPhase, rec: ChannelRecord): void {
+    const cfg = this.store.load();
+    if (!cfg.cloud?.enabled) return;
+    const deposit = BigInt(rec.depositMicro);
+    const settled = BigInt(rec.settledMicro);
+    const refund = BigInt(rec.refundMicro);
+    const { subject, body } = channelMessage(this.agentName, phase, rec, deposit, settled, refund);
+    this.emitCloud(cfg, "channel", subject, body, {
+      agent: this.agentName,
+      phase,
+      channelId: rec.channelId,
+      host: rec.host,
+      network: rec.network,
+      depositMicro: rec.depositMicro,
+      settledMicro: rec.settledMicro,
+      refundMicro: rec.refundMicro,
+      withdrawDelay: rec.withdrawDelay,
+      ...(rec.txHash ? { txHash: rec.txHash } : {}),
+    });
   }
 
   private dispatch(cfg: NotifyConfig, msg: Message): void {

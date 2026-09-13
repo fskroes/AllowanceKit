@@ -15,6 +15,7 @@ import {
   PAYMENT_CHANNELS_PROGRAM,
   decodeChannelAccount,
   reconcileChannels,
+  reconcileAndNotify,
   planReclaim,
   buildReclaimInstructions,
   type ChannelRpc,
@@ -221,6 +222,45 @@ test("reconcile flips unknown and opened to their true on-chain state", async ()
   assert.equal(byTo[sealed.channelId], "settled");
   assert.equal(byTo[vanished.channelId], "dropped");
   assert.equal(changes.find((c) => c.channelId === openInflight.channelId), undefined);
+});
+
+test("SOL-08: reconcileAndNotify emits settled/orphaned once, never for a dropped row, and runs writes under the lock", async () => {
+  const store = new ChannelStore(tmpDir());
+  const sealed = store.add(openInput({ depositMicro: 100_000n }));
+  const closing = store.add(openInput({ depositMicro: 40_000n }));
+  const vanished = store.add(openInput({ depositMicro: 40_000n }));
+  store.markUnknown(closing.channelId);
+  store.markUnknown(vanished.channelId);
+
+  const phases: Array<{ phase: string; channelId: string }> = [];
+  let locked = 0;
+  const changes = await reconcileAndNotify(
+    fakeRpc({
+      [sealed.channelId]: fakeAccount({ status: CHANNEL_STATUS.SEALED, depositMicro: 100_000n, settledMicro: 25_000n }),
+      [closing.channelId]: fakeAccount({ status: CHANNEL_STATUS.CLOSING, depositMicro: 40_000n }),
+      [vanished.channelId]: null,
+    }),
+    store,
+    (phase, rec) => phases.push({ phase, channelId: rec.channelId }),
+    {
+      lock: async (fn) => {
+        locked++;
+        return fn();
+      },
+    },
+  );
+
+  assert.equal(locked, 1, "the write phase ran inside the provided lock exactly once");
+  assert.equal(changes.length, 3);
+  // settled and orphaned are emitted with the freshly-mutated record; dropped is not a phase.
+  assert.deepEqual(
+    phases.map((p) => p.phase).sort(),
+    ["orphaned", "settled"],
+  );
+  const settledEvt = phases.find((p) => p.phase === "settled")!;
+  assert.equal(settledEvt.channelId, sealed.channelId);
+  assert.equal(store.get(sealed.channelId)!.settledMicro, "25000");
+  assert.equal(store.get(vanished.channelId), undefined, "the vanished row was dropped, not emitted");
 });
 
 test("reconcile leaves terminal channels untouched", async () => {

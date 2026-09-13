@@ -57,6 +57,19 @@
   .footnote { color:var(--dim); font-size:12px; margin-top:10px; }
   .practice { color:var(--amber); }
   .live { color:var(--red); font-weight:600; }
+  .tablewrap { overflow-x:auto; }
+  table.channels { width:100%; border-collapse:collapse; font-size:13px; }
+  table.channels th, table.channels td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line,#e5e7eb); white-space:nowrap; }
+  table.channels th { font-weight:600; color:var(--muted,#6b7280); font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+  table.channels td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  table.channels .st { font-weight:600; }
+  table.channels .st-opened { color:var(--amber,#b45309); }
+  table.channels .st-orphaned, table.channels .st-unknown { color:var(--red,#b91c1c); }
+  table.channels .st-settled, table.channels .st-refunded, table.channels .st-reclaimed { color:var(--muted,#6b7280); }
+  .linkbtn { background:none; border:1px solid var(--line,#e5e7eb); border-radius:8px; padding:4px 10px; font-size:12px; cursor:pointer; color:inherit; font:inherit; }
+  .linkbtn:hover { background:var(--line,#f3f4f6); }
+  .reclaimbtn { background:var(--red,#b91c1c); color:#fff; border:none; border-radius:8px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  .reclaimbtn:disabled { opacity:.5; cursor:default; }
   @media (max-width:760px) {
     body { padding:16px; }
     .cards { grid-template-columns:repeat(2,1fr); }
@@ -86,6 +99,7 @@
     <div class="bar"><i id="budgetBar"></i></div>
     <div class="sub" id="fundedNote"></div></div>
   <div class="card"><dt>Spent so far</dt><dd id="spent">$–</dd><div class="sub" id="txcount"></div></div>
+  <div class="card" id="escrowCard" hidden><dt>In escrow</dt><dd id="escrow">$–</dd><div class="sub" id="escrowSub"></div></div>
   <div class="card" id="waitingCard"><dt>Waiting on you</dt><dd id="waiting">–</dd><div class="sub" id="waitingSub"></div></div>
   <div class="card"><dt>Your limits</dt><dd id="percall">–</dd><div class="sub" id="velocity"></div></div>
 </dl>
@@ -113,6 +127,17 @@
     <div class="footnote" id="ledgerNote"></div>
   </section>
 </div>
+
+<section class="panel" id="channelsPanel" hidden>
+  <h2>Escrow channels <button class="linkbtn" id="reconcileBtn" type="button">Check the chain</button></h2>
+  <div class="tablewrap">
+    <table class="channels" id="channelsTable">
+      <thead><tr><th>status</th><th>host</th><th>deposit</th><th>settled</th><th>refund</th><th>age</th><th></th></tr></thead>
+      <tbody id="channelsBody"></tbody>
+    </table>
+  </div>
+  <div class="footnote">Escrow is money that left your wallet for one metered request but is not yet spent. The seller settles the actual amount up to the deposit, and the rest comes back. A channel the seller never settles becomes reclaimable once its withdraw delay elapses.</div>
+</section>
 </main>
 
 <script>
@@ -277,6 +302,52 @@ function syncAgents(agents, active) {
   $("agentPick").value = active;
 }
 
+function ago(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const s = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+}
+
+// The escrow card and the channel table only appear when there is a channel to
+// show — a Base agent never opens one, so it never sees an empty Solana panel.
+function renderChannels(s) {
+  const channels = s.channels || [];
+  const escrow = BigInt(s.escrowedMicro || "0");
+  const hasAny = channels.length > 0 || escrow > 0n;
+  $("escrowCard").hidden = !hasAny;
+  $("channelsPanel").hidden = !channels.length;
+  if (hasAny) {
+    $("escrow").textContent = usd(s.escrowedMicro || "0");
+    const open = channels.filter((c) => c.status === "opened" || c.status === "unknown" || c.status === "orphaned").length;
+    $("escrowSub").textContent = open ? open + " open channel" + (open === 1 ? "" : "s") : "all settled";
+  }
+  if (!channels.length) return;
+
+  const body = $("channelsBody");
+  body.textContent = "";
+  for (const c of channels) {
+    const tr = document.createElement("tr");
+    tr.appendChild(el("td", "st st-" + c.status, c.status));
+    tr.appendChild(el("td", null, c.host));
+    tr.appendChild(el("td", "num", usd(c.depositMicro)));
+    tr.appendChild(el("td", "num", usd(c.settledMicro)));
+    tr.appendChild(el("td", "num", usd(c.refundMicro)));
+    tr.appendChild(el("td", "num", ago(c.at)));
+    const action = el("td", "num");
+    if (c.reclaimable) {
+      const btn = el("button", "reclaimbtn", "Reclaim");
+      btn.dataset.channel = c.channelId;
+      action.appendChild(btn);
+    }
+    tr.appendChild(action);
+    body.appendChild(tr);
+  }
+}
+
 async function refresh() {
   let envelope;
   try {
@@ -321,6 +392,8 @@ async function refresh() {
   const pays = s.events.filter((e) => e.t === "payment").length;
   const blks = s.events.filter((e) => e.t === "blocked").length;
   $("txcount").textContent = pays + " payments · " + blks + " stopped";
+
+  renderChannels(s);
 
   const pending = (s.approvals || []).filter((a) => a.status === "pending");
   const total = pending.reduce((sum, a) => sum + BigInt(a.amountMicro), 0n);
@@ -393,6 +466,21 @@ $("approvals").addEventListener("click", async (ev) => {
       : "Denied. The agent stays blocked on that payment.";
     setTimeout(() => { decisionNote = ""; }, 15000);
   }
+  refresh();
+});
+
+$("reconcileBtn").addEventListener("click", async () => {
+  const r = await post("/api/channels", { action: "reconcile", agent: selected });
+  if (r) showBanner(r.changed ? r.changed + " channel(s) updated from the chain." : "Channels already up to date.");
+  refresh();
+});
+
+$("channelsBody").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button.reclaimbtn");
+  if (!btn) return;
+  btn.disabled = true;
+  const r = await post("/api/channels", { action: "reclaim", agent: selected, channelId: btn.dataset.channel });
+  if (r && r.started) showBanner("Reclaim started. It runs through the channel's grace period; this table updates when it lands.");
   refresh();
 });
 

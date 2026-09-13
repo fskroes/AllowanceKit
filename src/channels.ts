@@ -367,6 +367,14 @@ export interface ReconcileChange {
 }
 
 /**
+ * Runs a store mutation under the allowance lock. A caller that shares the
+ * `stateDir` with a live agent must pass one (`(fn) => withLock(lockPath, fn)`),
+ * so a reconcile's file write cannot clobber a concurrent `upto.open`/`resolve`.
+ * The default runs unlocked, for tests and single-process callers.
+ */
+export type ChannelLock = <T>(fn: () => T | Promise<T>) => Promise<T>;
+
+/**
  * Read the chain for every escrow row that has not resolved (`opened`,
  * `unknown`) and move it to its true state (§4.3):
  *
@@ -376,6 +384,13 @@ export interface ReconcileChange {
  * - OPEN, was `opened`      → still legitimately in flight: leave it
  * - CLOSING                 → a close is under way: orphan it (deposit still locked)
  *
+ * The chain reads happen first, with no lock held, because they are slow and must
+ * never block a payment. The store writes then happen under `opts.lock` (when a
+ * caller shares the state dir with a live agent), and each row is re-read inside
+ * the lock and re-checked to still be `opened`/`unknown` — so a settle or a fresh
+ * open that landed during the RPC round trip is never overwritten (§0, escrow is
+ * money; a lost row is lost escrow).
+ *
  * Returns one entry per channel that changed. A row already in a terminal state
  * (`settled`, `refunded`, `reclaimed`) or awaiting its clock (`orphaned`) is
  * left untouched.
@@ -383,32 +398,70 @@ export interface ReconcileChange {
 export async function reconcileChannels(
   rpc: ChannelRpc,
   store: ChannelStore,
-  opts: { agent?: string; nowMs?: number } = {},
+  opts: { agent?: string; nowMs?: number; lock?: ChannelLock } = {},
 ): Promise<ReconcileChange[]> {
   const nowMs = opts.nowMs ?? Date.now();
-  const changes: ReconcileChange[] = [];
+  const lock: ChannelLock = opts.lock ?? ((fn) => Promise.resolve(fn()));
+
+  // Phase 1 — read the chain for every unresolved row. No lock: RPC is slow.
+  const reads: { channelId: string; data: Uint8Array | null }[] = [];
   for (const rec of store.list(opts.agent)) {
     if (rec.status !== "opened" && rec.status !== "unknown") continue;
-    const data = await rpc.getAccountData(rec.channelId);
+    reads.push({ channelId: rec.channelId, data: await rpc.getAccountData(rec.channelId) });
+  }
+  if (!reads.length) return [];
 
-    if (data === null) {
-      store.drop(rec.channelId);
-      changes.push({ channelId: rec.channelId, from: rec.status, to: "dropped" });
-      continue;
-    }
+  // Phase 2 — apply the writes under the lock, re-reading each row so a mutation
+  // that raced the RPC (a settle, or a brand-new open of another channel) stands.
+  return lock(() => {
+    const changes: ReconcileChange[] = [];
+    for (const { channelId, data } of reads) {
+      const cur = store.get(channelId);
+      if (!cur || (cur.status !== "opened" && cur.status !== "unknown")) continue; // resolved meanwhile
 
-    const onChain = decodeChannelAccount(data);
-    if (onChain.status === CHANNEL_STATUS.SEALED || onChain.status === CHANNEL_STATUS.DISTRIBUTED) {
-      store.settle(rec.channelId, onChain.settledMicro);
-      changes.push({ channelId: rec.channelId, from: rec.status, to: "settled" });
-    } else if (onChain.status === CHANNEL_STATUS.CLOSING) {
-      store.markOrphaned(rec.channelId, nowMs);
-      changes.push({ channelId: rec.channelId, from: rec.status, to: "orphaned" });
-    } else if (onChain.status === CHANNEL_STATUS.OPEN && rec.status === "unknown") {
-      store.markOrphaned(rec.channelId, nowMs);
-      changes.push({ channelId: rec.channelId, from: rec.status, to: "orphaned" });
+      if (data === null) {
+        store.drop(channelId);
+        changes.push({ channelId, from: cur.status, to: "dropped" });
+        continue;
+      }
+
+      const onChain = decodeChannelAccount(data);
+      if (onChain.status === CHANNEL_STATUS.SEALED || onChain.status === CHANNEL_STATUS.DISTRIBUTED) {
+        store.settle(channelId, onChain.settledMicro);
+        changes.push({ channelId, from: cur.status, to: "settled" });
+      } else if (onChain.status === CHANNEL_STATUS.CLOSING) {
+        store.markOrphaned(channelId, nowMs);
+        changes.push({ channelId, from: cur.status, to: "orphaned" });
+      } else if (onChain.status === CHANNEL_STATUS.OPEN && cur.status === "unknown") {
+        store.markOrphaned(channelId, nowMs);
+        changes.push({ channelId, from: cur.status, to: "orphaned" });
+      }
+      // OPEN + already `opened`: still in flight, no change.
     }
-    // OPEN + already `opened`: still in flight, no change.
+    return changes;
+  });
+}
+
+/**
+ * Reconcile against the chain, then hand each channel that reached a terminal or
+ * orphaned state to `onPhase` so a caller can emit a Cloud `channel` event
+ * (SOL-08, §6). channels.ts stays free of the notifier — the caller supplies the
+ * callback. Reconcile flips a channel out of `opened`/`unknown` and never back,
+ * so `onPhase` fires at most once per channel per resolution; a `dropped` channel
+ * (no PDA ever existed on-chain) is not a phase and is skipped.
+ */
+export async function reconcileAndNotify(
+  rpc: ChannelRpc,
+  store: ChannelStore,
+  onPhase: (phase: "settled" | "orphaned", rec: ChannelRecord) => void,
+  opts: { agent?: string; nowMs?: number; lock?: ChannelLock } = {},
+): Promise<ReconcileChange[]> {
+  const changes = await reconcileChannels(rpc, store, opts);
+  for (const ch of changes) {
+    if (ch.to === "settled" || ch.to === "orphaned") {
+      const rec = store.get(ch.channelId);
+      if (rec) onPhase(ch.to, rec);
+    }
   }
   return changes;
 }

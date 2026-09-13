@@ -13,6 +13,7 @@ import {
   startHeartbeat,
   cloudWhoami,
   NotifyStore,
+  Notifier,
   CLOUD_ENV,
   CLOUD_DEFAULT_URL,
 } from "./notify.ts";
@@ -28,7 +29,8 @@ import {
   probeSolanaLibs,
   describeSolanaKeyFormat,
 } from "./solana.ts";
-import { ChannelStore, reconcileChannels, reclaimChannel, solanaAccountRpc } from "./channels.ts";
+import { ChannelStore, reconcileAndNotify, reclaimChannel, solanaAccountRpc } from "./channels.ts";
+import { withLock } from "./lock.ts";
 import { checkTreasuryAta } from "./seller-upto.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
@@ -699,8 +701,26 @@ async function main(): Promise<void> {
       const sinfo = solanaNetworkInfo(mode.network!)!;
       const rpcUrl = mode.rpcUrl ?? sinfo.defaultRpc;
 
+      // A channel row carries its own agent; the emitted cloud event must be
+      // tagged with that agent, so build (and reuse) one notifier per agent.
+      const notifiers = new Map<string, Notifier>();
+      const notifierFor = (name: string): Notifier => {
+        let n = notifiers.get(name);
+        if (!n) notifiers.set(name, (n = new Notifier(new NotifyStore(stateDir, name), name, undefined, { network: mode.network, mode: "live" })));
+        return n;
+      };
+      // Share the allowance lock with any live agent running on this state dir, so
+      // a reconcile/reclaim write cannot clobber a concurrent open/settle.
+      const lockPath = path.join(stateDir, "allowance.lock");
+      const lock = <T,>(fn: () => T | Promise<T>) => withLock(lockPath, fn);
+
       if (sub === "reconcile") {
-        const changes = await reconcileChannels(solanaAccountRpc(rpcUrl), store, { agent: flags.agent });
+        const changes = await reconcileAndNotify(
+          solanaAccountRpc(rpcUrl),
+          store,
+          (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
+          { agent: flags.agent, lock },
+        );
         if (!changes.length) {
           console.log(`all channels already resolved — nothing changed.`);
           break;
@@ -722,7 +742,12 @@ async function main(): Promise<void> {
           targets = [rec];
         } else {
           // sweep: read the chain first, then reclaim every orphan whose grace elapsed.
-          await reconcileChannels(solanaAccountRpc(rpcUrl), store, { agent: flags.agent });
+          await reconcileAndNotify(
+            solanaAccountRpc(rpcUrl),
+            store,
+            (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
+            { agent: flags.agent, lock },
+          );
           targets = store.dueForReclaim(flags.agent);
           if (!targets.length) {
             console.log(`no orphaned channels are past their withdraw delay — nothing to reclaim.`);
@@ -734,7 +759,8 @@ async function main(): Promise<void> {
           console.log(`reclaiming ${rec.channelId.slice(0, 12)}… (deposit ${fmtUsd(BigInt(rec.depositMicro))})`);
           const res = await reclaimChannel(rec, signer, { rpcUrl });
           if (res.reclaimed) {
-            store.markReclaimed(rec.channelId, res.refundMicro);
+            const updated = await lock(() => store.markReclaimed(rec.channelId, res.refundMicro));
+            notifierFor(updated.agent).channel("reclaimed", updated);
             console.log(`  done — ${fmtUsd(res.refundMicro)} returned · ${res.signatures.length} tx`);
           } else {
             console.log(`  skipped — ${res.note}`);
