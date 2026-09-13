@@ -194,6 +194,18 @@ export { startSellerApis, describeServers, startUptoDemoServer } from "./demo-se
 export type { DemoServer, PaidApiCatalog, UptoDemoServer } from "./demo-servers.ts";
 export { runDemo } from "./demo-run.ts";
 
+// SOL-07: the MCP server surface. The `@modelcontextprotocol/sdk` is loaded
+// lazily inside these, so importing `allowance-kit` never pulls the MCP stack in.
+export {
+  createMcpServer,
+  runMcpStdio,
+  resolveBinding,
+  handleToolCall,
+  TOOL_DEFINITIONS,
+  defaultStateDir,
+} from "./mcp.ts";
+export type { McpRuntimeOptions, McpBinding } from "./mcp.ts";
+
 export { usd, fmtUsd, fmtUsdExact, MICRO } from "./money.ts";
 export type {
   AcceptsEntry,

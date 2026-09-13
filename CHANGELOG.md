@@ -10,6 +10,30 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+### Added
+
+- **MCP server (SOL-07).** A new `allowance-kit/mcp` subpath and the `wallie-mcp`
+  bin serve the allowance runtime over the Model Context Protocol (stdio), so an
+  MCP client pays x402 APIs inside the same policy rails, ledger and escrow book.
+  Five tools: `pay_fetch`, `get_budget`, `list_channels`, `decide_approval`
+  (§8's `approve`/`deny` as one decision), and `reclaim_channel`. The server binds
+  one runtime, resolved from the state dir exactly as the CLI resolves it (live vs
+  practice from `mode.json`, the key from `AGENT_PRIVATE_KEY`), so `pay_fetch`
+  settles `exact` or `upto` per offer without the caller choosing a scheme.
+  `@modelcontextprotocol/sdk` is an optional peer, loaded lazily — importing
+  `allowance-kit` never pulls the MCP stack in, only `allowance-kit/mcp` does.
+  New: `src/mcp.ts`, `src/mcp-bin.ts` (`allowance-mcp` bin), the `wallie-mcp`
+  alias package, and `demo/mcp-agent/` — an offline example agent whose transcript
+  shows an `exact` buy, a ceiling block in `RULE_LABELS` language, and a Solana
+  `upto` buy that settles below its ceiling and refunds the rest.
+
+### Fixed
+
+- **Lockfile install of the Solana peer tree.** `@x402/svm` pins its own nested
+  `@solana-program/token-2022`, whose `@solana/*` peers must sit where that nested
+  copy can resolve them; the lockfile now records them there, so `npm ci` (what CI
+  runs) reproduces a working Solana `upto` tree instead of a half-hoisted one.
+
 ## [0.5.1] - 2026-09-08
 
 Runtime follow-ups that Wallie Cloud needs (RELEASE-PLAN ticket C-10). Ships as

@@ -1,0 +1,45 @@
+{
+  "name": "wallie-mcp",
+  "version": "0.5.1",
+  "description": "Wallie MCP server — give your MCP client a spending allowance. Pay any x402 API (Base or Solana, exact or upto) inside hard policy rails, over five stdio tools.",
+  "type": "module",
+  "license": "MIT",
+  "author": "fskroes",
+  "homepage": "https://onewallie.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fskroes/AllowanceKit.git",
+    "directory": "packages/wallie-mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/fskroes/AllowanceKit/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "x402",
+    "agentic-payments",
+    "ai-agents",
+    "usdc",
+    "solana",
+    "spend-controls"
+  ],
+  "bin": {
+    "wallie-mcp": "bin.js"
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "bin.js",
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "allowance-kit": "^0.5.1"
+  }
+}
