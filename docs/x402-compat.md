@@ -360,3 +360,96 @@ facilitator relayer). Full record: `docs/canary-runs/2026-09-07-base-sepolia-mar
 `PAYMENT-SIGNATURE` header as-is — so real v2 sellers read the new header, and no `X-PAYMENT`
 fallback was required. The buyer now has an end-to-end **settled** proof against a real
 third-party v2 seller on Base Sepolia. **L-02 is closed.**
+
+---
+
+## 10. Solana rail — `exact` and `upto` (SOL-01 … SOL-09, 2026-09-13)
+
+Snapshot date: **2026-09-13**. The Solana rail landed in SOL-01 … SOL-08 (branch
+`feat/solana-exact-rail`); this section is the primary-sourced compat note SOL-09 requires,
+built the same way as §1–§9: quote each facilitator's own `/supported`, then say what the
+buyer and seller do about it.
+
+### 10.1 Summary verdict
+
+**Solana on x402 is `exact` when a hosted facilitator settles it, and `upto` only when the
+seller settles it itself.** Every hosted facilitator I checked advertises Solana **`exact`
+only**; none advertises Solana **`upto`**. `exact` is symmetric with the Base path — the buyer
+signs a `TransferChecked`, the facilitator co-signs as fee payer and pays SOL — so allowance-kit
+speaks it through CDP (mainnet + devnet, API key) and through x402.org's free devnet
+facilitator. `upto` (a metered call backed by a payment channel, the scheme that makes an
+agent's per-call cost equal to what it used, not what it feared) has **no hosted facilitator on
+Solana at all**, so Wallie's seller **self-facilitates**: it runs the `@x402/svm/upto`
+facilitator role in-process with its own fee-payer and authorizer keys (`src/seller-upto.ts`,
+SOL-04). This is not a workaround; it is the only way to offer Solana `upto` today, and it is
+why the money-path proof for `upto` is our own canary (§10.3), not a third-party seller.
+
+### 10.2 What the facilitators advertise (quoted `/supported`, 2026-09-13)
+
+**x402.org facilitator** — `GET https://x402.org/facilitator/supported` (the free one
+allowance-kit uses for Solana devnet `exact`). Solana kinds, verbatim:
+
+```json
+{ "x402Version": 2, "scheme": "exact",
+  "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+  "extra": { "feePayer": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5",
+             "features": { "smartWalletSupported": true } } }
+{ "x402Version": 1, "scheme": "exact", "network": "solana-devnet",
+  "extra": { "feePayer": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5" } }
+```
+
+Its `signers` map confirms one Solana fee payer for the cluster:
+`"solana:*": ["CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"]`. It **does** offer `upto`, but
+only on `eip155:84532` (Base Sepolia, `extra.facilitatorAddress` `0xd407e409…`) — **not** on
+any Solana network. So: Solana → `exact` only.
+
+**PayAI facilitator** — `GET https://facilitator.payai.network/supported`. Advertises a long
+list of EVM networks in both v1 (`base`, `base-sepolia`, `avalanche`, `sei`, `polygon`,
+`xlayer`, `arbitrum`, …) and v2 (`eip155:8453`, `eip155:84532`, `eip155:43114`, …). **No
+`solana:*` or `solana-devnet` kind appears, and no `upto` kind appears.** PayAI is EVM-`exact`
+today, despite ecosystem write-ups listing it as Solana-capable — so it is not a Solana `upto`
+option either.
+
+**CDP facilitator** — `GET https://api.cdp.coinbase.com/platform/v2/x402/supported` answers
+`Unauthorized` without a JWT (unlike the discovery endpoint in §7, `/supported` is gated). CDP's
+own docs list Solana support as **`exact`, mainnet and devnet**
+(`https://docs.cdp.coinbase.com/x402/network-support`, accessed 2026-09-13); no `upto` scheme is
+listed for any network. `CdpFacilitator` (`src/facilitator-cdp.ts`) is wired for Solana `exact`
+and passes the CAIP-2 network in the v2 body (SOL-02).
+
+**402.surfnet.dev** — the sandbox is a Solana **RPC** (a Surfpool mainnet fork), not an x402
+facilitator; `GET /supported` returns S3 `NoSuchKey`. It provides the validator, program and
+faucet the canary settles against (§10.3), and the seller's in-process operator plays the
+facilitator role there.
+
+### 10.3 What this repo does about it
+
+- **`exact` (Solana), buyer + seller** — SOL-01/SOL-02. Buyer `encodePaymentSolanaExact`
+  signs the v0 transaction and leaves `extra.feePayer` unsigned for the facilitator; seller
+  `advertise` returns a Solana entry with the mint as `asset` and `extra.feePayer` from
+  `/supported`. CDP (mainnet + devnet) and x402.org (devnet) settle it. Symmetric with Base.
+- **`upto` (Solana), self-facilitated** — SOL-03 … SOL-06. Because no hosted facilitator
+  settles Solana `upto`, `paymentGate` runs the operator itself; the buyer escrows the ceiling
+  as a channel deposit, the seller meters and settles the actual, the difference refunds in the
+  same step, and the buyer's policy rails gate on the **ceiling**.
+- **Proof** — `scripts/canary-solana.ts` (SOL-09) settles a real `upto` channel on the
+  402.surfnet.dev sandbox: metered $0.03 against a $0.10 ceiling, on-chain `settled` watermark
+  $0.03, wallet delta exactly $0.03, $0.07 refunded, recorded with the real signature in
+  `docs/canary-runs/2026-09-13-solana-surfnet-sandbox.md`. The public-devnet run (an
+  explorer-verifiable signature) and the mainnet $1 run are the human step; the script prints a
+  paste-ready record on `--devnet`/`--network solana`.
+
+### 10.4 Reproduce this
+
+```sh
+# the free facilitator's supported schemes/networks — Solana is exact-only
+curl -s https://x402.org/facilitator/supported \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print([k for k in d["kinds"] if "solana" in k["network"]])'
+
+# PayAI: no Solana kind at all
+curl -s https://facilitator.payai.network/supported \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print([k["network"] for k in d["kinds"] if "solana" in k["network"]])'
+
+# the Solana upto money path, end to end, real signatures (free faucet, no key)
+SOLANA_SANDBOX=1 node scripts/canary-solana.ts --sandbox --record
+```

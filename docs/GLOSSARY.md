@@ -61,8 +61,12 @@ an agent can act on it, not just log it.
 CDP auth; `--full` settles through a local seller; `--buyer` runs the real buyer runtime
 (allowance, balance check, approval gate, ledger) and asserts the ledger afterwards.
 `--network base` runs it with real money. A **canary run** is a recorded, dated result of
-that script in `docs/canary-runs/`. Two exist (2026-09-07): Base mainnet, and Base Sepolia
-against a third-party seller (`scripts/l02-thirdparty.ts`, Mart402).
+that script in `docs/canary-runs/`. On Base, two exist (2026-09-07): mainnet, and Base
+Sepolia against a third-party seller (`scripts/l02-thirdparty.ts`, Mart402). The Solana twin
+is **`scripts/canary-solana.ts`** (SOL-09): phase A proves the `upto` buyer and rails
+hermetically, `--sandbox` settles a real channel on 402.surfnet.dev with the free faucet, and
+`--devnet` / `--network solana` settle on public Solana; first run recorded
+`2026-09-13-solana-surfnet-sandbox.md`.
 
 **CDP / CdpFacilitator** — Coinbase Developer Platform. `facilitator-cdp.ts` implements the
 x402 facilitator contract (`verify`, `settle`) against CDP's API, authenticated with an
@@ -289,10 +293,13 @@ alongside v1, never instead (D-5). Exact diff: `docs/x402-compat.md` §5.
 
 ## Solana and payment channels
 
-Planned terms from [SOLANA-ARCHITECTURE.md](SOLANA-ARCHITECTURE.md) (2026-09-13). Nothing in
-this section is shipped. Where a term names a planned file or export, it is given so the
-implementing agent and the reader use the same name. Facts about the program and the
-protocol were verified on 2026-09-13; evidence in `docs/spikes/`. Alphabetical.
+Terms from [SOLANA-ARCHITECTURE.md](SOLANA-ARCHITECTURE.md). **Shipped** in the tree as of
+tickets SOL-01 … SOL-09 (branch `feat/solana-exact-rail`, 2026-09-13) — the money path is
+proven by `docs/canary-runs/2026-09-13-solana-surfnet-sandbox.md` — but not yet in a published
+`allowance-kit` version, so it lives under `[Unreleased]` in the CHANGELOG. These entries were
+written at design time: read a "planned" below as "now shipped", except where it names a
+Wallie Cloud deploy or an *MPP session*, which stay genuinely planned. Facts about the program
+and the protocol were verified on 2026-09-13; evidence in `docs/spikes/`. Alphabetical.
 
 **`@solana/kit`** — Anza's zero-dependency Solana client library (the 2.x line of
 `@solana/web3.js`; the 1.x line is maintenance only). Uses native WebCrypto Ed25519. Planned
