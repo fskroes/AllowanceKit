@@ -22,9 +22,13 @@ import {
   SOLANA_NETWORKS,
   solanaNetworkInfo,
   usdcBalanceMicroSolana,
+  solBalanceLamportsSolana,
+  normalizeSolanaKey,
+  solanaSigner,
   probeSolanaLibs,
   describeSolanaKeyFormat,
 } from "./solana.ts";
+import { ChannelStore, reconcileChannels, reclaimChannel, solanaAccountRpc } from "./channels.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
@@ -52,6 +56,9 @@ Commands
   approvals                       payments waiting for your decision, and live grants
   approve <id> | deny <id>        decide one
   audit [--json]                  the full spending history
+  channels [list] [--json]        Solana upto payment channels and money in escrow
+  channels reconcile              read the chain and resolve open/unknown channels
+  channels reclaim <id> | sweep   take a stuck deposit back (needs a little SOL)
   notify                          where alerts are sent, and on what
   agents                          every agent sharing this state directory
   dashboard [--port <n>]          live dashboard (default http://localhost:4030)
@@ -99,7 +106,7 @@ Options
   --via <resend|postmark>         email provider (default resend)
   --budget <usd>                  spend an approval grant may cover
   --expires <30m|2h|7d|never>     how long an approval grant lasts
-  --network <base-sepolia|base>   live network for init --live (default base-sepolia)
+  --network <net>                 live network for init --live: base-sepolia, base, solana-devnet, solana
   --rpc <url>                     override the JSON-RPC endpoint for balance reads
   --method <GET|POST>             HTTP method for pay (default GET, or POST with --body)
   --body <json>                   request body for pay
@@ -390,8 +397,15 @@ function auditLine(e: LedgerEvent): string {
   switch (e.t) {
     case "topup":
       return `${t}  TOPUP    ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  added to the allowance`;
-    case "payment":
-      return `${t}  PAID     ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${String(e.txHash).slice(0, 12)}…`;
+    case "payment": {
+      // A Solana `upto` settlement shows the escrow: what was deposited and what
+      // came back. `amountMicro` is still the actual charge (SOL-03).
+      const escrow =
+        e.depositMicro !== undefined
+          ? `  deposit ${fmtUsdSmart(BigInt(e.depositMicro))} refund ${fmtUsdSmart(BigInt(e.refundMicro ?? "0"))}`
+          : "";
+      return `${t}  PAID     ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${String(e.txHash).slice(0, 12)}…${escrow}`;
+    }
     case "blocked":
       return `${t}  BLOCKED  ${fmtUsdSmart(BigInt(e.attemptedMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${RULE_LABELS[e.rule as keyof typeof RULE_LABELS] ?? e.rule}`;
     case "policy_change":
@@ -637,6 +651,92 @@ async function main(): Promise<void> {
       }
       for (const e of events) console.log(auditLine(e));
       console.log(`\n${events.length} entries · full machine-readable log: ${CLI} audit --json`);
+      break;
+    }
+
+    case "channels": {
+      const store = new ChannelStore(stateDir);
+      const [sub, id] = args;
+
+      if (!sub || sub === "list") {
+        const rows = store.list(flags.agent);
+        if (flags.json) {
+          for (const c of rows) console.log(JSON.stringify(c));
+          break;
+        }
+        if (!rows.length) {
+          console.log(`no Solana payment channels yet — they appear when an agent pays an x402 \`upto\` seller.`);
+          break;
+        }
+        console.log(`  status     deposit   settled    refund   age    host`);
+        for (const c of rows) {
+          console.log(
+            `  ${c.status.padEnd(9)} ${fmtUsdSmart(BigInt(c.depositMicro)).padStart(8)} ` +
+              `${fmtUsdSmart(BigInt(c.settledMicro)).padStart(9)} ${fmtUsdSmart(BigInt(c.refundMicro)).padStart(9)} ` +
+              `${ago(c.at).padStart(5)}  ${c.host}`,
+          );
+        }
+        const escrowed = store.escrowedMicro(flags.agent);
+        console.log(`\n${rows.length} channel(s) · ${fmtUsd(escrowed)} still in escrow`);
+        break;
+      }
+
+      if (sub !== "reconcile" && sub !== "reclaim" && sub !== "sweep")
+        throw new UserError(`unknown channels command "${sub}" — try: list, reconcile, reclaim <id>, sweep`);
+
+      // reconcile / reclaim / sweep all read the chain, so they need a live Solana wallet.
+      const mode = readMode(stateDir);
+      if (mode.mode !== "live" || family(mode.network ?? "") !== "solana")
+        throw new UserError(
+          `\`${CLI} channels ${sub}\` reads the Solana chain — run it on a Solana live wallet ` +
+            `(\`${CLI} init --live --network solana-devnet\`).`,
+        );
+      const sinfo = solanaNetworkInfo(mode.network!)!;
+      const rpcUrl = mode.rpcUrl ?? sinfo.defaultRpc;
+
+      if (sub === "reconcile") {
+        const changes = await reconcileChannels(solanaAccountRpc(rpcUrl), store, { agent: flags.agent });
+        if (!changes.length) {
+          console.log(`all channels already resolved — nothing changed.`);
+          break;
+        }
+        for (const c of changes) console.log(`  ${c.channelId.slice(0, 12)}…  ${c.from} → ${c.to}`);
+        console.log(`\n${changes.length} channel(s) updated from the chain.`);
+        break;
+      }
+
+      if (sub === "reclaim" || sub === "sweep") {
+        const key = requireLiveKey();
+        const signer = solanaSigner(normalizeSolanaKey(key));
+
+        let targets;
+        if (sub === "reclaim") {
+          if (!id) throw new UserError(`which channel? e.g.  ${CLI} channels reclaim <channelId>`);
+          const rec = store.get(id);
+          if (!rec) throw new UserError(`no channel ${id} in the store`);
+          targets = [rec];
+        } else {
+          // sweep: read the chain first, then reclaim every orphan whose grace elapsed.
+          await reconcileChannels(solanaAccountRpc(rpcUrl), store, { agent: flags.agent });
+          targets = store.dueForReclaim(flags.agent);
+          if (!targets.length) {
+            console.log(`no orphaned channels are past their withdraw delay — nothing to reclaim.`);
+            break;
+          }
+        }
+
+        for (const rec of targets) {
+          console.log(`reclaiming ${rec.channelId.slice(0, 12)}… (deposit ${fmtUsd(BigInt(rec.depositMicro))})`);
+          const res = await reclaimChannel(rec, signer, { rpcUrl });
+          if (res.reclaimed) {
+            store.markReclaimed(rec.channelId, res.refundMicro);
+            console.log(`  done — ${fmtUsd(res.refundMicro)} returned · ${res.signatures.length} tx`);
+          } else {
+            console.log(`  skipped — ${res.note}`);
+          }
+        }
+        break;
+      }
       break;
     }
 
@@ -1012,6 +1112,20 @@ async function main(): Promise<void> {
               ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
             } catch (e) {
               warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+            }
+            // The happy path needs no SOL, but `channels reclaim` is payer-signed
+            // and payer-fee-paid, so warn when the wallet cannot afford it (§2.5).
+            try {
+              const lamports = await solBalanceLamportsSolana(rpc, mode.address);
+              const sol = Number(lamports) / 1e9;
+              if (lamports >= 10_000_000n) ok("SOL for reclaim", `wallet holds ${sol.toFixed(4)} SOL`);
+              else
+                warn(
+                  "SOL for reclaim",
+                  `wallet holds ${sol.toFixed(4)} SOL — \`${CLI} channels reclaim\` needs ~0.01 SOL for fees`,
+                );
+            } catch {
+              // The USDC read above already reported RPC reachability; stay quiet here.
             }
           }
         } else {

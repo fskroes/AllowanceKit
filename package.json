@@ -60,11 +60,15 @@
     "viem": "^2.55.19"
   },
   "peerDependencies": {
+    "@solana-program/token": "^0.9.0",
     "@solana/kit": ">=5.1.0",
     "@x402/svm": "^2.25.0",
     "viem": "^2.55.19"
   },
   "peerDependenciesMeta": {
+    "@solana-program/token": {
+      "optional": true
+    },
     "@solana/kit": {
       "optional": true
     },

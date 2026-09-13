@@ -72,6 +72,64 @@ export interface SolanaExactPayload {
   transaction: string;
 }
 
+/**
+ * Where a Solana `upto` channel is in its life, from the buyer's point of view.
+ * Escrow is a third money state (docs/SOLANA-ARCHITECTURE.md §0, §3.3): a
+ * deposit is neither spent nor available while it sits in an open channel.
+ *
+ * - `opened`    the deposit was sent; the seller has not settled yet
+ * - `settled`   the seller claimed `settledMicro`; `refundMicro` came back
+ * - `refunded`  the seller settled with amount 0; the whole deposit came back
+ * - `unknown`   the send raced a timeout/5xx; on-chain state not yet read
+ * - `orphaned`  confirmed still open with no settle; the reclaim clock is running
+ * - `reclaimed` the payer took `deposit − settled` back via the escape path
+ */
+export type ChannelStatus = "opened" | "settled" | "refunded" | "unknown" | "orphaned" | "reclaimed";
+
+/**
+ * One Solana `upto` payment channel, as the buyer tracks it in
+ * `.allowance/channels.json`. Micro-dollar amounts are strings on disk (the
+ * `Reservation` convention), summed to `bigint` by the store. `depositMicro`
+ * is the ceiling that left the wallet at `open`; `settledMicro` is what the
+ * seller actually claimed; `refundMicro` is what returned (`deposit − settled`).
+ */
+export interface ChannelRecord {
+  /** The channel PDA address — the primary key, unique per incarnation. */
+  channelId: string;
+  /** ISO timestamp when the deposit was recorded (before the open was sent). */
+  at: string;
+  agent: string;
+  url: string;
+  host: string;
+  /** v1 bare name or CAIP-2 id the channel was opened on. */
+  network: string;
+  status: ChannelStatus;
+  /** The deposit ceiling, micro-dollars. */
+  depositMicro: string;
+  /** What the seller claimed, micro-dollars; "0" until a settle is known. */
+  settledMicro: string;
+  /** What returned to the wallet, micro-dollars; "0" until settle/refund/reclaim. */
+  refundMicro: string;
+  /** The channel `grace_period` in seconds — also the payer's reclaim wait. */
+  withdrawDelay: number;
+  /** The slot the channel opened at; a PDA seed and the rent-reclaim gate. */
+  openSlot?: number;
+  /** The payer (this wallet) — refund destination and escape-path authority. */
+  payer?: string;
+  /** The seller's fee-payer, which is the channel `payee`. */
+  payee?: string;
+  /** The seller key that signs the voucher (`authorized_signer`). */
+  authorizedSigner?: string;
+  /** The USDC mint the channel escrows. */
+  mint?: string;
+  /** The `open` transaction signature, once broadcast. */
+  txHash?: string;
+  /** The reservation this escrow converted from, so a drop hands the budget back. */
+  reservationId?: string;
+  /** ISO timestamp the channel was marked `orphaned` — the reclaim clock's start. */
+  orphanedAt?: string;
+}
+
 export type DecodedPayment = Record<string, unknown>;
 
 export function flatAmount(payment: DecodedPayment): string | null {

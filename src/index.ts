@@ -50,8 +50,49 @@ export { usdcBalanceMicro, BalanceCache, RPC_DEFAULTS, RpcError } from "./usdc.t
 export { createLiveAgent, encodePaymentEvm, NETWORKS } from "./live.ts";
 export type { LiveAgentOptions, LiveAgentRuntime, NetworkInfo } from "./live.ts";
 
-export { SOLANA_NETWORKS, solanaSigner, usdcBalanceMicroSolana, encodePaymentSolanaExact } from "./solana.ts";
+export {
+  SOLANA_NETWORKS,
+  solanaSigner,
+  usdcBalanceMicroSolana,
+  solBalanceLamportsSolana,
+  encodePaymentSolanaExact,
+} from "./solana.ts";
 export type { SolanaNetworkInfo, SolanaSigner } from "./solana.ts";
+
+// SOL-03: the Solana `upto` channel primitives and the buyer's escrow store.
+export {
+  VOUCHER_MAGIC,
+  VOUCHER_PAYLOAD_SIZE,
+  encodeVoucher,
+  decodeVoucher,
+  signVoucher,
+  verifyVoucher,
+  checkVoucher,
+} from "./voucher.ts";
+export type { Voucher, VoucherState, VoucherRejection } from "./voucher.ts";
+export {
+  ChannelStore,
+  PAYMENT_CHANNELS_PROGRAM,
+  CHANNEL_STATUS,
+  decodeChannelAccount,
+  solanaAccountRpc,
+  reconcileChannels,
+  reclaimChannel,
+  planReclaim,
+  buildReclaimInstructions,
+} from "./channels.ts";
+export type {
+  OpenChannelInput,
+  ChannelRpc,
+  ChannelOnChain,
+  ReconcileChange,
+  ReclaimOptions,
+  ReclaimResult,
+  ReclaimStep,
+  ReclaimPlan,
+  ChannelInstruction,
+  ReclaimAddresses,
+} from "./channels.ts";
 
 export { MockChain } from "./chain.ts";
 export type { Facilitator } from "./chain.ts";
@@ -124,4 +165,6 @@ export type {
   VerifyResult,
   SettleResult,
   SolanaExactPayload,
+  ChannelRecord,
+  ChannelStatus,
 } from "./types.ts";

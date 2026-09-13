@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { base58Decode, base58Encode, looksLikeAddress } from "./base58.ts";
 import type { UnsignedPayment } from "./payer.ts";
 import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import { RpcError } from "./usdc.ts";
@@ -70,69 +71,8 @@ export function solanaNetworkInfo(network: string): SolanaNetworkInfo | undefine
 }
 
 // ---------------------------------------------------------------------------
-// base58 (Bitcoin alphabet), hand-rolled to keep this module lib-free.
-// ---------------------------------------------------------------------------
-
-const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-function base58Encode(bytes: Uint8Array): string {
-  let zeros = 0;
-  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
-  const digits: number[] = [0];
-  for (let i = zeros; i < bytes.length; i++) {
-    let carry = bytes[i];
-    for (let j = 0; j < digits.length; j++) {
-      carry += digits[j] << 8;
-      digits[j] = carry % 58;
-      carry = (carry / 58) | 0;
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = (carry / 58) | 0;
-    }
-  }
-  let out = "1".repeat(zeros);
-  for (let k = digits.length - 1; k >= 0; k--) out += B58_ALPHABET[digits[k]];
-  return out;
-}
-
-function base58Decode(str: string): Uint8Array {
-  const map: Record<string, number> = {};
-  for (let i = 0; i < B58_ALPHABET.length; i++) map[B58_ALPHABET[i]] = i;
-  let zeros = 0;
-  while (zeros < str.length && str[zeros] === "1") zeros++;
-  const bytes: number[] = [0];
-  for (let i = zeros; i < str.length; i++) {
-    const v = map[str[i]];
-    if (v === undefined) throw new RpcError(`"${str[i]}" is not a base58 character`);
-    let carry = v;
-    for (let j = 0; j < bytes.length; j++) {
-      carry += bytes[j] * 58;
-      bytes[j] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-  const out = new Uint8Array(zeros + bytes.length);
-  for (let k = 0; k < bytes.length; k++) out[zeros + bytes.length - 1 - k] = bytes[k];
-  return out;
-}
-
-/** True when a string looks like a base58-encoded Solana address (32 bytes). */
-function looksLikeAddress(s: string): boolean {
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s)) return false;
-  try {
-    return base58Decode(s).length === 32;
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Key parsing and the Ed25519 signer.
+// Key parsing and the Ed25519 signer. base58 lives in ./base58.ts so the
+// voucher codec can share one implementation without loading a Solana library.
 // ---------------------------------------------------------------------------
 
 // PKCS#8 header for a raw 32-byte Ed25519 seed. node:crypto builds a private
@@ -274,6 +214,34 @@ export async function usdcBalanceMicroSolana(
     if (typeof amount === "string" && /^\d+$/.test(amount)) total += BigInt(amount);
   }
   return total;
+}
+
+/**
+ * The wallet's native SOL balance in lamports, over plain JSON-RPC `getBalance`.
+ * The buyer needs no SOL for the happy path, but the channel escape path
+ * (`channels reclaim`) is payer-signed and payer-fee-paid, so `doctor` warns
+ * when the wallet is empty of SOL on a Solana network (§2.5). 1 SOL = 1e9 lamports.
+ */
+export async function solBalanceLamportsSolana(rpcUrl: string, owner: string, timeoutMs = 8000): Promise<bigint> {
+  if (!looksLikeAddress(owner)) throw new RpcError(`"${owner}" is not a wallet address`);
+  let res: Response;
+  try {
+    res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [owner] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    throw new RpcError(`could not reach ${hostOf(rpcUrl)}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) throw new RpcError(`HTTP ${res.status} from ${hostOf(rpcUrl)}`);
+  const body = (await res.json().catch(() => null)) as { result?: { value?: number }; error?: { message?: string } } | null;
+  if (!body) throw new RpcError(`${hostOf(rpcUrl)} did not answer with JSON`);
+  if (body.error) throw new RpcError(body.error.message ?? "RPC error");
+  const value = body.result?.value;
+  if (typeof value !== "number") throw new RpcError(`unexpected getBalance result from ${hostOf(rpcUrl)}`);
+  return BigInt(value);
 }
 
 function hostOf(url: string): string {
