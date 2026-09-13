@@ -13,6 +13,14 @@ import { runtimeVersion } from "./version.ts";
 import { buildPolicyRails, DEFAULT_AGENT_NAME, type AllowanceRuntime } from "./wallet.ts";
 import { writeMode } from "./mode.ts";
 import { BalanceCache, RPC_DEFAULTS, usdcBalanceMicro } from "./usdc.ts";
+import {
+  SOLANA_NETWORKS,
+  solanaNetworkInfo,
+  solanaSigner,
+  normalizeSolanaKey,
+  usdcBalanceMicroSolana,
+  encodePaymentSolanaExact,
+} from "./solana.ts";
 
 /**
  * Live-network agent runtime: same policy rails, approvals and audit ledger
@@ -70,21 +78,63 @@ export const CAIP2_ALIASES: Record<string, string> = {
   "eip155:84532": "base-sepolia",
 };
 
-/** Resolve a bare name or a CAIP-2 id to its NetworkInfo (undefined if unknown). */
+/**
+ * Resolve a bare name or a CAIP-2 id to its EVM NetworkInfo (undefined if it is
+ * not an EVM network). Solana ids resolve through `solanaNetworkInfo` in
+ * `src/solana.ts` instead — see `family`.
+ */
 export function networkInfo(network: string): NetworkInfo | undefined {
   return NETWORKS[network] ?? NETWORKS[CAIP2_ALIASES[network] ?? ""];
+}
+
+/** Which rail an identifier names: EVM, Solana, or neither. */
+export function family(network: string): "evm" | "solana" | undefined {
+  if (networkInfo(network)) return "evm";
+  if (solanaNetworkInfo(network)) return "solana";
+  return undefined;
+}
+
+/**
+ * True when the identifier names a live *mainnet* — real money — by either its
+ * bare name or its CAIP-2 id. Base mainnet and Solana mainnet qualify; their
+ * testnets (`base-sepolia`, `solana-devnet`) do not. The CLI's real-money
+ * guards go through this so a CAIP-2 alias (`eip155:8453`,
+ * `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`) can never slip past a bare-string
+ * `=== "base"` check.
+ */
+export function isMainnet(network: string): boolean {
+  const sol = solanaNetworkInfo(network);
+  if (sol) return sol.v1Name === "solana";
+  return networkInfo(network) !== undefined && (CAIP2_ALIASES[network] ?? network) === "base";
+}
+
+/** The canonical bare name of a live mainnet, for prompts ("base" / "solana"). */
+export function mainnetName(network: string): string {
+  return solanaNetworkInfo(network) ? "solana" : "base";
 }
 
 /**
  * True when two identifiers name the same chain, whether written bare or as
  * CAIP-2. The live agent's hard network constraint (x402-compat.md §6.3) uses
  * this so `eip155:84532` is accepted for a `base-sepolia` agent but `eip155:8453`
- * (a genuinely different chain) is still refused.
+ * (a genuinely different chain) is still refused. Two Solana ids match when they
+ * resolve to the same cluster (CAIP-2 id or v1 name); a Solana id never matches
+ * an EVM one.
  */
 export function sameChain(a: string, b: string): boolean {
-  const ia = networkInfo(a);
-  const ib = networkInfo(b);
-  return ia !== undefined && ib !== undefined && ia.chainId === ib.chainId;
+  const fa = family(a);
+  if (fa !== family(b)) return false;
+  if (fa === "evm") {
+    const ia = networkInfo(a);
+    const ib = networkInfo(b);
+    return ia !== undefined && ib !== undefined && ia.chainId === ib.chainId;
+  }
+  if (fa === "solana") {
+    const sa = solanaNetworkInfo(a);
+    const sb = solanaNetworkInfo(b);
+    return sa !== undefined && sb !== undefined && sa.caip2 === sb.caip2;
+  }
+  return false;
 }
 
 /**
@@ -107,8 +157,14 @@ export function selectOffer(offers: AcceptsEntry[], network: string): AcceptsEnt
     if (!sameChain(o.network, network)) return false;
     const amount = offerAmount(o);
     if (amount === undefined || !/^\d+$/.test(amount)) return false;
-    const extra = o.extra as { verifyingContract?: string } | undefined;
     const asset = offerAsset(o);
+    if (family(o.network) === "solana") {
+      // Solana: the asset must be the USDC mint for that cluster (base58, case
+      // matters). There is no verifyingContract on this rail.
+      const sinfo = solanaNetworkInfo(o.network);
+      return sinfo !== undefined && asset === sinfo.mint;
+    }
+    const extra = o.extra as { verifyingContract?: string } | undefined;
     if (extra?.verifyingContract && asset && extra.verifyingContract.toLowerCase() !== asset.toLowerCase())
       return false;
     return true;
@@ -131,7 +187,11 @@ const TRANSFER_WITH_AUTHORIZATION_TYPES = {
 export interface LiveAgentOptions {
   stateDir: string;
   agentName?: string;
-  /** Hex secp256k1 private key of the payer wallet ("0x…"). */
+  /**
+   * The payer wallet's private key. Format follows the network (§2.4): a hex
+   * secp256k1 key ("0x…") for EVM, or a base58 64-byte secret / a JSON array of
+   * 64 bytes for Solana.
+   */
   privateKey: string;
   /**
    * The only chain this agent will sign for. Defaults to Base Sepolia: an
@@ -163,24 +223,50 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   fs.mkdirSync(stateDir, { recursive: true });
 
   const network = opts.network ?? "base-sepolia";
-  const info = NETWORKS[network];
-  if (!info)
-    throw new Error(`unsupported network "${network}" (known: ${Object.keys(NETWORKS).join(", ")})`);
-  const rpcUrl = opts.rpcUrl ?? RPC_DEFAULTS[network];
-  if (!rpcUrl) throw new Error(`no default RPC for "${network}" — pass rpcUrl`);
+  const fam = family(network);
+  if (!fam)
+    throw new Error(
+      `unsupported network "${network}" (known: ${[...Object.keys(NETWORKS), ...Object.keys(SOLANA_NETWORKS)].join(", ")})`,
+    );
 
-  let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
-  try {
-    // Optional peer dependency — resolved at runtime so the core stays zero-dep.
-    // Signers live in the "viem/accounts" subpath, not the package root.
-    const viemAccounts = "viem/accounts";
-    ({ privateKeyToAccount } = await import(viemAccounts));
-  } catch {
-    throw new Error("live networks need viem for EIP-712 signing: npm i viem");
+  // Each rail resolves the same three things: the payer address, how to read
+  // its USDC balance, and how to encode a signed payment. Everything after this
+  // branch is shared, so a Base agent runs the identical path it did before.
+  let address: string;
+  let readBalance: () => Promise<bigint>;
+  let encode: (unsigned: UnsignedPayment) => Promise<string>;
+  let rpcUrl: string;
+
+  if (fam === "solana") {
+    const sinfo = solanaNetworkInfo(network)!;
+    rpcUrl = opts.rpcUrl ?? sinfo.defaultRpc;
+    const signer = solanaSigner(normalizeSolanaKey(opts.privateKey));
+    address = signer.address;
+    readBalance = () => usdcBalanceMicroSolana(rpcUrl, sinfo.mint, address);
+    encode = (unsigned) => encodePaymentSolanaExact(signer, unsigned, { rpcUrl });
+  } else {
+    const info = NETWORKS[network];
+    if (!info)
+      throw new Error(`unsupported network "${network}" (known: ${Object.keys(NETWORKS).join(", ")})`);
+    rpcUrl = opts.rpcUrl ?? RPC_DEFAULTS[network];
+    if (!rpcUrl) throw new Error(`no default RPC for "${network}" — pass rpcUrl`);
+
+    let privateKeyToAccount: (pk: string) => { address: string; signTypedData: (args: unknown) => Promise<string> };
+    try {
+      // Optional peer dependency — resolved at runtime so the core stays zero-dep.
+      // Signers live in the "viem/accounts" subpath, not the package root.
+      const viemAccounts = "viem/accounts";
+      ({ privateKeyToAccount } = await import(viemAccounts));
+    } catch {
+      throw new Error("live networks need viem for EIP-712 signing: npm i viem");
+    }
+    if (typeof privateKeyToAccount !== "function")
+      throw new Error("viem is installed but does not export privateKeyToAccount from viem/accounts — check the viem version");
+    const account = privateKeyToAccount(normalizePk(opts.privateKey));
+    address = account.address;
+    readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
+    encode = (unsigned) => encodePaymentEvm(account, unsigned);
   }
-  if (typeof privateKeyToAccount !== "function")
-    throw new Error("viem is installed but does not export privateKeyToAccount from viem/accounts — check the viem version");
-  const account = privateKeyToAccount(normalizePk(opts.privateKey));
 
   const ledger = new Ledger(stateDir);
   const policyStore = new PolicyStore(stateDir, agentName);
@@ -189,18 +275,17 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   const notifyStore = new NotifyStore(stateDir, agentName);
   const notifier = new Notifier(notifyStore, agentName, undefined, { network, mode: "live" });
 
-  const readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
   const balances = new BalanceCache(readBalance, opts.balanceTtlMs ?? 15_000, (e) =>
     console.warn(`could not read the wallet's USDC balance: ${e instanceof Error ? e.message : String(e)}`),
   );
 
   // Anyone reading this directory afterwards — the CLI, the dashboard — needs
   // to know the money here is real before it prints "practice money" at a human.
-  writeMode(stateDir, { mode: "live", network, address: account.address, rpcUrl });
+  writeMode(stateDir, { mode: "live", network, address, rpcUrl });
 
   const rails = buildPolicyRails({
     agentName,
-    address: account.address,
+    address,
     stateDir,
     // Accounting-only: the ledger, not a simulated chain, is the balance of
     // record here. Settlement happens on-chain via the seller's facilitator.
@@ -220,7 +305,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
 
   const ctx: PayContext = {
     agentName,
-    address: account.address,
+    address,
     chain: {
       sign: () => {
         throw new Error("mock signing unavailable on a live agent");
@@ -241,7 +326,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
         );
       // A settled payment changes the balance; make the next authorize read it.
       balances.invalidate();
-      return encodePaymentEvm(account, unsigned);
+      return encode(unsigned);
     },
     ...rails,
   };
@@ -257,7 +342,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
 
   return {
     agentName,
-    address: account.address,
+    address,
     stateDir,
     ctx,
     ledger,

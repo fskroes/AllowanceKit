@@ -62,6 +62,16 @@ export interface PaymentPayload {
   signature: string;
 }
 
+/**
+ * The Solana `exact` payment body: a base64 v0 transaction, payer signed and
+ * `extra.feePayer` left unsigned. It rides inside the same header envelope as
+ * the EVM shapes (`payload.transaction`), so the decoded payment reads it under
+ * `payload`.
+ */
+export interface SolanaExactPayload {
+  transaction: string;
+}
+
 export type DecodedPayment = Record<string, unknown>;
 
 export function flatAmount(payment: DecodedPayment): string | null {

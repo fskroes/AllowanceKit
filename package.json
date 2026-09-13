@@ -52,14 +52,25 @@
     "node": ">=20.11"
   },
   "devDependencies": {
+    "@solana-program/token": "^0.9.0",
+    "@solana/kit": ">=5.1.0",
     "@types/node": "^26.3.0",
+    "@x402/svm": "^2.25.0",
     "typescript": "^7.0.2",
     "viem": "^2.55.19"
   },
   "peerDependencies": {
+    "@solana/kit": ">=5.1.0",
+    "@x402/svm": "^2.25.0",
     "viem": "^2.55.19"
   },
   "peerDependenciesMeta": {
+    "@solana/kit": {
+      "optional": true
+    },
+    "@x402/svm": {
+      "optional": true
+    },
     "viem": {
       "optional": true
     }

@@ -17,7 +17,14 @@ import {
   CLOUD_DEFAULT_URL,
 } from "./notify.ts";
 import { describeMode, describeTopUp, readMode } from "./mode.ts";
-import { NETWORKS, createLiveAgent } from "./live.ts";
+import { NETWORKS, createLiveAgent, family, isMainnet, mainnetName } from "./live.ts";
+import {
+  SOLANA_NETWORKS,
+  solanaNetworkInfo,
+  usdcBalanceMicroSolana,
+  probeSolanaLibs,
+  describeSolanaKeyFormat,
+} from "./solana.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
@@ -258,21 +265,28 @@ async function promptLine(question: string): Promise<string> {
 
 /** Mainnet is not practice: it takes a `--yes`, or typing the network name back. */
 async function confirmMainnet(network: string, yes: boolean): Promise<void> {
-  if (network !== "base" || yes) return;
+  // The live mainnets that settle real USDC: Base and Solana. Their testnets
+  // (base-sepolia, solana-devnet) are practice money. `isMainnet` resolves the
+  // bare name AND the CAIP-2 alias, so eip155:8453 / solana:5eykt… are caught.
+  if (!isMainnet(network) || yes) return;
+  const canonical = mainnetName(network); // "base" | "solana"
+  const chain = canonical === "solana" ? "Solana mainnet" : "Base mainnet";
   if (!process.stdin.isTTY)
     throw new UserError(
-      `REAL MONEY — this signs USDC payments on Base mainnet, not practice.\n` +
+      `REAL MONEY — this signs USDC payments on ${chain}, not practice.\n` +
         `Re-run with --yes to confirm in a script, or run it in a terminal to confirm by hand.`,
     );
-  const answer = await promptLine(`REAL MONEY — payments will settle on Base mainnet.\nType "base" to confirm: `);
-  if (answer.trim() !== "base") throw new UserError(`not confirmed — nothing was changed.`);
+  const answer = await promptLine(`REAL MONEY — payments will settle on ${chain}.\nType "${canonical}" to confirm: `);
+  if (answer.trim() !== canonical) throw new UserError(`not confirmed — nothing was changed.`);
 }
 
 /** `init --live`: derive the payer address, mark the directory live, keep the key out of it. */
 async function initLive(stateDir: string, flags: Flags): Promise<void> {
   const network = flags.network ?? "base-sepolia";
-  if (!(network in NETWORKS))
-    throw new UserError(`unknown network "${network}" — known: ${Object.keys(NETWORKS).join(", ")}`);
+  if (!family(network))
+    throw new UserError(
+      `unknown network "${network}" — known: ${[...Object.keys(NETWORKS), ...Object.keys(SOLANA_NETWORKS)].join(", ")}`,
+    );
   const existing = readMode(stateDir);
   if (existing.mode === "live" && existing.network && existing.network !== network)
     throw new UserError(
@@ -429,9 +443,9 @@ async function main(): Promise<void> {
         throw new UserError(`top-up must be a positive dollar amount, got "${args[0]}" — e.g. ${CLI} topup 5.00`);
       const rt = agent(stateDir, flags.agent);
       const mode = readMode(stateDir);
-      if (mode.mode === "live" && mode.network === "base" && amount > 50 && !flags.yes)
+      if (mode.mode === "live" && mode.network && isMainnet(mode.network) && amount > 50 && !flags.yes)
         throw new UserError(
-          `REAL MONEY — raising the ceiling to ${fmtUsd(usd(amount))} on Base mainnet.\n` +
+          `REAL MONEY — raising the ceiling to ${fmtUsd(usd(amount))} on ${mainnetName(mode.network) === "solana" ? "Solana" : "Base"} mainnet.\n` +
             `Re-run with --yes to confirm. (Amounts up to $50.00 do not need it.)`,
         );
       const remaining = topUp(rt, amount, "human::cli");
@@ -559,8 +573,8 @@ async function main(): Promise<void> {
       );
       printWarnings(policyWarnings(rt.policy()));
       const pmode = readMode(stateDir);
-      if (pmode.mode === "live" && pmode.network === "base")
-        console.log(`\n  ! REAL MONEY — this limit governs USDC on Base mainnet.`);
+      if (pmode.mode === "live" && pmode.network && isMainnet(pmode.network))
+        console.log(`\n  ! REAL MONEY — this limit governs USDC on ${mainnetName(pmode.network) === "solana" ? "Solana" : "Base"} mainnet.`);
       break;
     }
 
@@ -958,12 +972,21 @@ async function main(): Promise<void> {
       if (maj > 20 || (maj === 20 && min >= 11)) ok("node", `v${process.versions.node}`);
       else fail("node", `v${process.versions.node} — the package needs Node ≥ 20.11 (running the TS sources needs Node 24)`);
 
+      // Signing libs, one row per rail. The lib for the *live* rail is required
+      // (fail); the other rail's lib is only a warn. viem signs EVM EIP-712;
+      // @x402/svm + @solana/kit sign Solana. A practice-mode agent needs neither.
+      const liveFam = mode.mode === "live" && mode.network ? family(mode.network) : undefined;
+
       try {
         await import("viem/accounts");
-        ok("viem", "installed — live signing available");
+        ok("viem", "installed — EVM signing available");
       } catch {
-        (mode.mode === "live" ? fail : warn)("viem", "not installed — run `npm i viem` (needed only for live networks)");
+        (liveFam === "evm" ? fail : warn)("viem", "not installed — run `npm i viem` (needed only for EVM live networks)");
       }
+
+      const sol = await probeSolanaLibs();
+      if (sol.ok) ok("solana libs", sol.detail);
+      else (liveFam === "solana" ? fail : warn)("solana libs", sol.detail);
 
       try {
         fs.accessSync(stateDir, fs.constants.W_OK);
@@ -975,20 +998,38 @@ async function main(): Promise<void> {
       ok("mode", describeMode(mode));
 
       if (mode.mode === "live") {
-        if (process.env.AGENT_PRIVATE_KEY?.trim())
-          ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
-        else fail("wallet key", "AGENT_PRIVATE_KEY is not set — export AGENT_PRIVATE_KEY=0x... before you can pay");
+        if (liveFam === "solana") {
+          // Solana rail (SOL-01). The key format differs from EVM, so name it.
+          if (process.env.AGENT_PRIVATE_KEY?.trim())
+            ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
+          else fail("wallet key", `AGENT_PRIVATE_KEY is not set — ${describeSolanaKeyFormat(mode.network!)}`);
 
-        const info = mode.network ? NETWORKS[mode.network] : undefined;
-        const rpc = mode.rpcUrl ?? (mode.network ? RPC_DEFAULTS[mode.network] : undefined);
-        if (!info) fail("network", `unknown network "${mode.network}"`);
-        else if (!rpc) warn("rpc", `no RPC for ${mode.network} — the wallet balance will be unreadable`);
-        else if (mode.address) {
-          try {
-            const bal = await usdcBalanceMicro(rpc, info.usdc, mode.address);
-            ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
-          } catch (e) {
-            warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+          const sinfo = solanaNetworkInfo(mode.network!)!;
+          const rpc = mode.rpcUrl ?? sinfo.defaultRpc;
+          if (mode.address) {
+            try {
+              const bal = await usdcBalanceMicroSolana(rpc, sinfo.mint, mode.address);
+              ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
+            } catch (e) {
+              warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+            }
+          }
+        } else {
+          if (process.env.AGENT_PRIVATE_KEY?.trim())
+            ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
+          else fail("wallet key", "AGENT_PRIVATE_KEY is not set — export AGENT_PRIVATE_KEY=0x... before you can pay");
+
+          const info = mode.network ? NETWORKS[mode.network] : undefined;
+          const rpc = mode.rpcUrl ?? (mode.network ? RPC_DEFAULTS[mode.network] : undefined);
+          if (!info) fail("network", `unknown network "${mode.network}"`);
+          else if (!rpc) warn("rpc", `no RPC for ${mode.network} — the wallet balance will be unreadable`);
+          else if (mode.address) {
+            try {
+              const bal = await usdcBalanceMicro(rpc, info.usdc, mode.address);
+              ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
+            } catch (e) {
+              warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+            }
           }
         }
       }

@@ -50,6 +50,9 @@ export { usdcBalanceMicro, BalanceCache, RPC_DEFAULTS, RpcError } from "./usdc.t
 export { createLiveAgent, encodePaymentEvm, NETWORKS } from "./live.ts";
 export type { LiveAgentOptions, LiveAgentRuntime, NetworkInfo } from "./live.ts";
 
+export { SOLANA_NETWORKS, solanaSigner, usdcBalanceMicroSolana, encodePaymentSolanaExact } from "./solana.ts";
+export type { SolanaNetworkInfo, SolanaSigner } from "./solana.ts";
+
 export { MockChain } from "./chain.ts";
 export type { Facilitator } from "./chain.ts";
 
@@ -120,4 +123,5 @@ export type {
   DecodedPayment,
   VerifyResult,
   SettleResult,
+  SolanaExactPayload,
 } from "./types.ts";
