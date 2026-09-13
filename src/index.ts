@@ -101,7 +101,34 @@ export { CdpFacilitator } from "./facilitator-cdp.ts";
 export type { CdpFacilitatorOptions } from "./facilitator-cdp.ts";
 
 export { paymentGate } from "./seller.ts";
-export type { GateOptions } from "./seller.ts";
+export type { GateOptions, GateHandler, UptoConfig, SolanaOperatorEnv } from "./seller.ts";
+
+// SOL-04: the self-facilitated Solana `upto` seller.
+export {
+  Meter,
+  uptoPaymentGate,
+  advertiseUptoOffer,
+  InMemoryUptoOperator,
+  createSolanaUptoOperator,
+  toFacilitatorUptoPayload,
+  checkTreasuryAta,
+  DEFAULT_WITHDRAW_DELAY,
+  PAYMENT_CHANNELS_TREASURY_OWNER,
+} from "./seller-upto.ts";
+export type {
+  UptoOperator,
+  UptoGateOptions,
+  UptoHandler,
+  UptoPaymentEnvelope,
+  DepositOutcome,
+  ClaimOutcome,
+  OfferExtraInput,
+  BeforeServeInfo,
+  BeforeServeDecision,
+  InMemoryUptoOperatorOptions,
+  SolanaUptoOperatorOptions,
+  TreasuryAtaCheck,
+} from "./seller-upto.ts";
 
 export {
   PolicyStore,
@@ -152,8 +179,8 @@ export { ReservationStore } from "./reservations.ts";
 export type { Reservation } from "./reservations.ts";
 
 /** The five x402-priced sample APIs behind `allowance demo`. */
-export { startSellerApis, describeServers } from "./demo-servers.ts";
-export type { DemoServer, PaidApiCatalog } from "./demo-servers.ts";
+export { startSellerApis, describeServers, startUptoDemoServer } from "./demo-servers.ts";
+export type { DemoServer, PaidApiCatalog, UptoDemoServer } from "./demo-servers.ts";
 export { runDemo } from "./demo-run.ts";
 
 export { usd, fmtUsd, fmtUsdExact, MICRO } from "./money.ts";
@@ -165,6 +192,7 @@ export type {
   VerifyResult,
   SettleResult,
   SolanaExactPayload,
+  UptoPayload,
   ChannelRecord,
   ChannelStatus,
 } from "./types.ts";

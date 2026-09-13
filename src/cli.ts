@@ -29,6 +29,7 @@ import {
   describeSolanaKeyFormat,
 } from "./solana.ts";
 import { ChannelStore, reconcileChannels, reclaimChannel, solanaAccountRpc } from "./channels.ts";
+import { checkTreasuryAta } from "./seller-upto.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
@@ -49,7 +50,8 @@ Commands
   init --live [--network <net>]   provision for REAL MONEY on a live network (see below)
   topup <usd>                     add to the allowance
   pay <url>                       make one payment to an x402 URL, print the result
-  doctor                          check your setup: node, viem, keys, RPC, permissions
+  doctor [--seller]               check your setup: node, viem, keys, RPC, permissions
+                                  (--seller also checks the Solana upto treasury ATA)
   status                          what is left, what the limits are, what needs you
   policy                          show every limit
   policy <field> <value>          change one limit
@@ -142,6 +144,7 @@ interface Flags {
   yes: boolean;
   method?: string;
   body?: string;
+  seller: boolean;
   rest: string[];
 }
 
@@ -161,6 +164,7 @@ function parseFlags(argv: string[]): Flags {
   let yes = false;
   let method: string | undefined;
   let body: string | undefined;
+  let seller = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--state" || a === "--state-dir") state = required(argv[++i], "--state <dir>");
@@ -188,13 +192,14 @@ function parseFlags(argv: string[]): Flags {
     else if (a.startsWith("--method=")) method = a.slice(9);
     else if (a === "--body") body = required(argv[++i], "--body <json>");
     else if (a.startsWith("--body=")) body = a.slice(7);
+    else if (a === "--seller") seller = true;
     else rest.push(a);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UserError(`--port must be a number between 1 and 65535`);
   if (budget !== undefined && (!Number.isFinite(budget) || budget <= 0))
     throw new UserError(`--budget must be a positive dollar amount`);
   if (!agentName.trim()) throw new UserError(`--agent needs a name`);
-  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, rest };
+  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, seller, rest };
 }
 
 function required(value: string | undefined, usage: string): string {
@@ -1127,6 +1132,15 @@ async function main(): Promise<void> {
             } catch {
               // The USDC read above already reported RPC reachability; stay quiet here.
             }
+          }
+
+          // Seller-only (SOL-04): the on-chain `distribute` a claim runs needs
+          // the treasury ATA for the mint to exist, or it hard-fails. A warn,
+          // never a fail — a buyer-only wallet does not settle channels.
+          if (flags.seller) {
+            const t = await checkTreasuryAta(mode.network!, rpc);
+            if (t.ok) ok("seller: treasury", t.detail);
+            else warn("seller: treasury", t.detail);
           }
         } else {
           if (process.env.AGENT_PRIVATE_KEY?.trim())

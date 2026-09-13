@@ -3,7 +3,47 @@ import type { Facilitator } from "./chain.ts";
 import type { AcceptsEntry, DecodedPayment, PaymentRequiredBody } from "./types.ts";
 import { flatAmount, payeeOf } from "./types.ts";
 import { NETWORKS, family } from "./live.ts";
-import { solanaNetworkInfo } from "./solana.ts";
+import { solanaNetworkInfo, normalizeSolanaKey } from "./solana.ts";
+import {
+  advertiseUptoOffer,
+  createSolanaUptoOperator,
+  uptoPaymentGate,
+  type BeforeServeDecision,
+  type BeforeServeInfo,
+  type Meter,
+  type UptoGateOptions,
+  type UptoOperator,
+} from "./seller-upto.ts";
+
+/**
+ * The self-facilitated `upto` scheme this gate also advertises for a Solana
+ * network (docs/SOLANA-ARCHITECTURE.md §4.4). Give a ceiling and either a ready
+ * `operator` (tests/demo) or `solanaOperator` env-var names (production), and
+ * the gate lists a metered `upto` offer beside `exact` and settles a channel
+ * per request.
+ */
+export interface UptoConfig {
+  /** The authorised ceiling a buyer deposits, micro-dollars. */
+  ceilingMicro: bigint;
+  /** Channel `grace_period` in seconds (the payer's reclaim wait). Default 900. */
+  withdrawDelay?: number;
+  /** The offer's `maxTimeoutSeconds` and voucher-expiry ceiling. Default 300. */
+  maxTimeoutSeconds?: number;
+  /** A ready operator (tests/demo). Omit to build one from {@link GateOptions.solanaOperator}. */
+  operator?: UptoOperator;
+  /** Policy hook between the deposit and the handler; abort refunds the deposit. */
+  beforeServe?: (info: BeforeServeInfo) => BeforeServeDecision | Promise<BeforeServeDecision>;
+}
+
+/** Self-facilitation keys by env-var name (never values). Read once, never stored. */
+export interface SolanaOperatorEnv {
+  /** Env var holding the feePayer secret (SOL for fees/rent, channel payee). */
+  feePayerKeyEnv: string;
+  /** Env var holding the receiver-authorizer secret (voucher signer). */
+  receiverAuthorizerKeyEnv: string;
+  rpcUrl?: string;
+  maxChannelLifetimeSecs?: number;
+}
 
 export interface GateOptions {
   priceMicro: bigint;
@@ -12,7 +52,14 @@ export interface GateOptions {
   facilitator: Facilitator;
   /** e.g. "mock-ledger", "base-sepolia", "base", or a Solana id ("solana", "solana-devnet", CAIP-2). */
   network?: string;
+  /** Advertise a metered `upto` offer too (Solana only). */
+  upto?: UptoConfig;
+  /** Build the `upto` operator from these env-var names when `upto.operator` is absent. */
+  solanaOperator?: SolanaOperatorEnv;
 }
+
+/** A protected handler; the optional `meter` is passed only on the `upto` path. */
+export type GateHandler = (req: IncomingMessage, res: ServerResponse, meter?: Meter) => void | Promise<void>;
 
 /**
  * The x402 protocol version the gate advertises for a network. EVM stays v1 so
@@ -91,10 +138,82 @@ async function solanaFeePayer(fac: Facilitator, network: string): Promise<string
   return match?.extra?.feePayer;
 }
 
-export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, res: ServerResponse) => void) {
+/**
+ * The scheme of a decoded x402 payment: `payload.accepted.scheme` (v2 envelope)
+ * or the top-level `payload.scheme` (v1). Used to route an `upto` payment to the
+ * self-facilitated channel gate.
+ */
+function schemeOf(payload: DecodedPayment): string | undefined {
+  const accepted = payload.accepted as { scheme?: unknown } | undefined;
+  if (accepted && typeof accepted.scheme === "string") return accepted.scheme;
+  return typeof payload.scheme === "string" ? payload.scheme : undefined;
+}
+
+export function paymentGate(opts: GateOptions, handler: GateHandler) {
   const network = opts.network ?? "mock-ledger";
   const isSolana = family(network) === "solana";
   const version = versionFor(network);
+  const uptoEnabled = Boolean(opts.upto) && isSolana;
+
+  // The `upto` sub-gate and its operator are built once, on first need, so a
+  // seller that never receives an `upto` request (or a non-Solana seller) never
+  // constructs an operator or loads a Solana library.
+  let uptoGate: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
+  let uptoOptions: UptoGateOptions | undefined;
+  let uptoBuild: Promise<UptoGateOptions> | undefined;
+
+  const buildUpto = async (): Promise<UptoGateOptions> => {
+    const cfg = opts.upto!;
+    let operator = cfg.operator;
+    if (!operator) {
+      if (!opts.solanaOperator)
+        throw new Error("upto gate needs either `upto.operator` or `solanaOperator` env-var names");
+      const { feePayerKeyEnv, receiverAuthorizerKeyEnv, rpcUrl, maxChannelLifetimeSecs } = opts.solanaOperator;
+      const feeRaw = process.env[feePayerKeyEnv]?.trim();
+      const authRaw = process.env[receiverAuthorizerKeyEnv]?.trim();
+      if (!feeRaw) throw new Error(`${feePayerKeyEnv} is not set — the upto feePayer key`);
+      if (!authRaw) throw new Error(`${receiverAuthorizerKeyEnv} is not set — the upto receiver-authorizer key`);
+      operator = await createSolanaUptoOperator({
+        network,
+        feePayerSecret: normalizeSolanaKey(feeRaw),
+        receiverAuthorizerSecret: normalizeSolanaKey(authRaw),
+        rpcUrl,
+        withdrawDelay: cfg.withdrawDelay,
+        maxChannelLifetimeSecs,
+      });
+    }
+    return {
+      ceilingMicro: cfg.ceilingMicro,
+      description: opts.description,
+      payTo: opts.payTo,
+      network,
+      operator,
+      handler,
+      withdrawDelay: cfg.withdrawDelay,
+      maxTimeoutSeconds: cfg.maxTimeoutSeconds,
+      beforeServe: cfg.beforeServe,
+    };
+  };
+
+  const ensureUpto = async (): Promise<UptoGateOptions> => {
+    if (uptoOptions) return uptoOptions;
+    if (!uptoBuild) uptoBuild = buildUpto();
+    uptoOptions = await uptoBuild;
+    uptoGate ??= uptoPaymentGate(uptoOptions);
+    return uptoOptions;
+  };
+
+  const allOffers = async (resource: string): Promise<AcceptsEntry[]> => {
+    const offers = await advertise(opts, resource);
+    if (uptoEnabled) {
+      try {
+        offers.push(await advertiseUptoOffer(await ensureUpto(), resource));
+      } catch {
+        // A misconfigured operator must not blank the exact 402; list exact only.
+      }
+    }
+    return offers;
+  };
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const host = req.headers.host ?? "localhost";
@@ -105,7 +224,7 @@ export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, r
       const body: PaymentRequiredBody = {
         x402Version: version,
         error: "X-PAYMENT header is required",
-        accepts: await advertise(opts, resource),
+        accepts: await allOffers(resource),
       };
       res.writeHead(402, { "Content-Type": "application/json", "Accept": "application/json" });
       res.end(JSON.stringify(body, null, 2));
@@ -118,6 +237,20 @@ export function paymentGate(opts: GateOptions, handler: (req: IncomingMessage, r
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "malformed X-PAYMENT header" }));
+      return;
+    }
+
+    // An `upto` payment goes to the self-facilitated channel gate: open the
+    // deposit, run the handler with a meter, settle the metered amount.
+    if (uptoEnabled && schemeOf(payload) === "upto") {
+      try {
+        await ensureUpto();
+      } catch (e) {
+        res.writeHead(402, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ x402Version: 2, error: `upto gate unavailable: ${e instanceof Error ? e.message : String(e)}`, accepts: [] }));
+        return;
+      }
+      await uptoGate!(req, res);
       return;
     }
 
