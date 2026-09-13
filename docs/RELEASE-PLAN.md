@@ -848,6 +848,14 @@ address only), policy view (read-only), per-agent budget meters.
 **X-05 Per-agent locks.** Replace the single state-dir lock with per-agent locks so a busy
 agent does not serialise the others.
 
+
+**X-06 Solana rail and x402 `upto` payment channels.** Planned in full in
+[SOLANA-ARCHITECTURE.md](SOLANA-ARCHITECTURE.md) (tickets SOL-01 to SOL-10, decisions in its
+§2, evidence in `docs/spikes/`). Not a gate. Adds `src/solana.ts`, `src/channels.ts`,
+`src/seller-upto.ts`, `src/voucher.ts`, `packages/wallie-mcp`; `@x402/svm` and `@solana/kit`
+become optional peers like `viem`. Escrow becomes a third money state next to spent and
+reserved. Targets the Solana "Agentic Payments" hackathon if it funds, but is justified by
+Solana x402 volume on its own.
 ---
 
 ## 5. Decisions taken in this plan (change them here, not in tickets)
