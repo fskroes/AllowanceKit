@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wallie narration teleprompter</title>
+<style>
+:root{
+  --bg:#fbfbf9;--panel:#ffffff;--panel-2:#f3f3ee;--text:#17170f;--muted:#6c6c63;
+  --line:#e6e6df;--accent:#0f9f6e;--accent-ink:#ffffff;--warn:#b8860b;--bad:#c0392b;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+:root[data-theme="dark"]{
+  --bg:#141414;--panel:#1e1e1e;--panel-2:#262626;--text:#f3f3ee;--muted:#a6a69d;
+  --line:#333;--accent:#5fe0a4;--accent-ink:#0c1a12;--warn:#e6b450;--bad:#ff6b5e;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:400 16px/1.5 var(--font)}
+.top{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+  padding:14px 20px;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.brand{font-weight:700;letter-spacing:-.02em;margin-right:8px}
+.brand b{color:var(--accent)}
+.seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{border:0;background:var(--panel);color:var(--muted);padding:8px 14px;font:600 14px var(--font);cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.spacer{flex:1}
+.ghost{border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:9px;padding:8px 12px;font:600 14px var(--font);cursor:pointer}
+.wrap{max-width:960px;margin:0 auto;padding:28px 20px 96px}
+.meta{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;color:var(--muted);font-size:13px;margin-bottom:14px}
+.pill{font:600 12px var(--mono);background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:4px 10px;color:var(--text)}
+.eyebrow{color:var(--accent);font-weight:600;font-size:13px;letter-spacing:.02em;text-transform:uppercase;margin:0 0 6px}
+.title{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0 0 22px}
+.script{font-size:34px;line-height:1.42;font-weight:500;letter-spacing:-.01em;text-wrap:pretty;
+  min-height:38vh;padding:26px 28px;background:var(--panel);border:1px solid var(--line);border-radius:18px}
+.hint{margin-top:10px;color:var(--muted);font-size:13px}
+.hint code{font-family:var(--mono);background:var(--panel-2);padding:2px 6px;border-radius:6px}
+.deck{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;
+  padding:14px 20px;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(8px);border-top:1px solid var(--line)}
+.rec{display:inline-flex;align-items:center;gap:10px;border:0;border-radius:11px;padding:12px 20px;
+  background:var(--accent);color:var(--accent-ink);font:700 15px var(--font);cursor:pointer}
+.rec[data-on="true"]{background:var(--bad);color:#fff}
+.rec .dot{width:10px;height:10px;border-radius:50%;background:currentColor}
+.rec[data-on="true"] .dot{animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.timer{font:700 20px var(--mono);min-width:74px;text-align:center}
+.timer[data-band="good"]{color:var(--accent)}
+.timer[data-band="warn"]{color:var(--warn)}
+.timer[data-band="bad"]{color:var(--bad)}
+.nav{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:11px;
+  width:44px;height:44px;font-size:20px;cursor:pointer}
+.nav:disabled{opacity:.35;cursor:default}
+.act{border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:11px;
+  padding:12px 16px;font:600 14px var(--font);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+.act[hidden]{display:none}
+.pos{font:600 14px var(--mono);color:var(--muted);min-width:70px;text-align:center}
+.status{width:100%;text-align:center;color:var(--muted);font-size:13px;min-height:18px}
+.dots{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:18px}
+.dots span{width:9px;height:9px;border-radius:50%;background:var(--line);cursor:pointer}
+.dots span[data-done="true"]{background:var(--accent)}
+.dots span[aria-current="true"]{outline:2px solid var(--accent);outline-offset:2px}
+.error{max-width:720px;margin:60px auto;padding:24px;border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+.error code{font-family:var(--mono);background:var(--panel-2);padding:2px 6px;border-radius:6px}
+audio{display:none}
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="brand"><b>W</b> wallie · teleprompter</span>
+  <div class="seg" role="group" aria-label="Deck">
+    <button id="tab-pitch" aria-pressed="true">Pitch · 6</button>
+    <button id="tab-walkthrough" aria-pressed="false">Walkthrough · 10</button>
+  </div>
+  <span class="spacer"></span>
+  <button class="ghost" id="theme">Dark</button>
+</div>
+
+<main class="wrap" id="stage" hidden>
+  <div class="meta">
+    <span class="pill" id="file">pitch-01</span>
+    <span id="words">— words</span>
+    <span id="est">≈ —s to read</span>
+    <span>aim for <b>22–28s</b>, hard stop 30s</span>
+  </div>
+  <p class="eyebrow" id="eyebrow"></p>
+  <h1 class="title" id="title"></h1>
+  <div class="script" id="script"></div>
+  <p class="hint">Save the download into <code>demo/submission/voice/</code>, keep the filename, then rebuild (see <code>demo/submission/README.md</code>). <b>R</b> record/stop · <b>←/→</b> move.</p>
+  <div class="dots" id="dots"></div>
+</main>
+
+<div class="error" id="error" hidden>
+  <h2>Serve this page over http first</h2>
+  <p>The teleprompter reads <code>story.json</code> next to it, which a browser will not load from a <code>file://</code> path.</p>
+  <p>From the repo root run:</p>
+  <p><code>cd demo/submission &amp;&amp; python3 -m http.server 8765</code></p>
+  <p>then open <code>http://localhost:8765/teleprompter.html</code>.</p>
+</div>
+
+<div class="deck" id="deck" hidden>
+  <button class="nav" id="prev" aria-label="Previous scene">←</button>
+  <span class="pos" id="pos">1 / 6</span>
+  <button class="rec" id="record" data-on="false"><span class="dot"></span><span id="reclabel">Record</span></button>
+  <span class="timer" id="timer" data-band="good">0.0</span>
+  <a class="act" id="download" hidden download>Download</a>
+  <button class="act" id="play" hidden>Play</button>
+  <button class="nav" id="next" aria-label="Next scene">→</button>
+  <p class="status" id="status"></p>
+</div>
+
+<audio id="audio"></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { story:null, deck:'pitch', i:0, rec:null, chunks:[], t0:0, tick:null, takes:{} };
+
+/* theme */
+const applyTheme = (t)=>{document.documentElement.dataset.theme=t;$('theme').textContent=t==='dark'?'Light':'Dark';try{localStorage.setItem('wallie-tp-theme',t)}catch{}};
+applyTheme((()=>{try{return localStorage.getItem('wallie-tp-theme')}catch{}})() || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'));
+$('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
+
+const pad=(n)=>String(n).padStart(2,'0');
+const words=(s)=>s.trim().split(/\s+/).length;
+const scenes=()=>state.story[state.deck];
+const base=()=>`${state.deck}-${pad(state.i+1)}`;
+
+function render(){
+  const list=scenes(), s=list[state.i];
+  $('eyebrow').textContent=s.eyebrow;
+  $('title').textContent=s.title;
+  $('script').textContent=s.narration;
+  const w=words(s.narration);
+  $('words').textContent=`${w} words`;
+  $('est').textContent=`≈ ${Math.round(w/2.5)}s to read`;
+  $('file').textContent=base();
+  $('pos').textContent=`${state.i+1} / ${list.length}`;
+  $('prev').disabled=state.i===0;
+  $('next').disabled=state.i===list.length-1;
+  const take=state.takes[base()];
+  $('download').hidden=!take; $('play').hidden=!take;
+  if(take){$('download').href=take.url;$('download').download=take.name;}
+  $('timer').textContent=take?take.dur.toFixed(1):'0.0';
+  $('timer').dataset.band=band(take?take.dur:0);
+  $('status').textContent=take?`Saved take: ${take.name} · ${take.dur.toFixed(1)}s`:'';
+  drawDots();
+}
+function band(sec){ if(!sec) return 'good'; if(sec<=28) return 'good'; if(sec<=30) return 'warn'; return 'bad'; }
+function drawDots(){
+  const list=scenes();
+  $('dots').innerHTML='';
+  list.forEach((_,k)=>{const d=document.createElement('span');
+    d.dataset.done=!!state.takes[`${state.deck}-${pad(k+1)}`];
+    d.setAttribute('aria-current',k===state.i);
+    d.title=`${state.deck}-${pad(k+1)}`;
+    d.onclick=()=>{if(!state.rec){state.i=k;render();}};
+    $('dots').append(d);});
+}
+function setDeck(d){state.deck=d;state.i=0;
+  $('tab-pitch').setAttribute('aria-pressed',d==='pitch');
+  $('tab-walkthrough').setAttribute('aria-pressed',d==='walkthrough');
+  render();}
+$('tab-pitch').onclick=()=>{if(!state.rec)setDeck('pitch')};
+$('tab-walkthrough').onclick=()=>{if(!state.rec)setDeck('walkthrough')};
+$('prev').onclick=()=>{if(state.i>0&&!state.rec){state.i--;render();}};
+$('next').onclick=()=>{const n=scenes().length;if(state.i<n-1&&!state.rec){state.i++;render();}};
+$('play').onclick=()=>{const t=state.takes[base()];if(t){$('audio').src=t.url;$('audio').play();}};
+
+function pickMime(){
+  for(const m of ['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg']){
+    if(window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+function ext(mime){ if(mime.includes('mp4'))return 'm4a'; if(mime.includes('ogg'))return 'ogg'; return 'webm'; }
+
+async function toggleRecord(){
+  if(state.rec){ state.rec.stop(); return; }
+  let stream;
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}); }
+  catch(e){ $('status').textContent='Microphone access was declined. Allow it in the browser and retry.'; return; }
+  const mime=pickMime();
+  const rec=new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+  state.rec=rec; state.chunks=[];
+  rec.ondataavailable=(e)=>{if(e.data.size)state.chunks.push(e.data);};
+  rec.onstop=()=>{
+    clearInterval(state.tick); state.tick=null;
+    stream.getTracks().forEach((t)=>t.stop());
+    const dur=(performance.now()-state.t0)/1000;
+    const type=rec.mimeType||mime||'audio/webm';
+    const blob=new Blob(state.chunks,{type});
+    const name=`${base()}.${ext(type)}`;
+    const prev=state.takes[base()]; if(prev)URL.revokeObjectURL(prev.url);
+    state.takes[base()]={url:URL.createObjectURL(blob),name,dur};
+    state.rec=null;
+    $('record').dataset.on='false'; $('reclabel').textContent='Re-record';
+    render();
+  };
+  rec.start();
+  state.t0=performance.now();
+  $('record').dataset.on='true'; $('reclabel').textContent='Stop';
+  $('download').hidden=true; $('play').hidden=true; $('status').textContent='Recording… read at a steady pace.';
+  state.tick=setInterval(()=>{const s=(performance.now()-state.t0)/1000;
+    $('timer').textContent=s.toFixed(1); $('timer').dataset.band=band(s);},100);
+}
+$('record').onclick=toggleRecord;
+
+document.addEventListener('keydown',(e)=>{
+  if(e.target.tagName==='BUTTON'&&e.key==='Enter')return;
+  if(e.key==='r'||e.key==='R'){e.preventDefault();toggleRecord();}
+  else if(e.key==='ArrowLeft'){$('prev').click();}
+  else if(e.key==='ArrowRight'){$('next').click();}
+});
+
+fetch('./story.json').then((r)=>{if(!r.ok)throw new Error(r.status);return r.json();})
+  .then((data)=>{state.story=data;$('stage').hidden=false;$('deck').hidden=false;setDeck('pitch');})
+  .catch(()=>{$('error').hidden=false;});
+</script>
+</body>
+</html>

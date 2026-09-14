@@ -5,42 +5,42 @@
       "title": "An allowance for your agent.",
       "subtitle": "Autonomous payments. Spending you can account for.",
       "visual": "intro",
-      "narration": "An agent can make a payment in milliseconds. But who decides how much it should spend, which sellers it should trust, or when a retry loop should stop? Wallie puts an allowance in front of the payment. It is an open source runtime for agents that buy data, compute, and services through x four oh two. This submission brings that runtime to Solana."
+      "narration": "An agent can send a payment in milliseconds. But who decides how much it spends, which sellers it trusts, and when a retry loop should stop? Wallie puts an allowance in front of the payment. It's an open-source runtime for agents that buy data, compute, and services over x402. This submission brings that runtime to Solana."
     },
     {
       "eyebrow": "The problem",
       "title": "A wallet balance is not a spending policy.",
       "subtitle": "Check the destination, the price, the rate, and the remaining allowance before signing.",
       "visual": "policy",
-      "narration": "Giving an agent a funded wallet tells it what it can afford. It does not tell it what it may spend. Wallie checks the destination, the amount of each call, the rate of spending, and the total allowance before signing. An operator can pause spending with a kill switch. These controls apply to requests routed through Wallie. They do not pretend to control an unrelated cloud bill."
+      "narration": "A funded wallet tells an agent what it can afford. It doesn't tell it what it's allowed to spend. Wallie checks the destination, the price of each call, the rate of spending, and the allowance that's left, all before it signs. An operator can pause everything with a kill switch. These limits cover the payments Wallie routes, not some unrelated cloud bill."
     },
     {
       "eyebrow": "Two ways to pay",
       "title": "A fixed price. Or a metered ceiling.",
       "subtitle": "exact pays the quoted amount. upto settles actual usage and returns the difference.",
       "visual": "schemes",
-      "narration": "The integration supports two payment shapes. Exact is a fixed price for an API call. Upto opens a Solana payment channel with an approved ceiling, then settles what the request actually used. Our public devnet run deposited ten cents, charged three cents, and returned seven cents. The transaction is finalized and linked from the submission page. Judges can inspect the result directly on Solana."
+      "narration": "There are two ways to pay. Exact is a fixed price for a single API call. Up-to opens a Solana payment channel with a ceiling you approve, then settles only what the request actually uses. Our public devnet run deposited ten cents, charged three, and returned seven. The transaction is finalized and linked from this page, so judges can check it straight on Solana."
     },
     {
       "eyebrow": "The accounting challenge",
       "title": "Locked money is still committed money.",
       "subtitle": "Available allowance = funded budget − spent − reserved − escrowed.",
       "visual": "escrow",
-      "narration": "A channel deposit is not available to spend again, even when the seller has not claimed it yet. Wallie tracks that money as escrow. The budget, ledger, dashboard, and agent tools use the same channel records. Recovery keeps the payment in the spending history when a receipt is lost. An uncertain outcome stays held until it can be resolved. A damaged state file stops authorization instead of silently resetting the allowance."
+      "narration": "Money sitting in a channel isn't free to spend again. Wallie counts it as escrow. The budget, the ledger, the dashboard, and the agent tools all read the same channel records. If a receipt goes missing, recovery keeps the payment in the history. If the outcome is unclear, the deposit stays held. A corrupt state file stops new spending instead of quietly resetting the allowance."
     },
     {
       "eyebrow": "Built for agents and sellers",
       "title": "One runtime. A visible payment history.",
       "subtitle": "SDK · CLI · MCP · local dashboard",
       "visual": "interfaces",
-      "narration": "Developers use the SDK, command line, or MCP server. The included example drives the real MCP protocol, buys an exact API in the local practice environment, makes a metered Solana request offline, and hits a spending limit. The offline demo needs no keys. The separate devnet canary proves the on chain metered path. Sellers get payment middleware and a persistent cleanup worker for abandoned channels."
+      "narration": "Developers reach it through the SDK, the command line, or the MCP server. The included example drives the real MCP protocol: it buys an exact API on the local practice rail, makes a metered Solana request offline, and hits a spending limit on purpose. The offline demo needs no keys. A separate devnet canary proves the on-chain metered path. Sellers get payment middleware and a worker that cleans up abandoned channels."
     },
     {
       "eyebrow": "Run it. Inspect it.",
       "title": "A small payment. A complete audit trail.",
       "subtitle": "Open source under MIT · github.com/fskroes/AllowanceKit",
       "visual": "proof",
-      "narration": "This submission includes the source, a repeatable local demo, regression tests, a walkthrough, and a public devnet transaction. The evidence distinguishes local simulation from real settlement. Solana mainnet is not presented as tested production traffic. Start with the demo, inspect the ledger, and follow the explorer link. Wallie gives an agent room to act, while keeping every payment inside the allowance its operator intended."
+      "narration": "This submission ships the source, a repeatable local demo, regression tests, a full walkthrough, and a public devnet transaction. The evidence keeps local simulation separate from real settlement, and it doesn't claim Solana mainnet as tested production traffic. Start with the demo, read the ledger, and follow the explorer link. Wallie gives an agent room to act while keeping every payment inside the allowance its operator set."
     }
   ],
   "walkthrough": [
@@ -49,70 +49,70 @@
       "title": "Start with no keys and no real money.",
       "subtitle": "Node 24 or later · npm ci · npm run demo:mcp",
       "visual": "install",
-      "narration": "This walkthrough separates a repeatable offline demo from the public devnet payment. Start from the submission source with Node twenty four or later. Run npm ci, then npm run demo colon m c p. No wallet key or funded account is required. The script starts local sellers and connects a client to the real MCP server. The terminal excerpts in this video are captured from that command, rather than invented example output."
+      "narration": "This walkthrough keeps the repeatable offline demo separate from the public devnet payment. Start from the source with Node 24 or later. Run npm ci, then npm run demo:mcp. No wallet key, no funded account. The script starts local sellers and connects a client to the real MCP server. Every terminal excerpt you see is captured from that command, not typed up for the video."
     },
     {
       "eyebrow": "02 / 10 · The agent interface",
       "title": "The client discovers the payment tools.",
       "subtitle": "The same policy and ledger are used by the SDK, CLI, and MCP server.",
       "visual": "tools",
-      "narration": "First, the client asks the server for its tool list and its budget. Pay fetch is the tool for calling a paid API. Get budget shows what is funded, spent, reserved, and locked in channels. List channels shows each deposit and its state. The server also provides approval and reclaim operations. An MCP client that receives approval authority must be trusted to use it. The spending rules still apply to every payment attempt."
+      "narration": "First the client asks the server for its tools and its budget. pay_fetch is the tool for calling a paid API. get_budget shows what's funded, spent, reserved, and locked in channels. list_channels shows every deposit and its state. The server also exposes approval and reclaim actions. Any client that holds approval authority has to be trusted with it, and the spending rules still apply to every attempt."
     },
     {
       "eyebrow": "03 / 10 · Fixed price",
       "title": "An exact call buys weather data.",
       "subtitle": "Local practice rail · exact scheme · $0.001",
       "visual": "exact",
-      "narration": "The first purchase is weather data for one tenth of a cent. This phase uses the local practice rail, so its transaction identifier is not evidence of a Solana transaction. The request receives a payment challenge, the runtime authorizes the amount, and the local seller settles it. The client gets the API response together with the cost. This exercise shows the exact payment flow and its policy boundary without requiring external services."
+      "narration": "The first purchase is weather data for a tenth of a cent. This runs on the local practice rail, so its transaction id is not evidence of a Solana payment. The request gets a payment challenge, the runtime authorizes the amount, and the local seller settles it. The client receives the API response together with the cost. It's the exact flow and its policy boundary, with no external services."
     },
     {
       "eyebrow": "04 / 10 · A refusal is a result",
       "title": "The expensive request stops before payment.",
       "subtitle": "$5 request · $1 per-call cap · blocked",
       "visual": "block",
-      "narration": "Next, the agent tries the five dollar enterprise feed. Its per call cap is one dollar. Wallie returns a structured block with a plain language explanation. The request is not paid. A client can use the quoted amount and the cap to select a cheaper service or stop. A refusal is part of the normal result contract, so an agent does not have to parse an exception to understand what happened."
+      "narration": "Next the agent tries the five-dollar enterprise feed. The per-call cap is one dollar, so Wallie returns a structured block with a plain explanation, and nothing is paid. The client can take the quoted price and the cap and pick something cheaper, or stop. A refusal is part of the normal result, so the agent doesn't have to catch an exception to understand what happened."
     },
     {
       "eyebrow": "05 / 10 · Solana channel",
       "title": "Authorize the ceiling before opening.",
       "subtitle": "Solana devnet transaction format · offline seller simulation",
       "visual": "upto",
-      "narration": "The second phase switches to the Solana runtime and a metered seller. The advertised ceiling is ten cents, with each row priced at one tenth of a cent. The buyer builds the Solana channel transaction from a pinned block hash, while the seller operator simulates settlement locally. This is deliberately offline. The same buyer and seller integration is exercised against public devnet by the separate recorded canary shown later in this video."
+      "narration": "The second phase switches to the Solana runtime and a metered seller. The ceiling is ten cents, and each row costs a tenth of a cent. The buyer builds the Solana channel transaction from a pinned block hash, while the seller simulates settlement locally. This part is deliberately offline. The same buyer and seller run against public devnet in the recorded canary later in this video."
     },
     {
       "eyebrow": "06 / 10 · Pay for usage",
       "title": "$0.10 deposited. $0.03 used. $0.07 returned.",
       "subtitle": "Thirty rows at $0.001 each",
       "visual": "refund",
-      "narration": "The request reads thirty rows. The actual charge is three cents, and the unused seven cents returns to the allowance. The response exposes both amounts and the channel identifier. The ledger stores the amount paid, the original deposit, and the refund together. Money values use integer micro units, not floating point arithmetic. The channel list shows the terminal state, and the budget reflects the three cent charge rather than the ten cent ceiling."
+      "narration": "The request reads thirty rows. The real charge is three cents, and the unused seven cents goes back to the allowance. The response shows both amounts and the channel id. The ledger stores what was paid, the original deposit, and the refund together. Every value is an integer in micro-units, never floating point. The channel closes, and the budget reflects three cents, not the ten-cent ceiling."
     },
     {
       "eyebrow": "07 / 10 · Recovery is part of accounting",
       "title": "A missing receipt must not reset the budget.",
       "subtitle": "Durable channel state · idempotent settlement accounting · conservative uncertainty",
       "visual": "recovery",
-      "narration": "Now consider a request that settles on chain but loses its HTTP receipt. Recovery must record the charge before making the rest of the allowance available. It must also avoid recording the same payment twice when a late receipt arrives. The regression tests exercise those boundaries. If chain evidence cannot establish the result, the deposit remains committed. A corrupt channel file produces an error and blocks new authorization instead of creating an empty account."
+      "narration": "Now picture a request that settles on-chain but loses its HTTP receipt. Recovery records that charge before it frees the rest of the allowance, and it won't record the same payment twice when a late receipt arrives. The tests cover those edges. If the chain can't confirm the result, the deposit stays committed. A corrupt channel file raises an error and blocks new spending instead of resetting the account."
     },
     {
       "eyebrow": "08 / 10 · Seller recovery",
       "title": "Cleanup survives a process restart.",
       "subtitle": "Persistent library state · automatic worker · explicit sweep and shutdown",
       "visual": "cleanup",
-      "narration": "Seller recovery uses the payment channel library's own cleanup manager. Wallie persists its channel state, starts the worker, and provides a shutdown path and an explicit sweep command. A failed atomic settlement does not become a successful charge just because a retry ran. Abandoned deposits follow the program's timeout and refund rules. Regression tests cover the worker lifecycle and persistence across a restart. The seller keys stay in the environment, outside the saved channel state."
+      "narration": "Seller recovery uses the payment-channel library's own cleanup manager. Wallie persists its channel state, starts the worker, and gives you a shutdown path and an explicit sweep command. A failed settlement doesn't become a successful charge just because a retry ran. Abandoned deposits follow the program's timeout and refund rules. Tests cover the worker's lifecycle and persistence across a restart. Seller keys stay in the environment, out of the saved state."
     },
     {
       "eyebrow": "09 / 10 · Independent chain evidence",
       "title": "The public devnet settlement is finalized.",
       "subtitle": "Slot 498173798 · no transaction error · seller +$0.03 · buyer +$0.07 refund",
       "visual": "chain",
-      "narration": "This is the separate public Solana devnet proof. The recorded transaction finalized at slot four nine eight one seven three seven nine eight, with no transaction error. Its token balance changes show thirty thousand micro units going to the seller and seventy thousand returning to the buyer. The submission links the full transaction and the canary command. These amounts were checked through Solana's read only R P C, not inferred from a screenshot."
+      "narration": "This is the separate public Solana devnet proof. The recorded transaction finalized at slot 498173798, with no error. Its token-balance changes show thirty thousand micro-units going to the seller and seventy thousand coming back to the buyer. The submission links the full transaction and the exact canary command. These numbers were read from Solana's own RPC, not lifted from a screenshot."
     },
     {
       "eyebrow": "10 / 10 · Hand-in package",
       "title": "Source, demo, tests, and transaction proof.",
       "subtitle": "Run npm test · inspect docs/submission · follow the explorer link",
       "visual": "finish",
-      "narration": "The hand in package brings the evidence together. It includes an install path, source, the local MCP demo, the canary record, this walkthrough, and the short pitch. Run the tests and build, then inspect the money path in the ledger and channel modules. The demo page identifies which results are local and which are on chain. That is the complete story: an agent can buy a service, respect a limit, and account for the money after success or recovery."
+      "narration": "The hand-in package pulls it together: an install path, the source, the local MCP demo, the canary record, this walkthrough, and the short pitch. Run the tests and the build, then trace the money through the ledger and channel modules. The demo page marks which results are local and which are on-chain. That's the whole story: an agent that buys a service, respects a limit, and accounts for the money afterward."
     }
   ]
 }

@@ -158,6 +158,40 @@ function concatFilePath(file: string): string {
   return file.replace(/'/g, "'\\''");
 }
 
+const RECORDED_EXTENSIONS = [".m4a", ".wav", ".aiff", ".aif", ".mp3", ".caf", ".flac", ".webm", ".ogg", ".mp4"];
+
+async function firstExisting(candidates: string[]): Promise<string | null> {
+  for (const file of candidates) {
+    try {
+      await fs.access(file);
+      return file;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
+
+/**
+ * Produce one scene's narration aiff. A human recording named `<base>.<ext>` in
+ * voiceDir wins; otherwise fall back to local macOS `say`. A recording is cleaned
+ * up in place (mono, rumble high-pass, broadcast loudness) with ffmpeg, so the
+ * pipeline stays fully local and never touches a hosted speech API.
+ */
+async function narrate(args: { voiceDir: string; base: string; narration: string; voice: string; out: string }): Promise<"recorded" | "say"> {
+  const { voiceDir, base, narration, voice, out } = args;
+  const recorded = await firstExisting(RECORDED_EXTENSIONS.map((ext) => path.join(voiceDir, base + ext)));
+  if (recorded) {
+    await run("ffmpeg", [
+      "-y", "-hide_banner", "-loglevel", "error", "-i", recorded,
+      "-ac", "1", "-ar", "44100", "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11", out,
+    ]);
+    return "recorded";
+  }
+  await run("say", ["-v", voice, "-r", String(VOICE_RATE), "-o", out, "--", narration]);
+  return "say";
+}
+
 async function probeDuration(file: string): Promise<number> {
   const raw = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]);
   return Number(raw);
@@ -174,11 +208,13 @@ async function renderSet(args: {
   css: string;
   evidence: Record<string, any>;
   voice: string;
+  voiceDir: string;
 }) {
-  const { name, scenes, targetDuration, outDir, tmpDir, page, template, css, evidence, voice } = args;
+  const { name, scenes, targetDuration, outDir, tmpDir, page, template, css, evidence, voice, voiceDir } = args;
   if (scenes.length * SCENE_SECONDS !== targetDuration) throw new Error(`${name} scene count does not match its ${targetDuration}s target`);
   const clips: string[] = [];
   const speechDurations: number[] = [];
+  let recordedScenes = 0;
 
   for (const [index, scene] of scenes.entries()) {
     const base = `${name}-${String(index + 1).padStart(2, "0")}`;
@@ -190,7 +226,8 @@ async function renderSet(args: {
     await page.evaluate(({ sceneData, evidenceData }) => (window as any).renderScene(sceneData, evidenceData), { sceneData: scene, evidenceData: evidence });
     await page.screenshot({ path: frame, type: "png" });
 
-    await run("say", ["-v", voice, "-r", String(VOICE_RATE), "-o", audio, "--", scene.narration]);
+    const source = await narrate({ voiceDir, base, narration: scene.narration, voice, out: audio });
+    if (source === "recorded") recordedScenes += 1;
     const rawSpeechDuration = await probeDuration(audio);
     const tempo = rawSpeechDuration > 28.2 ? rawSpeechDuration / 28.2 : 1;
     if (tempo > 1.22) throw new Error(`${name} scene ${index + 1} narration needs atempo ${tempo.toFixed(2)}; shorten its story text`);
@@ -208,7 +245,7 @@ async function renderSet(args: {
     ]);
     clips.push(clip);
     if (index === 0) await fs.copyFile(frame, path.join(outDir, `${name}-poster.png`));
-    process.stdout.write(`${name}: rendered scene ${index + 1}/${scenes.length}\n`);
+    process.stdout.write(`${name}: rendered scene ${index + 1}/${scenes.length} (${source} narration)\n`);
   }
 
   const listPath = path.join(tmpDir, `${name}-concat.txt`);
@@ -233,12 +270,12 @@ async function renderSet(args: {
   if (videoStream?.codec_name !== "h264" || videoStream?.pix_fmt !== "yuv420p" || audioStream?.codec_name !== "aac") {
     throw new Error(`${name} has unexpected streams: ${JSON.stringify(ffprobe.streams)}`);
   }
-  return { file: videoPath, duration, streams: ffprobe.streams };
+  return { file: videoPath, duration, streams: ffprobe.streams, recordedScenes, totalScenes: scenes.length };
 }
 
 async function main() {
   if (process.argv.includes("--help")) {
-    process.stdout.write("Usage: node demo/submission/build.ts --output-dir DIR --playwright-module FILE --browser FILE --demo-transcript FILE --devnet-proof FILE [--story FILE] [--voice Samantha]\n");
+    process.stdout.write("Usage: node demo/submission/build.ts --output-dir DIR --playwright-module FILE --browser FILE --demo-transcript FILE --devnet-proof FILE [--story FILE] [--voice Samantha] [--voice-dir DIR]\n");
     return;
   }
   const opts = options(process.argv.slice(2));
@@ -248,6 +285,7 @@ async function main() {
   const transcriptPath = need(opts, "demo-transcript");
   const proofPath = need(opts, "devnet-proof");
   const voice = opts.voice || "Samantha";
+  const voiceDir = path.resolve(opts["voice-dir"] || path.join(HERE, "voice"));
   const storyPath = path.resolve(opts.story || path.join(HERE, "story.json"));
   const story = JSON.parse(await fs.readFile(storyPath, "utf8")) as Story;
   const transcriptSource = await fs.readFile(transcriptPath, "utf8");
@@ -267,8 +305,8 @@ async function main() {
   const evidence = { devnet, demo: transcriptParts(transcriptSource) };
   const startedAt = new Date().toISOString();
   try {
-    const pitch = await renderSet({ name: "pitch", scenes: story.pitch, targetDuration: 180, outDir, tmpDir: workDir, page, template: sceneTemplate, css: sceneCss, evidence, voice });
-    const walkthrough = await renderSet({ name: "walkthrough", scenes: story.walkthrough, targetDuration: 300, outDir, tmpDir: workDir, page, template: sceneTemplate, css: sceneCss, evidence, voice });
+    const pitch = await renderSet({ name: "pitch", scenes: story.pitch, targetDuration: 180, outDir, tmpDir: workDir, page, template: sceneTemplate, css: sceneCss, evidence, voice, voiceDir });
+    const walkthrough = await renderSet({ name: "walkthrough", scenes: story.walkthrough, targetDuration: 300, outDir, tmpDir: workDir, page, template: sceneTemplate, css: sceneCss, evidence, voice, voiceDir });
     await fs.copyFile(transcriptPath, path.join(outDir, "mcp-transcript.txt"));
     const inputs = [storyPath, transcriptPath, proofPath, path.join(HERE, "build.ts"), path.join(HERE, "scene.html"), path.join(HERE, "scene.css")];
     const inputHashes: Record<string, string> = {};
@@ -288,7 +326,20 @@ async function main() {
         devnetProof: path.basename(proofPath),
         story: path.basename(storyPath),
       },
-      renderer: { width: WIDTH, height: HEIGHT, fps: FPS, sceneSeconds: SCENE_SECONDS, voice, audio: "macOS say + ffmpeg AAC", video: "ffmpeg libx264 yuv420p faststart" },
+      renderer: {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: FPS,
+        sceneSeconds: SCENE_SECONDS,
+        voice,
+        narration: {
+          recordedScenes: pitch.recordedScenes + walkthrough.recordedScenes,
+          synthesizedScenes: (pitch.totalScenes + walkthrough.totalScenes) - (pitch.recordedScenes + walkthrough.recordedScenes),
+          source: pitch.recordedScenes + walkthrough.recordedScenes > 0 ? "human recordings (ffmpeg highpass+loudnorm), macOS say fallback" : "macOS say",
+        },
+        audio: "ffmpeg AAC 160k",
+        video: "ffmpeg libx264 yuv420p faststart",
+      },
       evidence: { devnetSlot: devnet.slot, devnetSignature: devnet.signature, sellerMicro: devnet.sellerMicro, refundMicro: devnet.refundMicro, demoTranscript: "mcp-transcript.txt" },
       inputSha256: inputHashes,
       outputSha256: outputHashes,
