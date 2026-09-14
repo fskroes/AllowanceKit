@@ -300,7 +300,7 @@ const res = await payingFetch(live.ctx, "https://some-live-x402-api.com/data");
 
 **The allowance and the wallet are two different numbers, and both are enforced.** `topUp` records what you are willing to let the agent spend; the USDC itself arrives by being sent to `live.address`. A payment inside the allowance that the wallet cannot cover is refused as `insufficient_funds` before anything is signed. Check both at once with `allowance-kit status`, which prints the wallet's real balance on a live directory.
 
-The directory is marked live the moment `createLiveAgent` touches it, so the CLI and the dashboard stop saying "practice money" and start saying `REAL MONEY — payments settle in USDC on base-sepolia`. Funding from the CLI on a live directory says plainly that it raised a ceiling and moved nothing.
+The directory is marked live the moment `createLiveAgent` touches it. The CLI and dashboard show live USDC payments and the configured network. In the example above that network is `base-sepolia`; Solana directories show their selected Solana network. Funding from the CLI on a live directory raises the spending ceiling and moves no funds.
 
 `network` is a hard constraint, not a hint: a seller quoting a chain the agent was not configured for is refused before signing, so a testnet agent can never be talked into signing a mainnet authorization.
 
@@ -317,12 +317,14 @@ It funds a $0.20 allowance with a $0.05 per-call cap, settles a real $0.01 payme
 
 ## Solana
 
-Version 0.6.0 adds Solana `exact` and `upto` payments. The recorded public devnet
+The prepared version 0.6.0 adds Solana `exact` and `upto` payments. The recorded public devnet
 canary deposited **$0.10**, paid **$0.03**, and refunded **$0.07** in a finalized
-transaction. [Inspect the canary record](docs/canary-runs/2026-09-14-solana-devnet-upto.md).
+transaction. [Inspect the canary record](docs/canary-runs/2026-09-14-solana-devnet-readiness.md).
 This is devnet evidence; it does not establish Solana mainnet production readiness.
 
-For a repeatable demo with no keys or funded accounts, use Node 24 or later:
+For a repeatable demo with no keys or funded accounts, use Node 24 or later.
+The commands below require the public 0.6.0 release, which is still pending.
+Before publication, run `npm ci` and `npm run demo:mcp` in the prepared checkout:
 
 ```bash
 git clone --branch v0.6.0 --depth 1 https://github.com/fskroes/AllowanceKit.git
@@ -333,7 +335,8 @@ npm run demo:mcp
 
 The exact phase uses the local practice rail. The Solana metered phase builds the
 channel transaction and uses an offline seller operator. The public devnet canary
-is separate. [Submission materials and videos](docs/submission/README.md).
+is separate. [Stocklana submission draft](docs/submission/README.md); videos are
+deferred to the project owner.
 
 For a live Solana project, install the optional chain libraries:
 

@@ -1,7 +1,12 @@
-# Wallie: Solana Agentic Payments submission
+# Wallie: Stocklana submission draft
 
-Use the fields below for the hackathon entry. They describe the submitted work
-without treating an offline demo as an on-chain payment.
+Target event: [Stocklana](https://hackathons.solana.com/hackathons/stocklana).
+The deadline is **18 September 2026, 22:00 Europe/Amsterdam (20:00 UTC)**.
+
+The fields below describe the existing Solana payment tools. They are not yet a
+complete Stocklana entry: the event requires a tokenized-stock use case, and that
+product flow has not been selected or implemented. Keep the offline demo and the
+historical on-chain proof distinct. Videos are deferred to the project owner.
 
 ## Entry fields
 
@@ -9,13 +14,14 @@ without treating an offline demo as an on-chain payment.
 
 **Tagline:** An allowance for your agent. Autonomous payments, accountable spending.
 
-**Category:** Agentic payments, wallets and spending controls, merchant tooling
+**Technical scope:** Agentic payments, wallets and spending controls, merchant tooling.
+Choose the event category after the stock-specific flow is defined.
 
 **Project description:**
 
 Wallie gives an AI agent a spending allowance for x402 APIs. Before it signs a
 payment, the runtime checks the destination, the per-call cap, the rate of
-spending, and the remaining budget. This submission adds Solana exact payments
+spending, and the remaining budget. The prepared release adds Solana exact payments
 and metered `upto` payment channels. Open deposits count as escrow, so locked
 money cannot be authorized a second time. The SDK, CLI, MCP server, dashboard,
 and ledger expose the same spending state. Sellers get payment middleware and
@@ -23,7 +29,7 @@ persistent channel cleanup. A finalized public Solana devnet transaction proves
 a $0.10 deposit, a $0.03 charge, and a $0.07 refund. The repository includes a
 repeatable offline MCP demo, recovery regression tests, and the full canary record.
 
-**What we built:**
+**Prepared technical work:**
 
 - A Solana payment rail behind the existing allowance runtime, with optional
   chain dependencies for SDK users.
@@ -35,8 +41,8 @@ repeatable offline MCP demo, recovery regression tests, and the full canary reco
   reclaim, plus a deterministic example client.
 - Persistent seller cleanup that resumes after a restart and follows the
   program's expiry and refund rules.
-- Public devnet proof, a pitch, a technical walkthrough, and installation checks
-  against the actual npm tarballs.
+- Public devnet proof, a repeatable offline demo, and installation checks against
+  the actual npm tarballs.
 
 **Why Solana:**
 
@@ -54,24 +60,29 @@ Model Context Protocol, vanilla HTML/CSS, integer micro-unit accounting.
 
 ## Links to hand in
 
+These are the intended public release URLs. Verify each after publication before
+copying it into the event form. Version 0.6.0 is tested locally but is not published
+yet. The launch fixes are deployed to protected previews; the production domains
+still need their release deployment. See the [launch fix report](../research/launch-fixes-2026-09-14.md).
+
 | Field | URL |
 |---|---|
 | Demo page | https://www.onewallie.com/solana.html |
 | Source | https://github.com/fskroes/AllowanceKit/tree/v0.6.0 |
-| Pitch, 3 minutes | https://www.onewallie.com/media/pitch.mp4 |
-| Walkthrough, 5 minutes | https://www.onewallie.com/media/walkthrough.mp4 |
 | Runtime package | https://www.npmjs.com/package/allowance-kit/v/0.6.0 |
 | MCP package | https://www.npmjs.com/package/wallie-mcp/v/0.6.0 |
-| Canary record | https://github.com/fskroes/AllowanceKit/blob/v0.6.0/docs/canary-runs/2026-09-14-solana-devnet-upto.md |
-| Devnet transaction | https://explorer.solana.com/tx/Yqw1ZRcG4DHBhhrh4zkkpT1QXHT9CosHC2PfK6vg5hwPCCAyP6GzVz5dBMMGEnkvwaqWjNC8kceR2LnWdjnmVRx?cluster=devnet |
+| Canary record | https://github.com/fskroes/AllowanceKit/blob/v0.6.0/docs/canary-runs/2026-09-14-solana-devnet-readiness.md |
+| Devnet transaction | https://explorer.solana.com/tx/oAcbQ7M8gj3E1LveUr8nf8bcqVEmJPpjWXcS3Z5Ez5JYF7YqfnCpcssdnD2hfPeTJNL6tZBeTERNSiiLB3K2FGT?cluster=devnet |
 
-The page offers captions, downloadable videos, narration transcripts, and the
-captured demo output. The narration is generated locally using a generic computer
-voice. It does not impersonate a team member.
+The page leads with the runnable offline demo. Video links stay hidden until the
+owner supplies and approves the submission videos. The existing video source and
+build instructions are retained for that later work.
 
 ## Judge quickstart
 
-Use Node 24 or later for source execution:
+Use Node 24 or later for source execution. This release quickstart requires the
+public `v0.6.0` tag. Before publication, run these checks in the prepared checkout
+instead of trying to clone the missing tag.
 
 ```bash
 git clone --branch v0.6.0 --depth 1 https://github.com/fskroes/AllowanceKit.git
@@ -92,7 +103,7 @@ Expected demo outcomes:
 5. The channel list and budget show the resolved payment.
 
 No keys or funds are required for this demo. The on-chain proof is the separate
-public devnet transaction linked above. Its finalized slot is **498173798** and
+public devnet transaction linked above. Its finalized slot is **498210157** and
 its transaction error is **null**. The settlement's token deltas are **30,000**
 micro USDC to the seller and **70,000** to the buyer.
 
@@ -101,10 +112,11 @@ Do not substitute a mainnet key or network for a judge's offline quickstart.
 
 ## Architecture and validation
 
-[Validation report](VALIDATION.md): 226 tests passed, all three packed packages
-passed fresh-consumer checks, browser playback passed on desktop and mobile, and
-[a new devnet canary](../canary-runs/2026-09-14-solana-devnet-readiness.md) also
-verified recovery using the actual finalized transaction history.
+[Validation report](VALIDATION.md): 226 tests passed and all three packed packages
+passed fresh-consumer checks. The launch fixes passed 70 page and viewport checks.
+The [earlier devnet canary](../canary-runs/2026-09-14-solana-devnet-readiness.md)
+verified recovery using actual finalized transaction history. No new funded chain
+transaction was made during the launch checklist work.
 
 The buyer checks policy before constructing a signed payment. A local reservation
 prevents parallel authorizations from using the same allowance. Opening a Solana
@@ -141,12 +153,17 @@ MCP discovery over stdio. This is separate from source-level tests.
 
 ## Portal status
 
-Checked on **14 September 2026**: the linked
-[Agentic Payments hackathon page](https://hackathons.solana.com/hackathons/agentic-payments-mtxd9fkr)
-is seeking sponsors and states that scheduling follows the funding goal. It does
-not expose an open project-submission form. This file is the hand-in package,
-not a claim that an entry or registration has been submitted. When the form
-opens, use the fields and links above and check the published eligibility rules.
+Checked on **14 September 2026** against the
+[Stocklana event page](https://hackathons.solana.com/hackathons/stocklana): one
+submission per team, with at least one repository, demo, or video link. The three
+Wallie components can support one entry. See the
+[official requirements research](../research/stocklana-requirements-2026-09-14.md).
+
+Before submitting, add the chosen tokenized-stock flow, describe the user problem
+it solves, disclose the existing toolkit and the work added for this event, and
+check the authenticated form's eligibility terms. Cloud's `002_channels.sql`
+migration must also be applied and checked before claiming hosted channel support.
+No entry or registration has been submitted by this work.
 
 ## Rebuild the videos
 

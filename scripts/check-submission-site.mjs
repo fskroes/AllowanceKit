@@ -1,7 +1,7 @@
 /** Browser QA for the complete static submission artifact, including video playback. */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import http from 'node:http';
+import { serveStaticSite } from './static-site-server.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -14,30 +14,8 @@ const site = path.resolve(siteArg);
 const output = path.resolve(outputArg ?? '/tmp/wallie-site-qa');
 fs.mkdirSync(output, { recursive: true });
 const { chromium } = await import(pathToFileURL(path.resolve(playwrightArg)).href);
-const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.png': 'image/png', '.mp4': 'video/mp4', '.vtt': 'text/vtt', '.txt': 'text/plain' };
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url ?? '/', 'http://localhost');
-  if (url.pathname === '/solana') { res.writeHead(308, { Location: '/solana.html' }); res.end(); return; }
-  const file = path.resolve(site, '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
-  if (!file.startsWith(site + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
-    res.writeHead(404); res.end('Not found'); return;
-  }
-  const size = fs.statSync(file).size;
-  const range = req.headers.range?.match(/^bytes=(\d+)-(\d*)$/);
-  const headers = { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream', 'Accept-Ranges': 'bytes' };
-  if (range) {
-    const start = Number(range[1]);
-    const end = Math.min(range[2] ? Number(range[2]) : size - 1, size - 1);
-    if (start > end) { res.writeHead(416); res.end(); return; }
-    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
-    fs.createReadStream(file, { start, end }).pipe(res);
-  } else {
-    res.writeHead(200, { ...headers, 'Content-Length': size });
-    fs.createReadStream(file).pipe(res);
-  }
-});
-await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-const origin = `http://127.0.0.1:${server.address().port}`;
+const server = await serveStaticSite(site);
+const origin = server.origin;
 let browser;
 try {
   browser = await chromium.launch({ executablePath: process.env.SUBMISSION_BROWSER ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
@@ -57,8 +35,9 @@ try {
     assert(await page.locator('h1').innerText().then(text => text.includes('An allowance')));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'horizontal page overflow');
     await page.screenshot({ path: path.join(output, `solana-${viewport.width}.png`), fullPage: true });
-    await page.locator('a.button[href="#videos"]').first().click();
-    for (const [index, expected] of [180, 300].entries()) {
+    await page.locator('a.button[href="#try"]').first().click();
+    const hasVideos = await page.locator('video').count() > 0;
+    for (const [index, expected] of (hasVideos ? [180, 300] : []).entries()) {
       const video = page.locator('video').nth(index);
       await video.scrollIntoViewIfNeeded();
       await video.evaluate(element => { element.muted = true; element.load(); });
@@ -82,12 +61,12 @@ try {
     await page.locator('[data-copy]').click();
     assert.match(await page.locator('[role="status"]').innerText(), /copy them manually/);
     assert.deepEqual(failures, []);
-    report.push({ viewport, videoDurations: [180, 300], overflow: false, pageErrors: failures, checks: ['redirect', 'heading', 'video playback and seeking', 'captions', 'FAQ', 'clipboard fallback'] });
+    report.push({ viewport, videoDurations: hasVideos ? [180, 300] : [], overflow: false, pageErrors: failures, checks: ['redirect', 'heading', 'FAQ', 'clipboard fallback', ...(hasVideos ? ['video playback and seeking', 'captions'] : ['videos deferred by owner'])] });
     await context.close();
   }
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));
 } finally {
   await browser?.close();
-  await new Promise(resolve => server.close(resolve));
+  await server.close();
 }

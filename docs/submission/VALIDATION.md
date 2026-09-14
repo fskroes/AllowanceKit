@@ -2,6 +2,11 @@
 
 Prepared version: **0.6.0** for `allowance-kit`, `wallie`, and `wallie-mcp`.
 
+This first table records the earlier release preparation, including its video and
+funded devnet checks. Videos are now deferred to the owner. The later launch
+checklist work did not rerun video generation or make funded chain transactions;
+its separate results follow below.
+
 | Check | Result |
 |---|---|
 | Full `npm test` | 226 passed, 3 environment-gated tests skipped, 0 failed |
@@ -66,3 +71,21 @@ These checks validate the prepared source, npm tarballs, and staged website.
 Publishing the packages and updating the production aliases are separate release
 actions. Public URL verification must run after those actions. No hackathon entry
 is claimed as submitted by this report.
+
+## Launch checklist fixes, 14 September 2026
+
+| Check | Result |
+| --- | --- |
+| AllowanceKit full test suite | 226 passed, 3 opt-in sandbox tests skipped, 0 failed |
+| AllowanceKit build, offline MCP demo and offline Solana canary | Passed |
+| Fresh package consumer | All three packed packages installed; imports, CLI alias/practice demo and MCP stdio checks passed |
+| Marketing metadata, links and image alt attributes | All 8 HTML pages passed; 404 is excluded from the 7-page sitemap |
+| Browser layouts and account fixtures | 70 page/viewport combinations passed at widths 320, 360, 390, 768 and 1440 |
+| Sign-in behavior | Empty/invalid input, server errors, loading, success, expired link and 401 redirect passed with intercepted APIs |
+| Preview custom 404s | Both Vercel previews returned branded pages with HTTP 404 |
+| Production database schema, read-only | Failed: `002_channels.sql` is pending and `agents.escrow_micro` is absent |
+
+The browser account data is a fixture, not a live customer session. No sign-in
+email, checkout, alert, package publication, or production mutation was performed.
+The [launch fix report](../research/launch-fixes-2026-09-14.md) records the preview
+URLs, final website/Cloud checks, and remaining release actions.
