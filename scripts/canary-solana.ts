@@ -320,8 +320,17 @@ async function realSettle(opts: {
     }
 
     // The wallet lost exactly the metered amount (deposit out, the rest refunded).
-    const after = await usdcBalanceMicroSolana(rpcUrl, mint, buyer.address);
-    if (before - after !== ACTUAL_MICRO) fail(`wallet moved ${before - after}, expected exactly ${ACTUAL_MICRO}`);
+    // Public devnet finalizes tens of seconds behind the settle, so a single read
+    // can still return the pre-settle balance; poll until the delta lands. The
+    // sandbox (mainnet-fork, instant finality) satisfies this on the first read.
+    let after = before;
+    for (let i = 0; i < 20; i++) {
+      after = await usdcBalanceMicroSolana(rpcUrl, mint, buyer.address);
+      if (before - after === ACTUAL_MICRO) break;
+      await sleep(3000);
+    }
+    if (before - after !== ACTUAL_MICRO)
+      fail(`wallet moved ${before - after}, expected exactly ${ACTUAL_MICRO} (balance may still be finalizing — re-run to confirm)`);
     ok(`Wallet lost exactly ${usd(before - after)} (deposit escrowed, ${usd(res.refundMicro!)} refunded)`);
 
     const rows = paymentRows(dir);

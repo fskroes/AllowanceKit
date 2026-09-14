@@ -27,5 +27,8 @@ ticket **SOL-09** (the Solana `upto` canary). Recorded:
   (`scripts/l02-thirdparty.ts`, Mart402).
 - `2026-09-13-solana-surfnet-sandbox.md` — Solana `upto` end to end on the 402.surfnet.dev
   sandbox: metered $0.03 of a $0.10 ceiling, on-chain `settled == $0.03`, $0.07 refunded, real
-  signature. The public-devnet run (an explorer-verifiable signature) and the mainnet $1 run
-  are the human step (`node --env-file=.env scripts/canary-solana.ts --devnet --record`).
+  signature (no public explorer). The mainnet $1 run remains the human step.
+- `2026-09-14-solana-devnet-upto.md` — Solana `upto` on **public devnet** with an
+  explorer-verifiable finalized signature (SOL-09 done-when): metered $0.03 of a $0.10 ceiling,
+  $0.07 refunded, buyer wallet delta exactly $0.03. Also landed the canary balance-poll fix for
+  devnet finalization lag.
