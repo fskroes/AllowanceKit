@@ -1,6 +1,8 @@
 import http from "node:http";
 import { paymentGate } from "./seller.ts";
 import type { Facilitator } from "./chain.ts";
+import { MockChain } from "./chain.ts";
+import { InMemoryUptoOperator, type Meter } from "./seller-upto.ts";
 import { usd, fmtUsdExact } from "./money.ts";
 
 export interface DemoServer {
@@ -91,4 +93,63 @@ export async function startSellerApis(facilitator: Facilitator, basePort = 4021)
 
 export function describeServers(catalog: PaidApiCatalog): string {
   return catalog.servers.map((s) => `  :${s.port}  ${s.name.padEnd(22)} ${fmtUsdExact(s.priceMicro)}/call`).join("\n");
+}
+
+/**
+ * A Solana seller that advertises BOTH `exact` and `upto`, so the demo story has
+ * a metered call (docs/SOLANA-ARCHITECTURE.md §8). It runs offline: the `upto`
+ * side uses an {@link InMemoryUptoOperator} (no chain, no keys), and the metered
+ * handler bills per token of a `?rows=` query so the buyer sees an actual charge
+ * below the ceiling and a refund of the rest.
+ *
+ * The seller is a Solana `solana-devnet` gate; a real deployment swaps the
+ * in-memory operator for `solanaOperator` env-var keys.
+ */
+export interface UptoDemoServer {
+  port: number;
+  name: string;
+  ceilingMicro: bigint;
+  perRowMicro: bigint;
+  operator: InMemoryUptoOperator;
+  meterUrl(rows: number): string;
+  close(): Promise<void>;
+}
+
+export async function startUptoDemoServer(port = 4030, perRowUsd = 0.001, ceilingUsd = 0.1): Promise<UptoDemoServer> {
+  const perRowMicro = usd(perRowUsd);
+  const ceilingMicro = usd(ceilingUsd);
+  const operator = new InMemoryUptoOperator();
+  const SELLER = "Se11erTreasury1111111111111111111111111111";
+
+  const handler = (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, meter?: Meter): void => {
+    const rows = Math.max(0, Number(new URL(req.url ?? "/", "http://x").searchParams.get("rows") ?? "1") || 0);
+    meter?.charge(perRowMicro * BigInt(rows)); // clamped to the ceiling by the gate
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ rows: Array.from({ length: Math.min(rows, 3) }, (_, i) => ({ id: i, value: Math.random().toFixed(4) })) }));
+  };
+
+  const server = await listen(
+    port,
+    paymentGate(
+      {
+        priceMicro: perRowMicro,
+        description: "Metered rows (pay only for what you read)",
+        payTo: SELLER,
+        network: "solana-devnet",
+        facilitator: new MockChain(),
+        upto: { ceilingMicro, operator },
+      },
+      handler,
+    ),
+  );
+
+  return {
+    port,
+    name: "solana-upto-metered",
+    ceilingMicro,
+    perRowMicro,
+    operator,
+    meterUrl: (rows) => `http://localhost:${port}/rows?rows=${rows}`,
+    close: () => new Promise((r) => server.close(() => r())),
+  };
 }

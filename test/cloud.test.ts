@@ -290,6 +290,100 @@ test("C-10: createAgent's heartbeat carries the runtime version", async () => {
   }
 });
 
+// ---- SOL-08 channel events + escrow heartbeat --------------------------------
+
+/** A ChannelRecord-shaped row for the notifier; only the fields `channel()` reads matter. */
+function channelRec(over: Record<string, any> = {}) {
+  return {
+    channelId: "ChanPDA1111111111111111111111111111111111111",
+    at: new Date().toISOString(),
+    agent: "solana-agent",
+    url: "https://seller.example/meter",
+    host: "seller.example",
+    network: "solana-devnet",
+    status: "opened",
+    depositMicro: "100000",
+    settledMicro: "0",
+    refundMicro: "0",
+    withdrawDelay: 900,
+    txHash: "5xSigOpen",
+    ...over,
+  };
+}
+
+test("SOL-08: a channel reaches the cloud in all five phases with the §6 data shape", async () => {
+  const srv = await cloudServer();
+  const keyEnv = "WALLIE_CLOUD_TEST_KEY_CHAN";
+  process.env[keyEnv] = "wk_test_channelfeed1";
+  try {
+    const store = new NotifyStore(tmpDir());
+    store.save({ cloud: { enabled: true, url: srv.url, keyEnv } });
+    const notifier = new Notifier(store, "solana-agent", undefined, { network: "solana-devnet", mode: "live" });
+
+    notifier.channel("opened", channelRec());
+    notifier.channel("settled", channelRec({ status: "settled", settledMicro: "30000", refundMicro: "70000", txHash: "5xSigSettle" }));
+    notifier.channel("refunded", channelRec({ status: "refunded", settledMicro: "0", refundMicro: "100000" }));
+    notifier.channel("orphaned", channelRec({ status: "orphaned" }));
+    notifier.channel("reclaimed", channelRec({ status: "reclaimed", settledMicro: "0", refundMicro: "100000", txHash: "5xSigReclaim" }));
+
+    await srv.waitFor("events", 5);
+    assert.ok(srv.events.every((e) => e.kind === "channel"), "every one is a channel event");
+    const phases = srv.events.map((e) => e.data.phase).sort();
+    assert.deepEqual(phases, ["opened", "orphaned", "reclaimed", "refunded", "settled"]);
+
+    for (const e of srv.events) {
+      assert.equal(e.agent, "solana-agent");
+      assert.equal(e.network, "solana-devnet");
+      assert.equal(e.mode, "live");
+      assert.equal(e.data.channelId, channelRec().channelId);
+      assert.equal(e.data.host, "seller.example");
+      assert.equal(e.data.network, "solana-devnet");
+      assert.equal(e.data.depositMicro, "100000");
+      assert.equal(e.data.withdrawDelay, 900);
+      assert.ok(e.subject && e.body && e.at, "every phase carries a subject, body and timestamp");
+    }
+
+    const settled = srv.events.find((e) => e.data.phase === "settled")!;
+    assert.equal(settled.data.settledMicro, "30000");
+    assert.equal(settled.data.refundMicro, "70000");
+    assert.equal(settled.data.txHash, "5xSigSettle");
+  } finally {
+    delete process.env[keyEnv];
+    await srv.close();
+  }
+});
+
+test("SOL-08: channel() is a silent no-op when the cloud channel is off", async () => {
+  const store = new NotifyStore(tmpDir());
+  const notifier = new Notifier(store, "solana-agent"); // no cloud config
+  assert.doesNotThrow(() => notifier.channel("opened", channelRec()));
+});
+
+test("SOL-08: the heartbeat carries live escrow from the beat hook", async () => {
+  const srv = await cloudServer();
+  const keyEnv = "WALLIE_CLOUD_TEST_KEY_ESCROW";
+  process.env[keyEnv] = "wk_test_escrowbeat01";
+  try {
+    let beats = 0;
+    const stop = startCloudHeartbeat(
+      { enabled: true, url: srv.url, keyEnv },
+      { agent: "solana-agent", network: "solana-devnet", mode: "live" },
+      { everyMs: 20, beat: () => ({ escrowedMicro: String(100000 + beats++) }) },
+    );
+    try {
+      await srv.waitFor("heartbeats", 1);
+    } finally {
+      stop();
+    }
+    const hb = srv.heartbeats[0];
+    assert.equal(hb.agent, "solana-agent");
+    assert.equal(hb.escrowedMicro, "100000", "the first beat reports escrow from the hook");
+  } finally {
+    delete process.env[keyEnv];
+    await srv.close();
+  }
+});
+
 test("C-10: parseRetryAfter reads seconds and dates, bounded to 60s", () => {
   assert.equal(parseRetryAfter("5"), 5000);
   assert.equal(parseRetryAfter("0"), 0);

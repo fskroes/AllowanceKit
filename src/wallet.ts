@@ -5,6 +5,7 @@ import { Ledger } from "./ledger.ts";
 import { PolicyStore, evaluatePolicy, effectiveBudgetMicro, slug, type RuntimePolicy } from "./policy.ts";
 import { ApprovalStore, type DecideOptions } from "./approvals.ts";
 import { ReservationStore } from "./reservations.ts";
+import { ChannelStore } from "./channels.ts";
 import { withLock } from "./lock.ts";
 import { fmtUsdExact, usd } from "./money.ts";
 import type { PayContext } from "./payer.ts";
@@ -40,6 +41,14 @@ export interface AllowanceRuntime {
   /** Present only on practice money: the simulated ledger that holds the balance. */
   chain?: { faucet(address: string, amountMicro: bigint): void; balance(address: string): bigint };
   policy(): RuntimePolicy;
+  /**
+   * Micro-USDC locked in open payment channels (Solana `upto`).
+   * `allowanceRemaining` and the dashboard subtract it alongside spend and
+   * reservations (§5). Pass the still-open reservation ids so a channel already
+   * counted as `reserved` is not counted twice; omit them for a gross on-chain
+   * escrow figure. Zero — and usually absent — off Solana.
+   */
+  escrowedMicro?(openReservationIds?: ReadonlySet<string>): bigint;
   /**
    * Stops the cloud heartbeat this runtime started, if any. The timer is unref'd
    * so a short-lived process need not call it; long-running callers (dashboard,
@@ -110,6 +119,15 @@ export interface PolicyRailsInput {
    * agent over someone else's outage.
    */
   walletBalance?: () => Promise<bigint | undefined>;
+  /**
+   * Solana `upto` only: micro-USDC locked in open payment channels, read under
+   * the allowance lock so a channel mutation and a policy decision never
+   * interleave. The budget rail subtracts it (§5). `openReservationIds` are the
+   * reservations still in flight; a channel opened by one of them is already
+   * counted as `reserved`, so it is skipped here to avoid double-counting the
+   * same ceiling. Absent off Solana, where it is always zero.
+   */
+  escrowedMicro?: (openReservationIds?: ReadonlySet<string>) => bigint;
 }
 
 /**
@@ -131,16 +149,24 @@ export function buildPolicyRails(
   return {
     policy: () => policyStore.load(),
 
-    authorize(amountMicro, url) {
+    authorize(amountMicro, url, scheme) {
       return withLock(lockPath, async () => {
         const policy = policyStore.load();
         const host = new URL(url).host;
         const windowMs = policy.windowSeconds * 1000;
         const t = ledger.totals(agentName, windowMs);
-        const inFlight = reservations.total(agentName);
+        const openReservations = reservations.list(agentName);
+        const inFlight = openReservations.reduce((s, r) => s + BigInt(r.amountMicro), 0n);
+        // Deposits locked in open channels are money committed but not yet a
+        // `payment` row; the budget rail subtracts them (§5). A channel still
+        // backed by an open reservation is already counted in `inFlight`, so it
+        // is excluded here — reserved and escrowed must not overlap. Read under
+        // the same lock as everything else. Zero off Solana.
+        const escrowedMicro = input.escrowedMicro?.(new Set(openReservations.map((r) => r.id))) ?? 0n;
 
         // On a live rail the ledger says what the human allowed; the chain says
-        // what is actually there. Both have to hold.
+        // what is actually there. Both have to hold. Escrow has already left the
+        // wallet, so the on-chain figure need not net it out again.
         const onChain = input.walletBalance ? await input.walletBalance() : undefined;
         const spendableOnChain =
           onChain === undefined ? undefined : onChain - inFlight > 0n ? onChain - inFlight : 0n;
@@ -148,11 +174,15 @@ export function buildPolicyRails(
         const decision = evaluatePolicy(policy, {
           host,
           amountMicro,
-          // In-flight payments count as spent until they settle or fail.
+          // In-flight payments count as spent until they settle or fail. A
+          // Solana `upto` open counts here as a reservation for its ceiling
+          // (opened in `authorize`), which is how velocity "counts opens" (§5).
           spendTotalMicro: t.spendTotalMicro + inFlight,
           topupsMicro: t.topupsMicro,
           windowSpendMicro: t.windowSpendMicro + reservations.totalSince(agentName, windowMs),
           walletBalanceMicro: spendableOnChain,
+          escrowedMicro,
+          scheme,
         });
         if (!decision.allowed) return decision;
 
@@ -178,7 +208,7 @@ export function buildPolicyRails(
             allowed: false as const,
             rule: "human_approval_required" as const,
             detail:
-              `${fmtUsdExact(amountMicro)} is at or above your approval threshold of ` +
+              `${fmtUsdExact(amountMicro)}${scheme === "upto" ? " ceiling" : ""} is at or above your approval threshold of ` +
               `$${policy.requireApprovalAboveUsd.toFixed(2)} — request ${req.id} is queued for a human. ` +
               `Approve it with \`${CLI} approve ${req.id}\` or on the dashboard, then retry.`,
             recoverable: true,
@@ -196,9 +226,15 @@ export function buildPolicyRails(
       });
     },
 
-    async recordPayment(url, host, amountMicro, txHash, reservationId) {
+    async recordPayment(url, host, amountMicro, txHash, reservationId, annotations) {
       await withLock(lockPath, () => {
-        if (reservationId) reservations.close(reservationId);
+        const closed = reservationId ? reservations.close(reservationId) : undefined;
+        // A grant is drawn down by the reserved amount at authorize. On `exact`
+        // that equals the settled amount, so this is a no-op; on `upto` the
+        // reservation held the ceiling and the seller charged `amountMicro`, so
+        // the difference goes back to the grant — draw down by ceiling, refund by
+        // refundMicro (§5).
+        if (closed?.grantId) approvals.settleCommitment(closed.grantId, BigInt(closed.amountMicro), amountMicro);
         ledger.append({
           t: "payment",
           at: new Date().toISOString(),
@@ -208,6 +244,12 @@ export function buildPolicyRails(
           amountMicro: amountMicro.toString(),
           txHash,
           balanceAfterMicro: chain.balance(address).toString(),
+          // Solana `upto` only: the actual charge stays in `amountMicro` (so
+          // budget/velocity are unchanged); these annotate the escrow settlement.
+          ...(annotations?.scheme ? { scheme: annotations.scheme } : {}),
+          ...(annotations?.depositMicro !== undefined ? { depositMicro: annotations.depositMicro.toString() } : {}),
+          ...(annotations?.refundMicro !== undefined ? { refundMicro: annotations.refundMicro.toString() } : {}),
+          ...(annotations?.channelId ? { channelId: annotations.channelId } : {}),
         });
       });
       // Read the new totals outside the lock: this only reports, and holding a
@@ -260,6 +302,13 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
   const policyStore = new PolicyStore(stateDir, agentName);
   const approvals = new ApprovalStore(stateDir, agentName);
   const reservations = new ReservationStore(stateDir);
+  // The buyer's book of open channels. Practice money never opens one, so this
+  // reports zero escrow in normal use; it exists here so every runtime — mock or
+  // live — subtracts escrow uniformly, and so a directory a live agent later
+  // claims already reads its channels back (§5).
+  const channels = new ChannelStore(stateDir);
+  const escrowedMicro = (openReservationIds?: ReadonlySet<string>) =>
+    channels.escrowedMicro(agentName, openReservationIds ? { excludeReservationIds: openReservationIds } : {});
   const notifyStore = new NotifyStore(stateDir, agentName);
 
   const marker = readMode(stateDir);
@@ -284,18 +333,25 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     agentName,
     address,
     chain: railChain,
-    ...buildPolicyRails({ agentName, address, stateDir, chain: railChain, ledger, policyStore, approvals, reservations, notifier }),
+    ...buildPolicyRails({ agentName, address, stateDir, chain: railChain, ledger, policyStore, approvals, reservations, notifier, escrowedMicro }),
   };
 
   // A headless agent on a server is covered too: the heartbeat runs whenever a
   // runtime exists, not only while the local dashboard is open. Unref'd, so a
   // one-shot CLI command still exits at once.
-  const stopHeartbeat = startCloudHeartbeat(notifyStore.load().cloud, {
-    agent: agentName,
-    network: marker.network,
-    mode: live ? "live" : "practice",
-    version: runtimeVersion(),
-  });
+  const stopHeartbeat = startCloudHeartbeat(
+    notifyStore.load().cloud,
+    {
+      agent: agentName,
+      network: marker.network,
+      mode: live ? "live" : "practice",
+      version: runtimeVersion(),
+    },
+    // Report locked value so the cloud overview shows escrow without waiting for
+    // an event (SOL-08, §6). No chain reconcile here — this generic runtime holds
+    // no RPC; the live Solana agent (createLiveAgent) does that in its own beat.
+    { beat: () => ({ escrowedMicro: escrowedMicro().toString() }) },
+  );
 
   return {
     agentName,
@@ -310,6 +366,7 @@ export function createAgent(stateDir: string, agentName = DEFAULT_AGENT_NAME): A
     notifyStore,
     mode: live ? "live" : "practice",
     policy: () => policyStore.load(),
+    escrowedMicro,
     stopHeartbeat,
   };
 }
@@ -368,13 +425,23 @@ export function decideApproval(
   return true;
 }
 
-/** Spendable right now: the smaller of what was funded and the configured budget, minus spend and in-flight payments. */
+/**
+ * Spendable right now: the smaller of what was funded and the configured budget,
+ * minus spend, in-flight reservations, and micro-USDC locked in open channels.
+ * With one open channel this is exactly `budget − spent − reserved − escrowed`
+ * (§5) — escrow is money committed on-chain but not yet a settled `payment` row.
+ */
 export function allowanceRemaining(rt: AllowanceRuntime): bigint {
   const policy = rt.policy();
   const t = rt.ledger.totals(rt.agentName, 0);
   const configured = usd(policy.totalBudgetUsd);
   const budget = configured < t.topupsMicro ? configured : t.topupsMicro;
-  const remaining = budget - t.spendTotalMicro - rt.reservations.total(rt.agentName);
+  const openReservations = rt.reservations.list(rt.agentName);
+  const reserved = openReservations.reduce((s, r) => s + BigInt(r.amountMicro), 0n);
+  // Exclude channels still backed by an open reservation — their ceiling is in
+  // `reserved` already, so counting the escrow too would subtract it twice (§5).
+  const escrowed = rt.escrowedMicro?.(new Set(openReservations.map((r) => r.id))) ?? 0n;
+  const remaining = budget - t.spendTotalMicro - reserved - escrowed;
   return remaining > 0n ? remaining : 0n;
 }
 

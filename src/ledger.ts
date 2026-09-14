@@ -3,7 +3,26 @@ import path from "node:path";
 
 export type LedgerEvent =
   | { t: "topup"; at: string; agent: string; amountMicro: string; source: string; balanceAfterMicro: string }
-  | { t: "payment"; at: string; agent: string; url: string; host: string; amountMicro: string; txHash: string; balanceAfterMicro: string }
+  | {
+      t: "payment";
+      at: string;
+      agent: string;
+      url: string;
+      host: string;
+      amountMicro: string;
+      txHash: string;
+      balanceAfterMicro: string;
+      // Solana `upto` only (SOL-03/SOL-05). `amountMicro` stays the actual charge,
+      // so budget and velocity are unchanged; these annotate an escrow settlement.
+      /** "exact" | "upto"; absent on EVM and Solana `exact` rows. */
+      scheme?: string;
+      /** The channel deposit ceiling the buyer escrowed. */
+      depositMicro?: string;
+      /** What came back to the wallet (`deposit − actual`). */
+      refundMicro?: string;
+      /** The channel this payment settled. */
+      channelId?: string;
+    }
   | { t: "blocked"; at: string; agent: string; url: string; host: string; rule: string; detail: string; attemptedMicro: string }
   | { t: "policy_change"; at: string; agent: string; field: string; value: unknown }
   | { t: "approval_requested"; at: string; agent: string; id: string; url: string; host: string; amountMicro: string }

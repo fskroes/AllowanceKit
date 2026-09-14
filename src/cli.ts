@@ -13,11 +13,25 @@ import {
   startHeartbeat,
   cloudWhoami,
   NotifyStore,
+  Notifier,
   CLOUD_ENV,
   CLOUD_DEFAULT_URL,
 } from "./notify.ts";
 import { describeMode, describeTopUp, readMode } from "./mode.ts";
-import { NETWORKS, createLiveAgent } from "./live.ts";
+import { NETWORKS, createLiveAgent, family, isMainnet, mainnetName } from "./live.ts";
+import {
+  SOLANA_NETWORKS,
+  solanaNetworkInfo,
+  usdcBalanceMicroSolana,
+  solBalanceLamportsSolana,
+  normalizeSolanaKey,
+  solanaSigner,
+  probeSolanaLibs,
+  describeSolanaKeyFormat,
+} from "./solana.ts";
+import { ChannelStore, reconcileAndNotify, reclaimChannel, solanaAccountRpc } from "./channels.ts";
+import { withLock } from "./lock.ts";
+import { checkTreasuryAta } from "./seller-upto.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
@@ -38,13 +52,17 @@ Commands
   init --live [--network <net>]   provision for REAL MONEY on a live network (see below)
   topup <usd>                     add to the allowance
   pay <url>                       make one payment to an x402 URL, print the result
-  doctor                          check your setup: node, viem, keys, RPC, permissions
+  doctor [--seller]               check your setup: node, viem, keys, RPC, permissions
+                                  (--seller also checks the Solana upto treasury ATA)
   status                          what is left, what the limits are, what needs you
   policy                          show every limit
   policy <field> <value>          change one limit
   approvals                       payments waiting for your decision, and live grants
   approve <id> | deny <id>        decide one
   audit [--json]                  the full spending history
+  channels [list] [--json]        Solana upto payment channels and money in escrow
+  channels reconcile              read the chain and resolve open/unknown channels
+  channels reclaim <id> | sweep   take a stuck deposit back (needs a little SOL)
   notify                          where alerts are sent, and on what
   agents                          every agent sharing this state directory
   dashboard [--port <n>]          live dashboard (default http://localhost:4030)
@@ -92,7 +110,7 @@ Options
   --via <resend|postmark>         email provider (default resend)
   --budget <usd>                  spend an approval grant may cover
   --expires <30m|2h|7d|never>     how long an approval grant lasts
-  --network <base-sepolia|base>   live network for init --live (default base-sepolia)
+  --network <net>                 live network for init --live: base-sepolia, base, solana-devnet, solana
   --rpc <url>                     override the JSON-RPC endpoint for balance reads
   --method <GET|POST>             HTTP method for pay (default GET, or POST with --body)
   --body <json>                   request body for pay
@@ -128,6 +146,7 @@ interface Flags {
   yes: boolean;
   method?: string;
   body?: string;
+  seller: boolean;
   rest: string[];
 }
 
@@ -147,6 +166,7 @@ function parseFlags(argv: string[]): Flags {
   let yes = false;
   let method: string | undefined;
   let body: string | undefined;
+  let seller = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--state" || a === "--state-dir") state = required(argv[++i], "--state <dir>");
@@ -174,13 +194,14 @@ function parseFlags(argv: string[]): Flags {
     else if (a.startsWith("--method=")) method = a.slice(9);
     else if (a === "--body") body = required(argv[++i], "--body <json>");
     else if (a.startsWith("--body=")) body = a.slice(7);
+    else if (a === "--seller") seller = true;
     else rest.push(a);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UserError(`--port must be a number between 1 and 65535`);
   if (budget !== undefined && (!Number.isFinite(budget) || budget <= 0))
     throw new UserError(`--budget must be a positive dollar amount`);
   if (!agentName.trim()) throw new UserError(`--agent needs a name`);
-  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, rest };
+  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, seller, rest };
 }
 
 function required(value: string | undefined, usage: string): string {
@@ -258,21 +279,28 @@ async function promptLine(question: string): Promise<string> {
 
 /** Mainnet is not practice: it takes a `--yes`, or typing the network name back. */
 async function confirmMainnet(network: string, yes: boolean): Promise<void> {
-  if (network !== "base" || yes) return;
+  // The live mainnets that settle real USDC: Base and Solana. Their testnets
+  // (base-sepolia, solana-devnet) are practice money. `isMainnet` resolves the
+  // bare name AND the CAIP-2 alias, so eip155:8453 / solana:5eykt… are caught.
+  if (!isMainnet(network) || yes) return;
+  const canonical = mainnetName(network); // "base" | "solana"
+  const chain = canonical === "solana" ? "Solana mainnet" : "Base mainnet";
   if (!process.stdin.isTTY)
     throw new UserError(
-      `REAL MONEY — this signs USDC payments on Base mainnet, not practice.\n` +
+      `REAL MONEY — this signs USDC payments on ${chain}, not practice.\n` +
         `Re-run with --yes to confirm in a script, or run it in a terminal to confirm by hand.`,
     );
-  const answer = await promptLine(`REAL MONEY — payments will settle on Base mainnet.\nType "base" to confirm: `);
-  if (answer.trim() !== "base") throw new UserError(`not confirmed — nothing was changed.`);
+  const answer = await promptLine(`REAL MONEY — payments will settle on ${chain}.\nType "${canonical}" to confirm: `);
+  if (answer.trim() !== canonical) throw new UserError(`not confirmed — nothing was changed.`);
 }
 
 /** `init --live`: derive the payer address, mark the directory live, keep the key out of it. */
 async function initLive(stateDir: string, flags: Flags): Promise<void> {
   const network = flags.network ?? "base-sepolia";
-  if (!(network in NETWORKS))
-    throw new UserError(`unknown network "${network}" — known: ${Object.keys(NETWORKS).join(", ")}`);
+  if (!family(network))
+    throw new UserError(
+      `unknown network "${network}" — known: ${[...Object.keys(NETWORKS), ...Object.keys(SOLANA_NETWORKS)].join(", ")}`,
+    );
   const existing = readMode(stateDir);
   if (existing.mode === "live" && existing.network && existing.network !== network)
     throw new UserError(
@@ -376,8 +404,15 @@ function auditLine(e: LedgerEvent): string {
   switch (e.t) {
     case "topup":
       return `${t}  TOPUP    ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  added to the allowance`;
-    case "payment":
-      return `${t}  PAID     ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${String(e.txHash).slice(0, 12)}…`;
+    case "payment": {
+      // A Solana `upto` settlement shows the escrow: what was deposited and what
+      // came back. `amountMicro` is still the actual charge (SOL-03).
+      const escrow =
+        e.depositMicro !== undefined
+          ? `  deposit ${fmtUsdSmart(BigInt(e.depositMicro))} refund ${fmtUsdSmart(BigInt(e.refundMicro ?? "0"))}`
+          : "";
+      return `${t}  PAID     ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${String(e.txHash).slice(0, 12)}…${escrow}`;
+    }
     case "blocked":
       return `${t}  BLOCKED  ${fmtUsdSmart(BigInt(e.attemptedMicro)).padStart(9)}  ${shortPath(e.url).padEnd(38)} ${RULE_LABELS[e.rule as keyof typeof RULE_LABELS] ?? e.rule}`;
     case "policy_change":
@@ -429,9 +464,9 @@ async function main(): Promise<void> {
         throw new UserError(`top-up must be a positive dollar amount, got "${args[0]}" — e.g. ${CLI} topup 5.00`);
       const rt = agent(stateDir, flags.agent);
       const mode = readMode(stateDir);
-      if (mode.mode === "live" && mode.network === "base" && amount > 50 && !flags.yes)
+      if (mode.mode === "live" && mode.network && isMainnet(mode.network) && amount > 50 && !flags.yes)
         throw new UserError(
-          `REAL MONEY — raising the ceiling to ${fmtUsd(usd(amount))} on Base mainnet.\n` +
+          `REAL MONEY — raising the ceiling to ${fmtUsd(usd(amount))} on ${mainnetName(mode.network) === "solana" ? "Solana" : "Base"} mainnet.\n` +
             `Re-run with --yes to confirm. (Amounts up to $50.00 do not need it.)`,
         );
       const remaining = topUp(rt, amount, "human::cli");
@@ -559,8 +594,8 @@ async function main(): Promise<void> {
       );
       printWarnings(policyWarnings(rt.policy()));
       const pmode = readMode(stateDir);
-      if (pmode.mode === "live" && pmode.network === "base")
-        console.log(`\n  ! REAL MONEY — this limit governs USDC on Base mainnet.`);
+      if (pmode.mode === "live" && pmode.network && isMainnet(pmode.network))
+        console.log(`\n  ! REAL MONEY — this limit governs USDC on ${mainnetName(pmode.network) === "solana" ? "Solana" : "Base"} mainnet.`);
       break;
     }
 
@@ -623,6 +658,116 @@ async function main(): Promise<void> {
       }
       for (const e of events) console.log(auditLine(e));
       console.log(`\n${events.length} entries · full machine-readable log: ${CLI} audit --json`);
+      break;
+    }
+
+    case "channels": {
+      const store = new ChannelStore(stateDir);
+      const [sub, id] = args;
+
+      if (!sub || sub === "list") {
+        const rows = store.list(flags.agent);
+        if (flags.json) {
+          for (const c of rows) console.log(JSON.stringify(c));
+          break;
+        }
+        if (!rows.length) {
+          console.log(`no Solana payment channels yet — they appear when an agent pays an x402 \`upto\` seller.`);
+          break;
+        }
+        console.log(`  status     deposit   settled    refund   age    host`);
+        for (const c of rows) {
+          console.log(
+            `  ${c.status.padEnd(9)} ${fmtUsdSmart(BigInt(c.depositMicro)).padStart(8)} ` +
+              `${fmtUsdSmart(BigInt(c.settledMicro)).padStart(9)} ${fmtUsdSmart(BigInt(c.refundMicro)).padStart(9)} ` +
+              `${ago(c.at).padStart(5)}  ${c.host}`,
+          );
+        }
+        const escrowed = store.escrowedMicro(flags.agent);
+        console.log(`\n${rows.length} channel(s) · ${fmtUsd(escrowed)} still in escrow`);
+        break;
+      }
+
+      if (sub !== "reconcile" && sub !== "reclaim" && sub !== "sweep")
+        throw new UserError(`unknown channels command "${sub}" — try: list, reconcile, reclaim <id>, sweep`);
+
+      // reconcile / reclaim / sweep all read the chain, so they need a live Solana wallet.
+      const mode = readMode(stateDir);
+      if (mode.mode !== "live" || family(mode.network ?? "") !== "solana")
+        throw new UserError(
+          `\`${CLI} channels ${sub}\` reads the Solana chain — run it on a Solana live wallet ` +
+            `(\`${CLI} init --live --network solana-devnet\`).`,
+        );
+      const sinfo = solanaNetworkInfo(mode.network!)!;
+      const rpcUrl = mode.rpcUrl ?? sinfo.defaultRpc;
+
+      // A channel row carries its own agent; the emitted cloud event must be
+      // tagged with that agent, so build (and reuse) one notifier per agent.
+      const notifiers = new Map<string, Notifier>();
+      const notifierFor = (name: string): Notifier => {
+        let n = notifiers.get(name);
+        if (!n) notifiers.set(name, (n = new Notifier(new NotifyStore(stateDir, name), name, undefined, { network: mode.network, mode: "live" })));
+        return n;
+      };
+      // Share the allowance lock with any live agent running on this state dir, so
+      // a reconcile/reclaim write cannot clobber a concurrent open/settle.
+      const lockPath = path.join(stateDir, "allowance.lock");
+      const lock = <T,>(fn: () => T | Promise<T>) => withLock(lockPath, fn);
+
+      if (sub === "reconcile") {
+        const changes = await reconcileAndNotify(
+          solanaAccountRpc(rpcUrl),
+          store,
+          (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
+          { agent: flags.agent, lock },
+        );
+        if (!changes.length) {
+          console.log(`all channels already resolved — nothing changed.`);
+          break;
+        }
+        for (const c of changes) console.log(`  ${c.channelId.slice(0, 12)}…  ${c.from} → ${c.to}`);
+        console.log(`\n${changes.length} channel(s) updated from the chain.`);
+        break;
+      }
+
+      if (sub === "reclaim" || sub === "sweep") {
+        const key = requireLiveKey();
+        const signer = solanaSigner(normalizeSolanaKey(key));
+
+        let targets;
+        if (sub === "reclaim") {
+          if (!id) throw new UserError(`which channel? e.g.  ${CLI} channels reclaim <channelId>`);
+          const rec = store.get(id);
+          if (!rec) throw new UserError(`no channel ${id} in the store`);
+          targets = [rec];
+        } else {
+          // sweep: read the chain first, then reclaim every orphan whose grace elapsed.
+          await reconcileAndNotify(
+            solanaAccountRpc(rpcUrl),
+            store,
+            (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
+            { agent: flags.agent, lock },
+          );
+          targets = store.dueForReclaim(flags.agent);
+          if (!targets.length) {
+            console.log(`no orphaned channels are past their withdraw delay — nothing to reclaim.`);
+            break;
+          }
+        }
+
+        for (const rec of targets) {
+          console.log(`reclaiming ${rec.channelId.slice(0, 12)}… (deposit ${fmtUsd(BigInt(rec.depositMicro))})`);
+          const res = await reclaimChannel(rec, signer, { rpcUrl });
+          if (res.reclaimed) {
+            const updated = await lock(() => store.markReclaimed(rec.channelId, res.refundMicro));
+            notifierFor(updated.agent).channel("reclaimed", updated);
+            console.log(`  done — ${fmtUsd(res.refundMicro)} returned · ${res.signatures.length} tx`);
+          } else {
+            console.log(`  skipped — ${res.note}`);
+          }
+        }
+        break;
+      }
       break;
     }
 
@@ -958,12 +1103,21 @@ async function main(): Promise<void> {
       if (maj > 20 || (maj === 20 && min >= 11)) ok("node", `v${process.versions.node}`);
       else fail("node", `v${process.versions.node} — the package needs Node ≥ 20.11 (running the TS sources needs Node 24)`);
 
+      // Signing libs, one row per rail. The lib for the *live* rail is required
+      // (fail); the other rail's lib is only a warn. viem signs EVM EIP-712;
+      // @x402/svm + @solana/kit sign Solana. A practice-mode agent needs neither.
+      const liveFam = mode.mode === "live" && mode.network ? family(mode.network) : undefined;
+
       try {
         await import("viem/accounts");
-        ok("viem", "installed — live signing available");
+        ok("viem", "installed — EVM signing available");
       } catch {
-        (mode.mode === "live" ? fail : warn)("viem", "not installed — run `npm i viem` (needed only for live networks)");
+        (liveFam === "evm" ? fail : warn)("viem", "not installed — run `npm i viem` (needed only for EVM live networks)");
       }
+
+      const sol = await probeSolanaLibs();
+      if (sol.ok) ok("solana libs", sol.detail);
+      else (liveFam === "solana" ? fail : warn)("solana libs", sol.detail);
 
       try {
         fs.accessSync(stateDir, fs.constants.W_OK);
@@ -975,20 +1129,61 @@ async function main(): Promise<void> {
       ok("mode", describeMode(mode));
 
       if (mode.mode === "live") {
-        if (process.env.AGENT_PRIVATE_KEY?.trim())
-          ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
-        else fail("wallet key", "AGENT_PRIVATE_KEY is not set — export AGENT_PRIVATE_KEY=0x... before you can pay");
+        if (liveFam === "solana") {
+          // Solana rail (SOL-01). The key format differs from EVM, so name it.
+          if (process.env.AGENT_PRIVATE_KEY?.trim())
+            ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
+          else fail("wallet key", `AGENT_PRIVATE_KEY is not set — ${describeSolanaKeyFormat(mode.network!)}`);
 
-        const info = mode.network ? NETWORKS[mode.network] : undefined;
-        const rpc = mode.rpcUrl ?? (mode.network ? RPC_DEFAULTS[mode.network] : undefined);
-        if (!info) fail("network", `unknown network "${mode.network}"`);
-        else if (!rpc) warn("rpc", `no RPC for ${mode.network} — the wallet balance will be unreadable`);
-        else if (mode.address) {
-          try {
-            const bal = await usdcBalanceMicro(rpc, info.usdc, mode.address);
-            ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
-          } catch (e) {
-            warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+          const sinfo = solanaNetworkInfo(mode.network!)!;
+          const rpc = mode.rpcUrl ?? sinfo.defaultRpc;
+          if (mode.address) {
+            try {
+              const bal = await usdcBalanceMicroSolana(rpc, sinfo.mint, mode.address);
+              ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
+            } catch (e) {
+              warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+            }
+            // The happy path needs no SOL, but `channels reclaim` is payer-signed
+            // and payer-fee-paid, so warn when the wallet cannot afford it (§2.5).
+            try {
+              const lamports = await solBalanceLamportsSolana(rpc, mode.address);
+              const sol = Number(lamports) / 1e9;
+              if (lamports >= 10_000_000n) ok("SOL for reclaim", `wallet holds ${sol.toFixed(4)} SOL`);
+              else
+                warn(
+                  "SOL for reclaim",
+                  `wallet holds ${sol.toFixed(4)} SOL — \`${CLI} channels reclaim\` needs ~0.01 SOL for fees`,
+                );
+            } catch {
+              // The USDC read above already reported RPC reachability; stay quiet here.
+            }
+          }
+
+          // Seller-only (SOL-04): the on-chain `distribute` a claim runs needs
+          // the treasury ATA for the mint to exist, or it hard-fails. A warn,
+          // never a fail — a buyer-only wallet does not settle channels.
+          if (flags.seller) {
+            const t = await checkTreasuryAta(mode.network!, rpc);
+            if (t.ok) ok("seller: treasury", t.detail);
+            else warn("seller: treasury", t.detail);
+          }
+        } else {
+          if (process.env.AGENT_PRIVATE_KEY?.trim())
+            ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
+          else fail("wallet key", "AGENT_PRIVATE_KEY is not set — export AGENT_PRIVATE_KEY=0x... before you can pay");
+
+          const info = mode.network ? NETWORKS[mode.network] : undefined;
+          const rpc = mode.rpcUrl ?? (mode.network ? RPC_DEFAULTS[mode.network] : undefined);
+          if (!info) fail("network", `unknown network "${mode.network}"`);
+          else if (!rpc) warn("rpc", `no RPC for ${mode.network} — the wallet balance will be unreadable`);
+          else if (mode.address) {
+            try {
+              const bal = await usdcBalanceMicro(rpc, info.usdc, mode.address);
+              ok("rpc", `${hostOfUrl(rpc)} reachable — wallet holds ${fmtUsd(bal)} USDC on ${mode.network}`);
+            } catch (e) {
+              warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
+            }
           }
         }
       }

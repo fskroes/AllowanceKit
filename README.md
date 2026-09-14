@@ -315,6 +315,63 @@ node --env-file=.env scripts/canary.ts --buyer --network base   # mainnet, real 
 
 It funds a $0.20 allowance with a $0.05 per-call cap, settles a real $0.01 payment through a CDP facilitator, then tightens the cap and checks the next payment is refused — and fails loudly if the audit ledger does not show exactly one payment and one block.
 
+## MCP server
+
+Give an MCP client — Claude Desktop, an agent framework, anything that speaks the
+Model Context Protocol — a spending allowance. `wallie-mcp` serves the same runtime
+the CLI uses over stdio, so the agent pays x402 APIs (Base or Solana, `exact` or
+`upto`) inside the same policy rails, ledger and escrow book.
+
+```bash
+export AGENT_PRIVATE_KEY=0x...          # only for a live directory; a fresh one is practice money
+export ALLOWANCE_STATE_DIR=.allowance  # optional, this is the default
+npx wallie-mcp                          # speaks MCP over stdio
+```
+
+Point a client at it, e.g. in Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "wallie": { "command": "npx", "args": ["wallie-mcp"], "env": { "ALLOWANCE_STATE_DIR": ".allowance" } }
+  }
+}
+```
+
+Five tools, over stdio:
+
+| Tool | Does |
+|---|---|
+| `pay_fetch(url, method?, body?, headers?)` | Fetch an x402 URL, paying inside the rails. Returns the response, what was spent, and — on a refusal — a `blocked` reason in plain language, never an exception. |
+| `get_budget()` | Funded ceiling, spent, reserved, escrowed (open channels), remaining, and the velocity-window state. |
+| `list_channels()` | The buyer's book of Solana `upto` payment channels — each deposit's status, settled and refunded amounts. |
+| `decide_approval(id, approve)` | Approve or deny a payment the rails queued for a human; approving mints a time-boxed, budget-limited grant. |
+| `reclaim_channel(id)` | Sweep an orphaned Solana channel's deposit back to the wallet after its grace period. |
+
+The server binds one runtime, resolved from the state directory exactly as the CLI
+resolves it: `mode.json` says whether it is live, `AGENT_PRIVATE_KEY` supplies the
+key. The runtime is chosen once, so `pay_fetch` transparently settles `exact` on
+Base or `exact`/`upto` on Solana without the caller choosing a scheme.
+
+The MCP surface is also importable from the SDK:
+
+```ts
+import { createMcpServer, runMcpStdio } from "allowance-kit/mcp"; // or from "wallie-mcp"
+```
+
+`@modelcontextprotocol/sdk` is an optional peer, loaded lazily — importing
+`allowance-kit` never pulls the MCP stack in, only `allowance-kit/mcp` does.
+
+The example agent drives the server end to end, offline:
+
+```bash
+npm run demo:mcp    # node demo/mcp-agent/agent.ts
+```
+
+It lists the tools, buys an `exact` API, hits a per-call cap (a block named in
+`RULE_LABELS` language), then buys a metered Solana `upto` API for less than its
+ceiling and watches the rest refund.
+
 ## Demo output (abridged)
 
 `npx allowance-kit demo`:

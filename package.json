@@ -26,6 +26,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "demo": "node demo/demo.ts",
+    "demo:mcp": "node demo/mcp-agent/agent.ts",
+    "mcp": "node src/mcp-bin.ts",
     "dashboard": "node src/cli.ts dashboard",
     "cli": "node src/cli.ts",
     "test": "node --test \"test/*.test.ts\"",
@@ -33,14 +35,19 @@
   },
   "bin": {
     "allowance": "dist/cli.js",
-    "allowance-kit": "dist/cli.js"
+    "allowance-kit": "dist/cli.js",
+    "allowance-mcp": "dist/mcp-bin.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./cli": "./dist/cli.js"
+    "./cli": "./dist/cli.js",
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/mcp.js"
+    }
   },
   "files": [
     "dist/",
@@ -52,14 +59,37 @@
     "node": ">=20.11"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@solana-program/token": "^0.9.0",
+    "@solana/kit": ">=5.1.0",
     "@types/node": "^26.3.0",
+    "@x402/svm": "^2.25.0",
     "typescript": "^7.0.2",
     "viem": "^2.55.19"
   },
+  "overrides": {
+    "typescript": "$typescript"
+  },
   "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@solana-program/token": "^0.9.0",
+    "@solana/kit": ">=5.1.0",
+    "@x402/svm": "^2.25.0",
     "viem": "^2.55.19"
   },
   "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@solana-program/token": {
+      "optional": true
+    },
+    "@solana/kit": {
+      "optional": true
+    },
+    "@x402/svm": {
+      "optional": true
+    },
     "viem": {
       "optional": true
     }

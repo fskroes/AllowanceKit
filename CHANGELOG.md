@@ -10,6 +10,109 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+The Solana rail (tickets **SOL-01 … SOL-09**, branch `feat/solana-exact-rail`) adds a
+second chain family — `exact` payments symmetric with Base, and a self-facilitated `upto`
+payment-channel scheme for metered calls — behind the same allowance runtime, rails, ledger
+and cloud. `@x402/svm` and `@solana/kit` are optional peers, lazy-loaded; a Base agent never
+resolves them. All entries below are grouped newest ticket first.
+
+### Added
+
+- **Solana canary + compat docs (SOL-09).** `scripts/canary-solana.ts` is the Solana twin
+  of `scripts/canary.ts`: phase A proves the `upto` buyer, rails and escrow book hermetically
+  (no network, no keys); phase B settles a real channel on the 402.surfnet.dev sandbox with a
+  real signature via the free faucet; phase C settles on public devnet (`--devnet`) or mainnet
+  (`--network solana`, the human step), reading the buyer key from `AGENT_PRIVATE_KEY` and
+  printing a paste-ready `docs/canary-runs/` record. First recorded run:
+  `docs/canary-runs/2026-09-13-solana-surfnet-sandbox.md` (metered $0.03 of a $0.10 ceiling,
+  on-chain `settled == $0.03`, wallet delta exactly $0.03, $0.07 refunded). `docs/x402-compat.md`
+  §10 documents, from each facilitator's own `/supported`, that hosted facilitators settle
+  Solana `exact` only and none settles Solana `upto` — the reason the seller self-facilitates.
+  `docs/GLOSSARY.md`'s Solana section is updated from "planned" to shipped.
+
+- **Cloud channel events + escrow watchdog (SOL-08).** Solana `upto` escrow is now
+  a first-class thing the cloud and the dashboard track. A new `channel`
+  `CloudEventKind` carries every phase — `opened`, `settled`, `refunded`,
+  `orphaned`, `reclaimed` — with the deposit, settled and refund amounts, so the
+  feed sees locked money the moment it locks. The cloud heartbeat gains
+  `escrowedMicro`, so the overview shows locked value without an event. The local
+  dashboard grows an "In escrow" card and a channels table (status, host, deposit,
+  settled, refund, age) with a token-gated reclaim button; its state tick
+  reconciles open channels against the chain and emits `orphaned` once each. The
+  buyer runtime emits `opened`/`settled`/`refunded` inline, and `channels
+  reconcile`/`sweep`/`reclaim` emit `orphaned`/`settled`/`reclaimed`. On the cloud
+  (`~/dev/wallie-cloud`): `channel` joins `INGEST_KINDS` (routine phases are
+  feed-only, `orphaned` alerts, email + SMS), the escrow watchdog raises
+  `escrow_stale` for a deposit opened and never resolved past N minutes (default
+  10), and the account overview + event feed surface escrow. An older client is
+  still accepted unchanged.
+
+- **MCP server (SOL-07).** A new `allowance-kit/mcp` subpath and the `wallie-mcp`
+  bin serve the allowance runtime over the Model Context Protocol (stdio), so an
+  MCP client pays x402 APIs inside the same policy rails, ledger and escrow book.
+  Five tools: `pay_fetch`, `get_budget`, `list_channels`, `decide_approval`
+  (§8's `approve`/`deny` as one decision), and `reclaim_channel`. The server binds
+  one runtime, resolved from the state dir exactly as the CLI resolves it (live vs
+  practice from `mode.json`, the key from `AGENT_PRIVATE_KEY`), so `pay_fetch`
+  settles `exact` or `upto` per offer without the caller choosing a scheme.
+  `@modelcontextprotocol/sdk` is an optional peer, loaded lazily — importing
+  `allowance-kit` never pulls the MCP stack in, only `allowance-kit/mcp` does.
+  New: `src/mcp.ts`, `src/mcp-bin.ts` (`allowance-mcp` bin), the `wallie-mcp`
+  alias package, and `demo/mcp-agent/` — an offline example agent whose transcript
+  shows an `exact` buy, a ceiling block in `RULE_LABELS` language, and a Solana
+  `upto` buy that settles below its ceiling and refunds the rest.
+
+- **Policy rails understand escrow and the ceiling (SOL-06).** The `upto` scheme adds a
+  third money state next to spent and reserved — `escrowedMicro`, USDC locked in an open
+  channel — and the context carries `scheme` and the escrow figure. `spendable` subtracts
+  escrow (`allowanceRemaining == budget − spent − reserved − escrowed`); every rail (per-call
+  cap, velocity, budget, balance, approval) evaluates the **ceiling**, not the eventual charge;
+  a grant draws down by the ceiling and is credited back by `refundMicro` when the seller
+  settles below it; and the kill switch refuses new channel opens, not just `exact` sends.
+
+- **Buyer `upto` (SOL-05).** `encodePaymentSolanaUpto` builds and partially signs the `open`
+  with zero RPC when the offer `extra` pins the blockhash and slot; `selectOffer` gained a
+  scheme preference (`exact` if it fits the per-call cap, else `upto` if the ceiling fits);
+  the channel row is written under the state-dir lock **before** the deposit is sent, so a
+  send that fails after the header leaves is recoverable; the receipt resolves the channel to
+  `settled`/`refunded`/`unknown`; `PaidResult` gained `channelId` and `refundMicro`. An
+  over-reporting seller is clamped to the deposit, never trusted.
+
+- **Seller `upto`, self-facilitated (SOL-04).** `src/seller-upto.ts` wraps
+  `@x402/svm/upto` server + facilitator so `paymentGate` can offer a metered call with no
+  hosted facilitator: a `Meter` (`meter.charge`, clamped to the ceiling), a `beforeServe`
+  hook, a refund (`amount: "0"`) when the handler throws or never charges, and rent cleanup
+  (`channels sweep`). Keys are configured by env-var name, never value. `doctor --seller`
+  checks the treasury ATA. Money-path tests: settles once, replay rejected, insufficient
+  deposit rejected, hook blocks.
+
+- **Channel primitives and store (SOL-03).** A zero-dependency `voucher` codec (50 bytes,
+  byte-exact to the spec, `node:crypto` Ed25519) and `ChannelStore` (`channels.json`, under
+  the state-dir lock; statuses `opened|settled|refunded|unknown|orphaned|reclaimed`) with
+  `escrowedMicro`. `reconcileChannels` reads each PDA over JSON-RPC and flips a non-terminal
+  row to its on-chain state; `reclaimChannel` runs the payer escape path (three transactions,
+  needs SOL). CLI: `channels list|reconcile|reclaim <id>|sweep`. The `payment` ledger row
+  gained `scheme`, `depositMicro`, `refundMicro`, `channelId`, and `audit` prints them.
+
+- **Solana `exact` seller through CDP (SOL-02).** `advertise` returns an array; a Solana
+  entry uses the mint as `asset` and carries `extra.feePayer` from the facilitator's
+  `/supported`, with no EIP-712 `extra`. `CdpFacilitator` passes the CAIP-2 network in its v2
+  bodies. The v1 Base path is byte-identical.
+
+- **Solana rail, `exact` buyer (SOL-01).** `@x402/svm` and `@solana/kit` as optional peers;
+  `SOLANA_NETWORKS` (both CAIP-2 ids, v1 names, USDC mints, default RPCs, token program);
+  `solanaSigner` (a `TransactionPartialSigner` from a `node:crypto` Ed25519 seed);
+  `usdcBalanceMicroSolana` over plain JSON-RPC; `encodePaymentSolanaExact`; `createLiveAgent`
+  branches by network family; `selectOffer` resolves Solana ids; new `doctor` rows. A Base
+  agent proves, in a test, that `@solana/kit` is never resolved.
+
+### Fixed
+
+- **Lockfile install of the Solana peer tree.** `@x402/svm` pins its own nested
+  `@solana-program/token-2022`, whose `@solana/*` peers must sit where that nested
+  copy can resolve them; the lockfile now records them there, so `npm ci` (what CI
+  runs) reproduces a working Solana `upto` tree instead of a half-hoisted one.
+
 ## [0.5.1] - 2026-09-08
 
 Runtime follow-ups that Wallie Cloud needs (RELEASE-PLAN ticket C-10). Ships as

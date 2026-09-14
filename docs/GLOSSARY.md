@@ -1,6 +1,7 @@
 # Glossary
 
-Terms as used in this repo, on onewallie.com, and in [RELEASE-PLAN.md](RELEASE-PLAN.md).
+Terms as used in this repo, on onewallie.com, in [RELEASE-PLAN.md](RELEASE-PLAN.md) and in
+[SOLANA-ARCHITECTURE.md](SOLANA-ARCHITECTURE.md).
 Where a term names a file or export, it is given so an agent can grep for it. Alphabetical.
 Current as of `allowance-kit@0.5.0` and `wallie-cloud@15689aa` (2026-09-08): "planned" marks
 what Wallie Cloud's service side still needs (Stripe provisioning, email templates, the account
@@ -60,8 +61,12 @@ an agent can act on it, not just log it.
 CDP auth; `--full` settles through a local seller; `--buyer` runs the real buyer runtime
 (allowance, balance check, approval gate, ledger) and asserts the ledger afterwards.
 `--network base` runs it with real money. A **canary run** is a recorded, dated result of
-that script in `docs/canary-runs/`. Two exist (2026-09-07): Base mainnet, and Base Sepolia
-against a third-party seller (`scripts/l02-thirdparty.ts`, Mart402).
+that script in `docs/canary-runs/`. On Base, two exist (2026-09-07): mainnet, and Base
+Sepolia against a third-party seller (`scripts/l02-thirdparty.ts`, Mart402). The Solana twin
+is **`scripts/canary-solana.ts`** (SOL-09): phase A proves the `upto` buyer and rails
+hermetically, `--sandbox` settles a real channel on 402.surfnet.dev with the free faucet, and
+`--devnet` / `--network solana` settle on public Solana; first run recorded
+`2026-09-13-solana-surfnet-sandbox.md`.
 
 **CDP / CdpFacilitator** — Coinbase Developer Platform. `facilitator-cdp.ts` implements the
 x402 facilitator contract (`verify`, `settle`) against CDP's API, authenticated with an
@@ -283,3 +288,246 @@ what the live ecosystem speaks): challenge in the `PAYMENT-REQUIRED` header, rep
 `PAYMENT-SIGNATURE`, receipt in `PAYMENT-RESPONSE`, `x402Version: 2`, CAIP-2 network ids
 (`eip155:8453`), `amount`, and the seller's offer echoed verbatim under `accepted`. Supported
 alongside v1, never instead (D-5). Exact diff: `docs/x402-compat.md` §5.
+
+---
+
+## Solana and payment channels
+
+Terms from [SOLANA-ARCHITECTURE.md](SOLANA-ARCHITECTURE.md). **Shipped** in the tree as of
+tickets SOL-01 … SOL-09 (branch `feat/solana-exact-rail`, 2026-09-13) — the money path is
+proven by `docs/canary-runs/2026-09-13-solana-surfnet-sandbox.md` — but not yet in a published
+`allowance-kit` version, so it lives under `[Unreleased]` in the CHANGELOG. These entries were
+written at design time: read a "planned" below as "now shipped", except where it names a
+Wallie Cloud deploy or an *MPP session*, which stay genuinely planned. Facts about the program
+and the protocol were verified on 2026-09-13; evidence in `docs/spikes/`. Alphabetical.
+
+**`@solana/kit`** — Anza's zero-dependency Solana client library (the 2.x line of
+`@solana/web3.js`; the 1.x line is maintenance only). Uses native WebCrypto Ed25519. Planned
+optional peer dependency, lazy-imported from `src/solana.ts` like `viem` is from `live.ts`.
+A Base agent never loads it. Version range follows what `@x402/svm` declares.
+
+**`@solana/pay-kit`** — Solana Foundation's MPP-first server framework (`createPayKit`,
+gates, pricing catalogue, *MPP session*). Spiked and **rejected** for the x402 path
+(architecture §2.1): pulls `mppx` and `viem`, vendors a stale `@x402/svm`, has no hook
+between verify and settle, and its channel operator code is private. The right library if
+*MPP session* is ever added. Evidence: `docs/spikes/2026-09-13-spike-paykit-vs-handroll.md`.
+
+**`@x402/svm`** — the x402 Solana mechanism package from `x402-foundation/x402`
+(Apache-2.0). Ships the buyer `exact` and `upto` schemes, the seller `upto` scheme, the
+in-process `upto` *facilitator*, the vendored program client, PDA derivation and the
+*voucher* codec. Planned optional peer. Importing it or its `exact/client`, `upto/client`,
+`upto/facilitator` subpaths loads no `zod` (verified with a resolve hook); only
+`@x402/core/http` does, and allowance-kit never imports that because it encodes headers
+itself.
+
+**Authorized signer / `receiverAuthorizer`** — the key that signs the *voucher*. In x402
+`upto` it is the **seller's** hot key (`extra.receiverAuthorizer` in the offer, stored as
+`authorized_signer` in the *channel account*). The buyer never signs a voucher in `upto`.
+Planned env var name on the seller: `SELLER_AUTHORIZER_KEY` (configured by name, never
+value, in `paymentGate`'s `solanaOperator`).
+
+**CAIP-2 (Solana)** — `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (mainnet-beta) and
+`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` (devnet); v1 bare names `solana` and
+`solana-devnet`. Planned table `SOLANA_NETWORKS` in `src/solana.ts`; `networkInfo()` in
+`live.ts` resolves them. The string `EQnzfwaE…` from an earlier session is wrong and appears
+in no package.
+
+**Ceiling** — the `amount` a seller advertises on an `upto` offer: the maximum it may
+charge and the exact *deposit* the buyer escrows (`deposit == maxAmount == accepts.amount`).
+The buyer's policy rails check the ceiling, not the eventual charge: per-call cap, velocity,
+budget, balance and approval all evaluate the ceiling (architecture §5). `PaidResult.quotedMicro`
+carries it; `costMicro` carries the actual charge.
+
+**Channel account** — the 256-byte on-chain state of one *payment channel*, a PDA of the
+program with seeds `["channel", payer, payee, mint, authorized_signer, salt, open_slot]`.
+Fields the runtime reads: `status` (offset 3), `deposit` (12), `settled` (20),
+`grace_period` (52), `payer` (88), `payee` (120), `authorized_signer` (152), `mint` (184),
+`open_slot` (248). Status values `OPEN 0`, `SEALED 1`, `CLOSING 2`, `DISTRIBUTED 3`.
+Planned decoder: `reconcileChannels` in `src/channels.ts`.
+
+**Channel id** — the base58 address of the *channel account*. Carried as `channelId` in the
+`upto` payload, in `ChannelRecord`, on `PaidResult` and in every `channel` *CloudEvent*.
+
+**Channel record / `ChannelStore`** — planned `src/channels.ts`: the buyer's local row per
+channel in `.allowance/channels.json`, written under the state-dir lock **before** the
+`open` transaction is sent. Fields: `id`, `agent`, `host`, `url`, `network`, `depositMicro`,
+`settledMicro`, `refundMicro`, `withdrawDelay`, `openedAt`, `status`, `txHash`. Statuses:
+`opened` (deposit in escrow), `settled` (seller charged `settledMicro`, refund returned),
+`refunded` (seller charged 0), `unknown` (send failed after the header left; needs
+*reconcile*), `orphaned` (PDA is OPEN on-chain and the seller went silent), `reclaimed`
+(payer escape path completed). CLI: `channels list|reconcile|reclaim|sweep`.
+
+**Channel (payment)** — see *Payment channel*. Not to be confused with a notify *Channel*
+(webhook, email, sms, push, heartbeat, cloud) defined above.
+
+**`channel` (CloudEvent kind)** — planned fifth `CloudEventKind`. `data.phase` is one of
+`opened`, `settled`, `refunded`, `orphaned`, `reclaimed`; `data` also carries `channelId`,
+`host`, `network`, `depositMicro`, `settledMicro`, `refundMicro`, `withdrawDelay`, `txHash`.
+Feeds the *escrow watchdog*. The cloud adds it to `INGEST_KINDS`.
+
+**Cold wallet / `payTo`** — the seller address that finally receives USDC. On an `upto`
+offer it is the single 100 % recipient in the channel's distribution; it never signs.
+Distinct from the two seller hot keys (*fee payer*, *authorized signer*).
+
+**Deposit** — the USDC the buyer moves into the channel escrow at `open`. In `upto` it
+equals the *ceiling*. It is *escrowed* money, neither spent nor available, until the seller
+settles.
+
+**`distribute`** — program instruction 7. After `settleAndSeal`, pays the settled amount to
+the recipients, returns `deposit − settled` to the payer, closes the escrow token account and
+returns rent to the *rent payer*. Permissionless. Needs the treasury ATA for the mint to
+exist, or it fails (`doctor --seller` checks this).
+
+**Escape path (payer)** — what the buyer does when a seller took the deposit and never
+settled: `requestClose` (payer signs) → wait the *grace period* → `seal` (anyone) →
+`withdrawPayer` (payer signs, gets `deposit − settled` back). Planned as
+`reclaimChannel` / `channels reclaim <id>`. Needs ~0.01 SOL in the agent wallet for fees
+(architecture §2.5); `doctor` warns when it is missing.
+
+**Escrow / escrowed** — the third money state next to *spent* and *reserved*: USDC sitting
+in an open channel. Planned formula `spendable = min(totalBudgetUsd, funded) − spent −
+reserved − escrowed`. Shown as its own number "in escrow" on the dashboard, in `status`, in
+the cloud heartbeat (`escrowedMicro`) and in the Cloud overview. Never folded into "spent".
+
+**Escrow watchdog** — planned Wallie Cloud rule: alert when a `channel/opened` event has no
+matching `settled` or `refunded` within N minutes (default 10), and on every
+`channel/orphaned`. Runtime side: `channels reconcile` runs from the dashboard tick and from
+the cloud heartbeat loop while any channel is `opened` or `unknown`.
+
+**`exact` (Solana)** — the x402 scheme allowance-kit already speaks on Base, on Solana:
+the payload is `{ transaction: base64 }`, a v0 transaction (compute budget, `TransferChecked`
+to the seller's USDC ATA, memo) signed by the payer with `extra.feePayer` left unsigned; the
+facilitator co-signs and pays SOL. The buyer needs USDC and no SOL. Supported by CDP
+(mainnet and devnet, API key) and by x402.org's free devnet facilitator. Planned encoder
+`encodePaymentSolanaExact` in `src/solana.ts` (ticket SOL-01).
+
+**Facilitator (Solana)** — for `exact`: CDP (`api.cdp.coinbase.com/platform/v2/x402`,
+Solana mainnet + devnet), x402.org (devnet, free), PayAI (mainnet + devnet). For `upto`:
+**none hosted** as of 2026-09-13 (all three answer `exact` only for Solana on `/supported`),
+so Wallie's seller *self-facilitates*.
+
+**Fee payer / `feePayer`** — the seller-side hot key on an `upto` offer (`extra.feePayer`).
+Co-signs and broadcasts the buyer's `open` transaction, pays SOL fees and rent (it is the
+channel's `payee` and *rent payer*), later signs `settleAndSeal`. Holds SOL. Planned env var
+name `SELLER_FEE_PAYER_KEY`. On `exact` the facilitator's own key plays this role.
+
+**Grace period / `withdrawDelay`** — seconds, set at `open` (`grace_period` in the
+*channel account*, `extra.withdrawDelay` on the offer, must be > 0, no on-chain upper bound).
+After the payer calls `requestClose`, only the payee may settle during the grace period;
+after it, anyone may `seal`. Bounds how long a silent seller can hold the *deposit*. Default
+proposal 900 s for demo sellers; the buyer's *orphan* clock uses the value from the offer.
+
+**Key format (Solana)** — `AGENT_PRIVATE_KEY` on a Solana network is the 64-byte secret as
+base58 (Phantom export) or a JSON array of 64 bytes (`solana-keygen`). Same env var as EVM;
+`normalizePk` in `live.ts` branches by network family; `doctor` names the expected format.
+Vouchers and messages are signed with `node:crypto` Ed25519 from the 32-byte seed; the
+transaction signer is a plain `TransactionPartialSigner` object built from it
+(`solanaSigner` in `src/solana.ts`).
+
+**Meter** — planned object passed as the third argument to a `paymentGate` handler on an
+`upto` request. `meter.charge(microUsd)` sets the actual charge, capped at the *ceiling*. If
+the handler throws or never calls it, the gate refunds (`amount: "0"`). The gate never
+charges for work it did not deliver.
+
+**MPP session** — Machine Payments Protocol (Stripe + Tempo; `mpp.dev`, specs at
+`paymentauth.org`), a **separate protocol from x402** using `WWW-Authenticate: Payment` /
+`Authorization: Payment` / `Payment-Receipt`. Its Solana `session` method
+(`draft-solana-session-00`, 2026-09-09) uses the same program but one channel across many
+requests, client- or operator-signed cumulative vouchers, idle-timeout close and
+`distributionSplits`. **Out of scope by decision** (architecture §2.2); `ChannelStore`
+records `settled` as a cumulative watermark so a session later adds rows, not tables.
+
+**`open`** — program instruction 1. Creates the *channel account* and moves the *deposit*
+into escrow. Signed by the payer (buyer) and the *rent payer* (seller-side *fee payer*).
+Must land within `OPEN_SLOT_WINDOW` (1500 slots, ~10 min) of the `openSlot` in the payload.
+The buyer builds and partially signs it; the seller co-signs and broadcasts it in
+*settleDeposit*.
+
+**Orphan / orphaned** — a channel whose PDA is still OPEN on-chain while the seller's
+settle never arrived (timeout or 5xx after the `open` was broadcast). Detected by
+*reconcile*; starts the *grace period* clock; emits `channel/orphaned`; resolved by the
+*escape path*. Escrowed funds are the new failure mode this state names.
+
+**Payment channel** — the Solana Payment Channels program, id
+`CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX`, repo `solana-foundation/payment-channels`
+(MIT, Cantina audit 2026-07-27), deployed on mainnet-beta, devnet and the *sandbox*. A payer
+escrows a USDC *deposit*; the *authorized signer* issues *vouchers*; the payee settles the
+highest voucher and the rest is refunded. Nine instructions: `open`, `settle`, `topUp`,
+`settleAndSeal`, `requestClose`, `seal`, `distribute`, `withdrawPayer`, `reclaim`. There is
+no instruction called `voucher` or `refund`. Upgrade authority is one bare key per cluster (trust
+assumption, documented, not ours to change).
+
+**Reconcile** — `channels reconcile` / `reconcileChannels(rpc)`: read each non-terminal
+channel's PDA over JSON-RPC `getAccountInfo` and set the local status from the chain:
+absent → drop; SEALED or DISTRIBUTED → `settled`/`refunded` with `settledMicro` from offset
+20; OPEN past its clock → `orphaned`.
+
+**Refund** — in `upto`, the seller settling with `amount: "0"`, or the difference
+`ceiling − actual` returned by `distribute` after a normal settle. Recorded on the buyer as
+`refundMicro` on the `payment` ledger row and the *channel record*; returns to *available*
+the moment the receipt is parsed. Not a separate ledger kind.
+
+**Rent payer** — the account that funds the channel PDA and escrow token account rent at
+`open` and gets it back at `distribute`/`reclaim`. In x402 `upto` this is the seller-side
+*fee payer*. The program supports self-paid rent by the payer, but no SDK wires it.
+
+**Sandbox / `402.surfnet.dev`** — a hosted Surfpool fork of mainnet (RPC
+`https://402.surfnet.dev:8899`, genesis = mainnet, so the mainnet CAIP-2 id) with the
+program and mainnet USDC. Free faucet: `requestAirdrop` and
+`surfnet_setTokenAccount [owner, mint, {amount}]`, no auth. Reset cadence undocumented, so
+tests create fresh accounts every run. Local equivalent `@solana/surfpool`. Test gate
+`SOLANA_SANDBOX=1` (hosted) or `SOLANA_SANDBOX=local`.
+
+**Scheme preference / `preferScheme`** — planned `LiveAgentOptions` field, `"exact" |
+"upto"`. Default: when a seller offers both, take `exact` if its amount fits
+`perCallMaxUsd`, else `upto` if its *ceiling* fits policy. Reason: `exact` has no escrow
+window.
+
+**Self-facilitation** — the seller running the `upto` facilitator role in-process with its
+own *fee payer* and *authorized signer* keys, because no hosted facilitator speaks Solana
+`upto`. Planned `src/seller-upto.ts` wrapping `@x402/svm/upto/facilitator`. When a hosted
+one appears, `paymentGate` gains `facilitatorUrl` and this becomes the fallback.
+
+**`settleAndSeal`** — program instruction 4. Signed by the payee (*fee payer* key). With a
+*voucher* (Ed25519 precompile instruction placed directly before it), raises `settled` to
+the voucher's cumulative amount and seals the channel. With `has_voucher = 0`, seals at the
+current watermark, which for a fresh channel is a full refund. Followed by `distribute`.
+
+**settleDeposit / settleClaim** — the two facilitator calls in an `upto` request. Deposit:
+verify the `open` transaction's shape and signers, simulate, co-sign as *fee payer*,
+broadcast, confirm (before the handler runs). Claim: verify the *voucher*, send the Ed25519
+precompile + `settleAndSeal`, then `distribute` (after the handler). The `PAYMENT-SIGNATURE`
+payload's `type` field is `"deposit"` from the buyer and `"claim"` when the server settles.
+
+**`SOLANA_NETWORKS`** — planned table in `src/solana.ts`: per network the CAIP-2 id, v1
+name, USDC mint (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` mainnet,
+`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` devnet), default RPC and token program.
+The EVM `NETWORKS` table in `live.ts` is untouched.
+
+**Sweep** — `channels sweep` on the seller: retry `distribute` for sealed channels whose
+rent return failed, from a persisted retry list (wraps the library's rent cleanup manager).
+
+**`upto`** — the x402 scheme for a metered call with a ceiling: one HTTP request, one
+*payment channel*. The buyer escrows the *ceiling* as *deposit* by signing an `open`
+transaction; the seller serves, meters, signs one *voucher* for the actual amount, settles
+and seals; the difference is refunded in the same step. Spec
+`specs/schemes/upto/scheme_upto_svm.md` in `x402-foundation/x402`. Offer `extra` fields:
+`paymentFlow: "escrow"`, `feePayer`, `receiverAuthorizer`, `withdrawDelay`, `tokenProgram`,
+`recentBlockhash`, `recentSlot`. Payload: `from, maxAmount, deposit, channelId, expiresAt,
+validAfter, nonce, openSlot, authorizedSigner, openTransaction, type`. Receipt
+`PAYMENT-RESPONSE { success, payer, transaction, network, amount }` where `amount` is the
+actual charge. Planned buyer encoder `encodePaymentSolanaUpto` (SOL-05), seller
+`src/seller-upto.ts` (SOL-04).
+
+**Voucher** — 50 signed bytes: magic `[0x56, 0x01]` (2) || *channel id* (32) ||
+cumulative amount u64 LE (8) || `expires_at` i64 LE (8, `0` = none). **Cumulative, not a
+delta.** No nonce; replay is prevented by the strict `settled < cumulative <= deposit`
+watermark and by `open_slot` being a PDA seed. Ed25519 by the *authorized signer*, verified
+on-chain via the Ed25519 precompile instruction. Planned zero-dep codec `src/voucher.ts`
+(`encodeVoucher`, `decodeVoucher`, `signVoucher`, `verifyVoucher`) using `node:crypto`.
+
+**`wallie-mcp`** — planned package `packages/wallie-mcp`: an MCP (Model Context Protocol)
+stdio server that exposes the runtime as tools `pay_fetch`, `get_budget`, `list_channels`,
+`approve`/`deny`, `reclaim_channel`. Depends on `allowance-kit` and
+`@modelcontextprotocol/sdk`; the zero-dep rule applies to `allowance-kit`, not to this
+adapter. With `demo/mcp-agent/`, the thing judges run.

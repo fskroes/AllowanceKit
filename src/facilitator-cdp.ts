@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { Facilitator } from "./chain.ts";
+import type { Facilitator, FacilitatorKind } from "./chain.ts";
 import type { AcceptsEntry, DecodedPayment, SettleResult, VerifyResult } from "./types.ts";
 
 /**
@@ -72,6 +72,27 @@ export class CdpFacilitator implements Facilitator {
     this.privateKey = normalizePem(secret);
     this.baseUrl = (opts.baseUrl ?? "https://api.cdp.coinbase.com").replace(/\/+$/, "");
     this.x402Version = opts.x402Version ?? 1;
+  }
+
+  /**
+   * `GET /platform/v2/x402/supported` — the (scheme, network) pairs CDP settles.
+   * A Solana `exact` kind carries `extra.feePayer`, the account CDP co-signs and
+   * pays rent/fees for. The seller copies that into its Solana offer so the buyer
+   * builds a two-signature transaction with the fee-payer slot left unsigned.
+   *
+   * Honesty caveat (x402-compat.md §1): the response shape follows the v2 spec
+   * and matches what live facilitators advertise, but has not been round-tripped
+   * against a real CDP `/supported` (needs CDP credentials — out of scope here).
+   */
+  async supported(): Promise<FacilitatorKind[]> {
+    const path = "/platform/v2/x402/supported";
+    const token = this.jwt("GET", path);
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`cdp supported failed: HTTP ${res.status} ${truncate(await res.text())}`);
+    const body = (await res.json()) as { kinds?: FacilitatorKind[] };
+    return body.kinds ?? [];
   }
 
   async verify(payment: DecodedPayment, requirements: AcceptsEntry): Promise<VerifyResult> {

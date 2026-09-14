@@ -116,6 +116,78 @@ test("a v2 facilitator posts x402Version:2 and passes the nested paymentPayload 
   }
 });
 
+// SOL-02: the fee payer for a Solana `exact` offer comes from CDP's v2
+// /supported advertisement. The seller copies extra.feePayer into its offer.
+test("supported() GETs /platform/v2/x402/supported with a bearer jwt and returns the kinds", async () => {
+  const captured: { method?: string; path?: string; auth?: string } = {};
+  const kinds = [
+    { x402Version: 2, scheme: "exact", network: "eip155:8453" },
+    { x402Version: 2, scheme: "exact", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", extra: { feePayer: "FeePayer1111111111111111111111111111111111" } },
+  ];
+  const server = http.createServer((req, res) => {
+    captured.method = req.method;
+    captured.path = req.url;
+    captured.auth = req.headers.authorization;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ kinds }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address() as { port: number };
+  try {
+    const fac = new CdpFacilitator({ apiKeyId: "kid", apiKeySecret: PEM, baseUrl: `http://127.0.0.1:${addr.port}` });
+    const got = await fac.supported();
+    assert.equal(captured.method, "GET", "supported is a GET");
+    assert.equal(captured.path, "/platform/v2/x402/supported");
+    assert.match(captured.auth ?? "", /^Bearer ey/, "carries the ES256 bearer jwt");
+    assert.deepEqual(got, kinds);
+    const sol = got.find((k) => k.network.startsWith("solana:"));
+    assert.equal(sol?.extra?.feePayer, "FeePayer1111111111111111111111111111111111");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+// SOL-02: a v2 Solana body carries the CAIP-2 network and the USDC mint as the
+// asset. CdpFacilitator passes both through to CDP unchanged (no translation).
+test("a v2 Solana body passes the CAIP-2 network and mint asset through unchanged", async () => {
+  const captured: { body?: Record<string, unknown> } = {};
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      captured.body = JSON.parse(body || "{}") as Record<string, unknown>;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ isValid: true, payer: "SoLPayer" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address() as { port: number };
+  try {
+    const fac = new CdpFacilitator({ apiKeyId: "kid", apiKeySecret: PEM, baseUrl: `http://127.0.0.1:${addr.port}`, x402Version: 2 });
+    const solReqs: AcceptsEntry = {
+      scheme: "exact",
+      network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      amount: "10000",
+      resource: "https://api.example.com/data",
+      description: "test",
+      mimeType: "application/json",
+      payTo: "SellerAta1111111111111111111111111111111111",
+      asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      maxTimeoutSeconds: 30,
+      extra: { feePayer: "FeePayer1111111111111111111111111111111111" },
+    };
+    const v2Payload = { x402Version: 2, accepted: solReqs, payload: { transaction: "AQAB..." } };
+    await fac.verify(v2Payload, solReqs);
+    assert.equal(captured.body?.x402Version, 2);
+    const sent = captured.body?.paymentRequirements as AcceptsEntry;
+    assert.equal(sent.network, "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "CAIP-2 network unchanged");
+    assert.equal(sent.asset, "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", "mint asset unchanged");
+    assert.deepEqual(captured.body?.paymentPayload, v2Payload, "nested v2 payload passes through");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("settle maps success/txHash/network and errorReason", async () => {
   await withCaptureServer("settle", { success: true, txHash: "0xtx", network: "base-sepolia" }, async (cap) => {
     assert.equal(cap.path, "/platform/v2/x402/settle");

@@ -28,7 +28,17 @@
  * (MockChain for local/simulated, CdpFacilitator for Coinbase CDP).
  */
 export { payingFetch } from "./payer.ts";
-export type { PaidResult, PayContext, UnsignedPayment, BlockedBy, AuthorizeResult } from "./payer.ts";
+export type {
+  PaidResult,
+  PayContext,
+  UnsignedPayment,
+  BlockedBy,
+  AuthorizeResult,
+  PaymentAnnotations,
+  UptoBuyer,
+  UptoOpen,
+  UptoOutcome,
+} from "./payer.ts";
 
 export {
   createAgent,
@@ -50,6 +60,51 @@ export { usdcBalanceMicro, BalanceCache, RPC_DEFAULTS, RpcError } from "./usdc.t
 export { createLiveAgent, encodePaymentEvm, NETWORKS } from "./live.ts";
 export type { LiveAgentOptions, LiveAgentRuntime, NetworkInfo } from "./live.ts";
 
+export {
+  SOLANA_NETWORKS,
+  solanaSigner,
+  usdcBalanceMicroSolana,
+  solBalanceLamportsSolana,
+  encodePaymentSolanaExact,
+  encodePaymentSolanaUpto,
+} from "./solana.ts";
+export type { SolanaNetworkInfo, SolanaSigner, UptoOpenResult, UptoChannelFacts } from "./solana.ts";
+
+// SOL-03: the Solana `upto` channel primitives and the buyer's escrow store.
+export {
+  VOUCHER_MAGIC,
+  VOUCHER_PAYLOAD_SIZE,
+  encodeVoucher,
+  decodeVoucher,
+  signVoucher,
+  verifyVoucher,
+  checkVoucher,
+} from "./voucher.ts";
+export type { Voucher, VoucherState, VoucherRejection } from "./voucher.ts";
+export {
+  ChannelStore,
+  PAYMENT_CHANNELS_PROGRAM,
+  CHANNEL_STATUS,
+  decodeChannelAccount,
+  solanaAccountRpc,
+  reconcileChannels,
+  reclaimChannel,
+  planReclaim,
+  buildReclaimInstructions,
+} from "./channels.ts";
+export type {
+  OpenChannelInput,
+  ChannelRpc,
+  ChannelOnChain,
+  ReconcileChange,
+  ReclaimOptions,
+  ReclaimResult,
+  ReclaimStep,
+  ReclaimPlan,
+  ChannelInstruction,
+  ReclaimAddresses,
+} from "./channels.ts";
+
 export { MockChain } from "./chain.ts";
 export type { Facilitator } from "./chain.ts";
 
@@ -57,7 +112,34 @@ export { CdpFacilitator } from "./facilitator-cdp.ts";
 export type { CdpFacilitatorOptions } from "./facilitator-cdp.ts";
 
 export { paymentGate } from "./seller.ts";
-export type { GateOptions } from "./seller.ts";
+export type { GateOptions, GateHandler, UptoConfig, SolanaOperatorEnv } from "./seller.ts";
+
+// SOL-04: the self-facilitated Solana `upto` seller.
+export {
+  Meter,
+  uptoPaymentGate,
+  advertiseUptoOffer,
+  InMemoryUptoOperator,
+  createSolanaUptoOperator,
+  toFacilitatorUptoPayload,
+  checkTreasuryAta,
+  DEFAULT_WITHDRAW_DELAY,
+  PAYMENT_CHANNELS_TREASURY_OWNER,
+} from "./seller-upto.ts";
+export type {
+  UptoOperator,
+  UptoGateOptions,
+  UptoHandler,
+  UptoPaymentEnvelope,
+  DepositOutcome,
+  ClaimOutcome,
+  OfferExtraInput,
+  BeforeServeInfo,
+  BeforeServeDecision,
+  InMemoryUptoOperatorOptions,
+  SolanaUptoOperatorOptions,
+  TreasuryAtaCheck,
+} from "./seller-upto.ts";
 
 export {
   PolicyStore,
@@ -108,9 +190,21 @@ export { ReservationStore } from "./reservations.ts";
 export type { Reservation } from "./reservations.ts";
 
 /** The five x402-priced sample APIs behind `allowance demo`. */
-export { startSellerApis, describeServers } from "./demo-servers.ts";
-export type { DemoServer, PaidApiCatalog } from "./demo-servers.ts";
+export { startSellerApis, describeServers, startUptoDemoServer } from "./demo-servers.ts";
+export type { DemoServer, PaidApiCatalog, UptoDemoServer } from "./demo-servers.ts";
 export { runDemo } from "./demo-run.ts";
+
+// SOL-07: the MCP server surface. The `@modelcontextprotocol/sdk` is loaded
+// lazily inside these, so importing `allowance-kit` never pulls the MCP stack in.
+export {
+  createMcpServer,
+  runMcpStdio,
+  resolveBinding,
+  handleToolCall,
+  TOOL_DEFINITIONS,
+  defaultStateDir,
+} from "./mcp.ts";
+export type { McpRuntimeOptions, McpBinding } from "./mcp.ts";
 
 export { usd, fmtUsd, fmtUsdExact, MICRO } from "./money.ts";
 export type {
@@ -120,4 +214,8 @@ export type {
   DecodedPayment,
   VerifyResult,
   SettleResult,
+  SolanaExactPayload,
+  UptoPayload,
+  ChannelRecord,
+  ChannelStatus,
 } from "./types.ts";
