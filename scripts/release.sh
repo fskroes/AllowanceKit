@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Release allowance-kit and its wallie alias together.
+# Release allowance-kit, its wallie alias, and wallie-mcp together.
 #
 #   scripts/release.sh 0.5.0              # do it
 #   scripts/release.sh --dry-run 0.5.0    # print every step, touch nothing
@@ -8,7 +8,7 @@
 # What it does, in order: assert a clean tree on main, run the tests and build,
 # bump allowance-kit and the wallie alias to <version> (alias pinned to
 # allowance-kit@^<version>), promote the CHANGELOG's [Unreleased] section, commit
-# and tag v<version>, publish both packages, then push main and the tag.
+# and tag v<version>, publish all three packages, then push main and the tag.
 #
 # Provenance (`--provenance`, so the registry shows which commit/CI run built the
 # tarball) requires publishing from GitHub Actions with an OIDC token — it is
@@ -58,7 +58,7 @@ stop() {
   if [ "$DRY" = 1 ]; then warn "$1 (ignored in --dry-run)"; else echo "  x $1" >&2; exit 1; fi
 }
 
-say "Releasing allowance-kit and wallie @ $VERSION${DRY:+  (dry-run)}"
+say "Releasing allowance-kit, wallie, and wallie-mcp @ $VERSION"
 
 say "Preconditions"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -90,12 +90,17 @@ step "npm version $VERSION --no-git-tag-version --allow-same-version"
 step "npm --prefix packages/wallie version $VERSION --no-git-tag-version --allow-same-version"
 # The alias pins allowance-kit to the matching minor so `npx wallie` is never a version behind.
 step "npm --prefix packages/wallie pkg set dependencies.allowance-kit=^$VERSION"
+step "npm --prefix packages/wallie-mcp version $VERSION --no-git-tag-version --allow-same-version"
+step "npm --prefix packages/wallie-mcp pkg set dependencies.allowance-kit=^$VERSION"
+
+say "Verify the packed SDK, CLI aliases, and MCP server in a fresh consumer"
+step "node scripts/verify-release.ts"
 
 say "CHANGELOG"
 step "node scripts/changelog-release.mjs $VERSION"
 
 say "Commit and tag"
-step "git add package.json package-lock.json packages/wallie/package.json CHANGELOG.md"
+step "git add package.json package-lock.json packages/wallie/package.json packages/wallie-mcp/package.json CHANGELOG.md"
 step "git commit -m \"release: v$VERSION\""
 step "git tag -a v$VERSION -m \"v$VERSION\""
 
@@ -109,10 +114,11 @@ step "npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\""
 # \$NPM_ACCESS_TOKEN) applies; pass it explicitly so publish never falls back to
 # the dead token in ~/.npmrc.
 step "( cd packages/wallie && npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\" )"
+step "( cd packages/wallie-mcp && npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\" )"
 
 say "Push"
 step "git push origin main --follow-tags"
 
 say "Done — verify from a clean directory"
-printf '  npx allowance-kit@%s --version\n  npx wallie@%s --version\n  npx wallie demo\n' "$VERSION" "$VERSION"
+printf '  npx allowance-kit@%s --version\n  npx wallie@%s --version\n  npx wallie-mcp@%s\n' "$VERSION" "$VERSION" "$VERSION"
 if [ "$DRY" = 1 ]; then printf '\n(dry-run: nothing above was executed)\n'; fi

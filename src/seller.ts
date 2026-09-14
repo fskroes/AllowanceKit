@@ -43,6 +43,9 @@ export interface SolanaOperatorEnv {
   receiverAuthorizerKeyEnv: string;
   rpcUrl?: string;
   maxChannelLifetimeSecs?: number;
+  /** Durable seller cleanup index. Default ALLOWANCE_SELLER_STATE_DIR or .allowance-seller. */
+  stateDir?: string;
+  cleanupIntervalSecs?: number | false;
 }
 
 export interface GateOptions {
@@ -155,9 +158,9 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
   const version = versionFor(network);
   const uptoEnabled = Boolean(opts.upto) && isSolana;
 
-  // The `upto` sub-gate and its operator are built once, on first need, so a
-  // seller that never receives an `upto` request (or a non-Solana seller) never
-  // constructs an operator or loads a Solana library.
+  // Build the operator once. Configured Solana sellers start it at boot so
+  // persisted cleanup runs even if no new buyer arrives after a restart.
+  // Other networks and gates without upto never load a Solana library.
   let uptoGate: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
   let uptoOptions: UptoGateOptions | undefined;
   let uptoBuild: Promise<UptoGateOptions> | undefined;
@@ -168,7 +171,7 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
     if (!operator) {
       if (!opts.solanaOperator)
         throw new Error("upto gate needs either `upto.operator` or `solanaOperator` env-var names");
-      const { feePayerKeyEnv, receiverAuthorizerKeyEnv, rpcUrl, maxChannelLifetimeSecs } = opts.solanaOperator;
+      const { feePayerKeyEnv, receiverAuthorizerKeyEnv, rpcUrl, maxChannelLifetimeSecs, stateDir, cleanupIntervalSecs } = opts.solanaOperator;
       const feeRaw = process.env[feePayerKeyEnv]?.trim();
       const authRaw = process.env[receiverAuthorizerKeyEnv]?.trim();
       if (!feeRaw) throw new Error(`${feePayerKeyEnv} is not set — the upto feePayer key`);
@@ -180,6 +183,8 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
         rpcUrl,
         withdrawDelay: cfg.withdrawDelay,
         maxChannelLifetimeSecs,
+        stateDir,
+        cleanupIntervalSecs,
       });
     }
     return {
@@ -203,6 +208,12 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
     return uptoOptions;
   };
 
+  if (uptoEnabled && opts.solanaOperator && !opts.upto?.operator) {
+    // Preserve the exact-only fallback for bad upto configuration; callers can
+    // await ready() during startup when upto availability is required.
+    void ensureUpto().catch(() => undefined);
+  }
+
   const allOffers = async (resource: string): Promise<AcceptsEntry[]> => {
     const offers = await advertise(opts, resource);
     if (uptoEnabled) {
@@ -215,7 +226,7 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
     return offers;
   };
 
-  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const host = req.headers.host ?? "localhost";
     const resource = `http://${host}${req.url ?? "/"}`;
     const header = req.headers["x-payment"];
@@ -290,4 +301,35 @@ export function paymentGate(opts: GateOptions, handler: GateHandler) {
     ).toString("base64"));
     await handler(req, res);
   };
+
+  let stopped = false;
+  let stopPromise: Promise<void> | undefined;
+  const inFlight = new Set<Promise<void>>();
+  return Object.assign((req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (stopped) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "seller is shutting down" }));
+      return Promise.resolve();
+    }
+    const request = serve(req, res);
+    inFlight.add(request);
+    void request.then(() => inFlight.delete(request), () => inFlight.delete(request));
+    return request;
+  }, {
+    /** Initialize the configured upto operator before accepting HTTP traffic. */
+    async ready(): Promise<void> {
+      if (stopped) throw new Error("seller is shutting down");
+      if (uptoEnabled) await ensureUpto();
+    },
+    /** Stop accepting payments, drain handlers, then stop the library cleanup worker. */
+    stop(): Promise<void> {
+      stopped = true;
+      stopPromise ??= (async () => {
+        await Promise.allSettled(inFlight);
+        const built = uptoOptions ?? await uptoBuild?.catch(() => undefined);
+        await built?.operator.stop?.();
+      })();
+      return stopPromise;
+    },
+  });
 }

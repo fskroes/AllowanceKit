@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { writeStateFile } from "./state-file.ts";
 
 /**
  * Money that has been authorized but has not settled yet.
@@ -51,7 +52,7 @@ export class ReservationStore {
   }
 
   private write(f: ReservationFile): void {
-    fs.writeFileSync(this.file, JSON.stringify(f, null, 2));
+    writeStateFile(this.file, f);
   }
 
   private live(): Reservation[] {
@@ -76,7 +77,7 @@ export class ReservationStore {
 
   /** Drops a reservation — either it became a ledger payment, or it failed. */
   close(id: string): Reservation | undefined {
-    const open = this.live();
+    const open = this.read().open;
     const found = open.find((r) => r.id === id);
     this.write({ open: open.filter((r) => r.id !== id) });
     return found;

@@ -242,7 +242,7 @@ src/
 test/               zero-dependency node --test suite
 ```
 
-The buyer supports x402 v1 and v2 for exact USDC payments on Base and Base Sepolia. Seller middleware remains v1. See [the compatibility guide](docs/x402-compat.md) for supported shapes and limitations.
+The buyer supports exact USDC payments on Base, Base Sepolia, Solana, and Solana devnet, plus Solana `upto` payment channels. See [the compatibility guide](docs/x402-compat.md) for supported wire shapes and validation limits.
 
 ### Sellers
 
@@ -315,6 +315,74 @@ node --env-file=.env scripts/canary.ts --buyer --network base   # mainnet, real 
 
 It funds a $0.20 allowance with a $0.05 per-call cap, settles a real $0.01 payment through a CDP facilitator, then tightens the cap and checks the next payment is refused — and fails loudly if the audit ledger does not show exactly one payment and one block.
 
+## Solana
+
+Version 0.6.0 adds Solana `exact` and `upto` payments. The recorded public devnet
+canary deposited **$0.10**, paid **$0.03**, and refunded **$0.07** in a finalized
+transaction. [Inspect the canary record](docs/canary-runs/2026-09-14-solana-devnet-upto.md).
+This is devnet evidence; it does not establish Solana mainnet production readiness.
+
+For a repeatable demo with no keys or funded accounts, use Node 24 or later:
+
+```bash
+git clone --branch v0.6.0 --depth 1 https://github.com/fskroes/AllowanceKit.git
+cd AllowanceKit
+npm ci
+npm run demo:mcp
+```
+
+The exact phase uses the local practice rail. The Solana metered phase builds the
+channel transaction and uses an offline seller operator. The public devnet canary
+is separate. [Submission materials and videos](docs/submission/README.md).
+
+For a live Solana project, install the optional chain libraries:
+
+```bash
+npm install allowance-kit@0.6.0 @solana/kit@^5.5.1 @x402/svm@^2.25.0 @solana-program/token@^0.9.0
+export AGENT_PRIVATE_KEY='your Solana secret key'
+npx allowance-kit init --live --network solana-devnet
+npx allowance-kit doctor
+# Send devnet USDC to the displayed address before making a live payment.
+npx allowance-kit topup 1.00
+npx allowance-kit policy perCallMaxUsd 0.10
+npx allowance-kit policy allowHostSuffixes your-seller.example
+npx allowance-kit channels list
+```
+
+The key accepts a base58 secret or a `solana-keygen` JSON array. It stays in the
+environment. `topup` changes the permitted allowance; it does not transfer tokens.
+The seller sponsors the normal payment path. Buyer reclaim requires SOL.
+
+Channel accounting survives missing receipts and process restarts. A resolved
+payment enters the ledger before its escrow is released, and repeated recovery
+does not count the same payment or grant refund twice. Missing account data alone
+does not prove a refund: the runtime checks finalized channel history. If evidence
+is unavailable, the deposit remains held. Corrupt channel state blocks new
+authorization instead of silently resetting spending limits.
+
+```bash
+npx allowance-kit channels reconcile
+npx allowance-kit channels reclaim CHANNEL_ID
+```
+
+Solana sellers start the library cleanup worker automatically. Its public channel
+index is persisted in `.allowance-seller/seller-channels.json`, or the directory
+set by `ALLOWANCE_SELLER_STATE_DIR`. Keys are excluded from this file. An explicit
+recovery sweep is also available:
+
+```bash
+npx allowance-kit channels sweep --seller --network solana-devnet \
+  --seller-state-dir .allowance-seller
+```
+
+Configure the seller keys through `SELLER_FEE_PAYER_KEY` and
+`SELLER_AUTHORIZER_KEY`. The library submits `settleAndSeal` and `distribute`
+atomically. A failed transaction can leave the channel open; cleanup follows the
+library's abandon-close rules after expiry and its 120 second grace period. It
+does not replay a failed charge. Await `gate.ready()` before listening and
+`gate.stop()` after closing the HTTP server. Direct operator users must await
+`operator.stop()` too.
+
 ## MCP server
 
 Give an MCP client — Claude Desktop, an agent framework, anything that speaks the
@@ -325,7 +393,7 @@ the CLI uses over stdio, so the agent pays x402 APIs (Base or Solana, `exact` or
 ```bash
 export AGENT_PRIVATE_KEY=0x...          # only for a live directory; a fresh one is practice money
 export ALLOWANCE_STATE_DIR=.allowance  # optional, this is the default
-npx wallie-mcp                          # speaks MCP over stdio
+npx wallie-mcp@0.6.0                    # speaks MCP over stdio; includes chain libraries
 ```
 
 Point a client at it, e.g. in Claude Desktop's `claude_desktop_config.json`:
@@ -347,6 +415,11 @@ Five tools, over stdio:
 | `list_channels()` | The buyer's book of Solana `upto` payment channels — each deposit's status, settled and refunded amounts. |
 | `decide_approval(id, approve)` | Approve or deny a payment the rails queued for a human; approving mints a time-boxed, budget-limited grant. |
 | `reclaim_channel(id)` | Sweep an orphaned Solana channel's deposit back to the wallet after its grace period. |
+
+Approval tools are administrative authority. A client that receives
+`decide_approval` can approve queued requests; do not give that authority to an
+untrusted agent and call it a separate human approval boundary. Wallet keys and
+state-directory write access also require a trusted process.
 
 The server binds one runtime, resolved from the state directory exactly as the CLI
 resolves it: `mode.json` says whether it is live, `AGENT_PRIVATE_KEY` supplies the
@@ -417,4 +490,5 @@ See [BUSINESS.md](BUSINESS.md).
 
 ## Changes
 
-See [CHANGELOG.md](CHANGELOG.md) for release history and current limitations. The published package version at this update is **0.5.1**.
+See [CHANGELOG.md](CHANGELOG.md) for release history and current limitations, and
+[npm](https://www.npmjs.com/package/allowance-kit) for the currently published version.

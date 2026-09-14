@@ -10,13 +10,26 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
-The Solana rail (tickets **SOL-01 … SOL-09**, branch `feat/solana-exact-rail`) adds a
+The Solana rail and submission package (tickets **SOL-01 … SOL-10**) add a
 second chain family — `exact` payments symmetric with Base, and a self-facilitated `upto`
 payment-channel scheme for metered calls — behind the same allowance runtime, rails, ledger
 and cloud. `@x402/svm` and `@solana/kit` are optional peers, lazy-loaded; a Base agent never
 resolves them. All entries below are grouped newest ticket first.
 
 ### Added
+
+- **Submission pack (SOL-10).** Reproducible pitch and walkthrough sources under
+  `demo/submission/`, hand-in text and proof links under `docs/submission/`, and
+  an installable `wallie-mcp` package with its chain libraries. The release flow
+  publishes `allowance-kit`, `wallie`, and `wallie-mcp` together.
+- **Fresh-consumer release check.** `node scripts/verify-release.ts` packs all
+  three packages, installs them in a temporary project, and exercises SDK imports,
+  the CLI alias, the CLI demo, and MCP tool discovery over a real stdio transport.
+- **Persistent seller cleanup.** The library's cleanup worker starts at seller
+  initialization, saves only public channel facts, resumes after restart, and
+  stops through `gate.stop()` or `operator.stop()`. `channels sweep --seller`
+  provides an explicit recovery command. Atomic claim failures leave channels
+  recoverable under the program's expiry and refund rules.
 
 - **Solana canary + compat docs (SOL-09).** `scripts/canary-solana.ts` is the Solana twin
   of `scripts/canary.ts`: phase A proves the `upto` buyer, rails and escrow book hermetically
@@ -107,6 +120,18 @@ resolves them. All entries below are grouped newest ticket first.
   agent proves, in a test, that `@solana/kit` is never resolved.
 
 ### Fixed
+
+- **Recovered payments remain spent.** Channel recovery records settlement in
+  the ledger before releasing escrow. Channel identifiers make repeated receipt,
+  reconciliation, and grant-refund processing idempotent across process restarts.
+- **Unknown channel outcomes cannot reset an allowance.** Missing account data
+  is checked against finalized transaction history. Incomplete evidence keeps
+  deposits held. Sealed channels retain their unsettled escrow, and reclaim
+  rereads the watermark after the grace period.
+- **Corrupt channel state blocks authorization.** Channel files use validated
+  schemas and atomic replacement; malformed data is an error, not an empty book.
+- **Pinned Solana Kit compatibility.** The optional peer now stays on the
+  tested 5.x major instead of accepting every future major.
 
 - **Lockfile install of the Solana peer tree.** `@x402/svm` pins its own nested
   `@solana-program/token-2022`, whose `@solana/*` peers must sit where that nested

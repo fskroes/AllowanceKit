@@ -139,7 +139,7 @@ function paymentRows(dir: string): Extract<LedgerEvent, { t: "payment" }>[] {
   return new Ledger(dir).read().filter((e): e is Extract<LedgerEvent, { t: "payment" }> => e.t === "payment");
 }
 
-test("sandbox: a metered upto buy settles the actual on-chain and refunds the rest", gate, async () => {
+test("sandbox: a metered upto buy settles the actual on-chain and refunds the rest", gate, async (t) => {
   const dir = tmpDir();
   const feePayer = keypair();
   const authorizer = keypair();
@@ -150,7 +150,9 @@ test("sandbox: a metered upto buy settles the actual on-chain and refunds the re
     feePayerSecret: feePayer.secret,
     receiverAuthorizerSecret: authorizer.secret,
     rpcUrl: SANDBOX_URL,
+    stateDir: dir,
   });
+  t.after(() => operator.stop());
   const seller = await startSeller(operator);
   const { live, kp } = await fundedBuyer(dir);
 
@@ -189,7 +191,7 @@ test("sandbox: a metered upto buy settles the actual on-chain and refunds the re
   }
 });
 
-test("sandbox: an unsettled deposit orphans, then the payer reclaims it (withdrawDelay 5)", gate, async () => {
+test("sandbox: an unsettled deposit orphans, then the payer reclaims it (withdrawDelay 5)", gate, async (t) => {
   const dir = tmpDir();
   const feePayer = keypair();
   const authorizer = keypair();
@@ -203,7 +205,9 @@ test("sandbox: an unsettled deposit orphans, then the payer reclaims it (withdra
     receiverAuthorizerSecret: authorizer.secret,
     rpcUrl: SANDBOX_URL,
     withdrawDelay: 5,
+    stateDir: dir,
   });
+  t.after(() => real.stop());
   const stalling: UptoOperator = {
     offerExtra: (i) => real.offerExtra(i),
     openDeposit: (e: UptoPaymentEnvelope): Promise<DepositOutcome> => real.openDeposit(e),

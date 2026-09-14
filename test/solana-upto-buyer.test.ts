@@ -389,3 +389,72 @@ test("upto buyer: a transport error after the deposit is built marks the channel
     globalThis.fetch = realFetch;
   }
 });
+
+test("a live agent recovers unknown escrow at startup without a Cloud connection", async (t) => {
+  const { DEFAULT_AGENT_NAME } = await import("../src/wallet.ts");
+  const { PAYMENT_CHANNELS_PROGRAM } = await import("../src/channels.ts");
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add({ channelId: randomAddr(), agent: DEFAULT_AGENT_NAME,
+    url: "https://api.example.com/meter", host: "api.example.com", network: "solana-devnet",
+    depositMicro: 100_000n, withdrawDelay: 900 });
+  store.markUnknown(rec.channelId);
+  const account = Buffer.alloc(256);
+  account[0] = 1; account[1] = 1; account[3] = 3;
+  account.writeBigUInt64LE(100_000n, 12); account.writeBigUInt64LE(30_000n, 20);
+  let reads = 0;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const { method, params } = JSON.parse(String(init.body));
+    assert.equal(method, "getAccountInfo");
+    assert.equal(params[1].commitment, "finalized");
+    reads++;
+    return Response.json({ result: { value: { owner: PAYMENT_CHANNELS_PROGRAM, data: [account.toString("base64"), "base64"] } } });
+  });
+  const live = await buyer(dir);
+  try {
+    for (let i = 0; i < 100 && store.get(rec.channelId)?.status !== "settled"; i++)
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reads, 1);
+    assert.equal(store.get(rec.channelId)?.status, "settled");
+    assert.equal(live.ledger.spendTotal(live.agentName), 30_000n);
+    assert.equal(live.notifyStore.load().cloud?.enabled ?? false, false);
+  } finally { live.stopHeartbeat?.(); }
+});
+
+test("reclaim records the watermark after grace, including a seller claim during the wait", async (t) => {
+  const { reclaimChannel, PAYMENT_CHANNELS_PROGRAM } = await import("../src/channels.ts");
+  const { solanaSigner, normalizeSolanaKey } = await import("../src/solana.ts");
+  const signer = solanaSigner(normalizeSolanaKey(keyJson()));
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add({ channelId: randomAddr(), agent: "default", payer: signer.address, mint: randomAddr(),
+    network: "solana-devnet", url: "https://api.example.com", host: "api.example.com", depositMicro: 100_000n, withdrawDelay: 1 });
+  const account = Buffer.alloc(256);
+  account[0] = 1; account[1] = 1;
+  account.writeBigUInt64LE(100_000n, 12); account.writeUInt32LE(1, 52);
+  let sends = 0;
+  let waited = false;
+  const signature = getBase58Decoder().decode(new Uint8Array(64).fill(1));
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const { method, id } = JSON.parse(String(init.body));
+    let result: unknown;
+    if (method === "getAccountInfo") result = { value: { owner: PAYMENT_CHANNELS_PROGRAM, data: [account.toString("base64"), "base64"] } };
+    else if (method === "getLatestBlockhash") result = { context: { slot: 100 }, value: { blockhash: randomAddr(), lastValidBlockHeight: 1000 } };
+    else if (method === "sendTransaction") {
+      sends++;
+      if (sends === 1) account[3] = 2;
+      if (sends === 2) account[3] = 1;
+      if (sends === 3) account.writeBigInt64LE(1n, 44);
+      result = signature;
+    } else if (method === "getSignatureStatuses") result = { context: { slot: 100 }, value: [{ slot: 100, confirmations: null, err: null, confirmationStatus: "finalized" }] };
+    else assert.fail(`unexpected RPC ${method}`);
+    return Response.json({ jsonrpc: "2.0", id, result });
+  });
+  const result = await reclaimChannel(rec, signer, { rpcUrl: "https://rpc.example.com", gracePaddingSeconds: 0,
+    sleep: async () => { waited = true; account.writeBigUInt64LE(30_000n, 20); } });
+  assert.equal(waited, true);
+  assert.equal(sends, 3);
+  assert.equal(result.refundMicro, 70_000n);
+  store.markReclaimed(rec.channelId, result.refundMicro);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+});

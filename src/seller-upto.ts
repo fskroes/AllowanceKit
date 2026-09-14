@@ -5,6 +5,7 @@ import { signVoucher } from "./voucher.ts";
 import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import type { AcceptsEntry, UptoPayload } from "./types.ts";
 import { RpcError } from "./usdc.ts";
+import { SellerChannelStorage } from "./seller-channels.ts";
 
 /**
  * The seller side of the Solana `upto` scheme, self-facilitated
@@ -132,6 +133,8 @@ export interface UptoOperator {
   offerExtra(input: OfferExtraInput): Promise<Record<string, unknown>>;
   openDeposit(env: UptoPaymentEnvelope): Promise<DepositOutcome>;
   settleClaim(env: UptoPaymentEnvelope, actualMicro: bigint): Promise<ClaimOutcome>;
+  /** Stop owned background work and wait for in-flight cleanup. */
+  stop?(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +602,37 @@ export interface SolanaUptoOperatorOptions {
   withdrawDelay?: number;
   /** Facilitator ceiling on channel lifetime, seconds. Default 3600. */
   maxChannelLifetimeSecs?: number;
+  /** Durable seller index directory. Default ALLOWANCE_SELLER_STATE_DIR or .allowance-seller. */
+  stateDir?: string;
+  /** Background cleanup interval, seconds. Default 60; false for one-shot CLI workers. */
+  cleanupIntervalSecs?: number | false;
+  /** Reports background failures; failed channels stay in the durable index. */
+  onCleanupError?: (error: unknown, context?: { channelId?: string }) => void;
+}
+
+export interface SellerCleanupReport {
+  closed: Array<{ channelId: string; transaction: string; action: "abandon_close" | "distribute" }>;
+  reclaimed: Array<{ channelIds: string[]; transaction: string }>;
+  errors: Array<{ channelId?: string; error: string }>;
+  pending: number;
+}
+
+interface RentCleanupOptions {
+  onClose?: (result: SellerCleanupReport["closed"][number]) => void;
+  onReclaim?: (result: SellerCleanupReport["reclaimed"][number]) => void;
+  onError?: (error: unknown, context?: { channelId?: string }) => void;
+}
+
+export interface SellerRentCleanupManager {
+  start(options: RentCleanupOptions & { intervalSecs: number }): void;
+  cleanup(options?: RentCleanupOptions): Promise<void>;
+  stop(): Promise<void>;
+}
+
+export interface SolanaUptoOperator extends UptoOperator {
+  rentCleanupManager(): SellerRentCleanupManager;
+  sweep(): Promise<SellerCleanupReport>;
+  stop(): Promise<void>;
 }
 
 // A minimal view of the parts of @x402/svm we call, declared locally so the
@@ -615,7 +649,7 @@ interface UptoFacilitator {
     payload: Record<string, unknown>,
     requirements: Record<string, unknown>,
   ): Promise<FacilitatorSettleResponse>;
-  createRentCleanupManager(network: string): unknown;
+  createRentCleanupManager(network: string): SellerRentCleanupManager;
 }
 
 /**
@@ -667,16 +701,21 @@ export function toFacilitatorUptoPayload(
  * signature verifies, and the on-chain `settle_and_seal` omits the voucher
  * instruction for a zero charge, returning the whole deposit.
  *
- * The returned object also exposes `rentCleanup()` to start the facilitator's
- * `UptoSvmRentCleanupManager` (wrapped, not rewritten — §4.4).
+ * A durable channel index feeds the library's cleanup worker, started by
+ * default. `sweep()` runs one pass; `stop()` drains it during server shutdown.
  */
 export async function createSolanaUptoOperator(
   opts: SolanaUptoOperatorOptions,
-): Promise<UptoOperator & { rentCleanupManager(): unknown }> {
+): Promise<SolanaUptoOperator> {
   const info = solanaNetworkInfo(opts.network);
   if (!info) throw new Error(`createSolanaUptoOperator needs a Solana network, got "${opts.network}"`);
   const rpcUrl = opts.rpcUrl ?? info.defaultRpc;
   const withdrawDelay = opts.withdrawDelay ?? DEFAULT_WITHDRAW_DELAY;
+  const cleanupIntervalSecs = opts.cleanupIntervalSecs ?? 60;
+  if (cleanupIntervalSecs !== false && (!Number.isFinite(cleanupIntervalSecs) || cleanupIntervalSecs <= 0))
+    throw new Error("cleanupIntervalSecs must be positive, or false for a one-shot worker");
+  const storage = new SellerChannelStorage(opts.stateDir);
+  await storage.list(); // Fail closed before creating a signer or accepting deposits.
 
   let kit: typeof import("@solana/kit");
   let svm: { toFacilitatorSvmSigner: (s: unknown, cfg?: unknown) => unknown };
@@ -692,10 +731,20 @@ export async function createSolanaUptoOperator(
   const feeKp = await kit.createKeyPairSignerFromBytes(opts.feePayerSecret);
   const feePayerAddress = feeKp.address as unknown as string;
   const facSigner = svm.toFacilitatorSvmSigner(feeKp, { defaultRpcUrl: rpcUrl });
-  const facilitator = new facCtor(facSigner, { maxChannelLifetimeSecs: opts.maxChannelLifetimeSecs });
+  const facilitator = new facCtor(facSigner, {
+    maxChannelLifetimeSecs: opts.maxChannelLifetimeSecs,
+    channelStorage: storage,
+  });
 
   // Our own Ed25519 receiver-authorizer, address derived from the secret.
   const authorizerAddress = deriveAddress(opts.receiverAuthorizerSecret);
+  const cleanup = facilitator.createRentCleanupManager(info.caip2);
+  if (cleanupIntervalSecs !== false) cleanup.start({
+    intervalSecs: cleanupIntervalSecs,
+    onError: opts.onCleanupError ?? ((error, context) => {
+      console.warn(`seller cleanup failed${context?.channelId ? ` for ${context.channelId}` : ""}: ${errMsg(error)}`);
+    }),
+  });
 
   const requirementsFor = (accepted: AcceptsEntry, amountMicro: bigint): Record<string, unknown> => ({
     scheme: "upto",
@@ -767,9 +816,20 @@ export async function createSolanaUptoOperator(
       return { txHash: resp.transaction, settledMicro: actualMicro };
     },
 
-    rentCleanupManager(): unknown {
-      return facilitator.createRentCleanupManager(info.caip2);
+    rentCleanupManager(): SellerRentCleanupManager {
+      return cleanup;
     },
+    async sweep(): Promise<SellerCleanupReport> {
+      const report: SellerCleanupReport = { closed: [], reclaimed: [], errors: [], pending: 0 };
+      await cleanup.cleanup({
+        onClose: result => report.closed.push(result),
+        onReclaim: result => report.reclaimed.push(result),
+        onError: (error, context) => report.errors.push({ channelId: context?.channelId, error: errMsg(error) }),
+      });
+      report.pending = (await storage.list()).filter(r => r.network === info.caip2).length;
+      return report;
+    },
+    stop: () => cleanup.stop(),
   };
 }
 
@@ -825,7 +885,7 @@ export async function checkTreasuryAta(network: string, rpcUrl?: string): Promis
 
   try {
     const { solanaAccountRpc } = await import("./channels.ts");
-    const data = await solanaAccountRpc(rpc).getAccountData(ata);
+    const data = await solanaAccountRpc(rpc, 8000, info.tokenProgram).getAccountData(ata);
     if (data === null) return { ok: false, detail: `treasury ATA ${ata} does not exist — \`distribute\` will fail for this mint`, ata };
     return { ok: true, detail: `treasury ATA ${ata} exists`, ata };
   } catch (e) {

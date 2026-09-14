@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1280,initial-scale=1">
+  <title>Wallie submission scene</title>
+  <style>{{STYLES}}</style>
+</head>
+<body>
+  <main id="stage" aria-live="off"></main>
+  <script>
+    (() => {
+      const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[char]);
+      const pill = (text, kind = "") => `<span class="pill ${kind}">${esc(text)}</span>`;
+      const terminal = (label, text) => `<div class="terminal"><div class="terminal-bar"><span>${esc(label)}</span><span class="dots"><i></i><i></i><i></i></span></div><pre>${esc(text)}</pre></div>`;
+      const box = (title, text, value = "") => `<article class="box"><div class="box-title">${esc(title)}</div>${value ? `<div class="box-value">${esc(value)}</div>` : ""}<p>${esc(text)}</p></article>`;
+      const metric = (value, label, color = "") => `<div class="metric"><strong class="${color}">${esc(value)}</strong><span>${esc(label)}</span></div>`;
+      const title = (scene) => `<header><div class="eyebrow">${esc(scene.eyebrow)}</div><h1>${esc(scene.title)}</h1><p class="subtitle">${esc(scene.subtitle)}</p></header>`;
+      const frame = (scene, body, footer = "WALLIE  ·  SOLANA") => `<div class="frame"><div class="brand"><span class="mark">W</span><span>WALLIE</span><span class="brand-sep">/</span><span class="brand-muted">SOLANA</span><span class="brand-right">AGENT PAYMENT RAILS</span></div>${title(scene)}<section class="content">${body}</section><footer><span>${esc(footer)}</span><span class="page-mark">ALLOWANCE  /  ACCOUNTING</span></footer></div>`;
+      const rows = (items) => `<div class="rows">${items.map((item, index) => `<div class="row"><span class="row-no">0${index + 1}</span><span class="row-label">${esc(item[0])}</span><span class="row-detail">${esc(item[1])}</span><span class="row-state">${esc(item[2] || "CHECKED")}</span></div>`).join("")}</div>`;
+
+      window.renderScene = (scene, evidence) => {
+        let body = "";
+        switch (scene.visual) {
+          case "intro":
+            body = `<div class="intro-grid"><div class="big-mark">W</div><div class="intro-copy"><div class="rule-line"><span></span> POLICY BEFORE PAYMENT</div><div class="intro-note">An agent can act<br><b>inside an allowance.</b></div></div><div class="stat-stamp">${pill("OPEN SOURCE")}<strong>x402</strong><span>BUYER RUNTIME</span></div></div>`;
+            break;
+          case "policy":
+            body = rows([["Destination", "Host allowlist", "ALLOWLIST"], ["Price", "Per call ceiling", "CAP"], ["Rate", "Rolling spend window", "BREAKER"], ["Total", "Funded allowance", "BUDGET"]]) + `<div class="policy-foot">${pill("KILL SWITCH", "green")}<span>Every decision happens before the payment is signed.</span></div>`;
+            break;
+          case "schemes":
+            body = `<div class="scheme-grid">${box("EXACT", "One fixed price for one API request.", "$0.001")}${box("UPTO", "Escrow a ceiling. Settle actual usage and return the rest.", "$0.10 MAX")}</div><div class="flow-line"><span>QUOTE</span><b>→</b><span>AUTHORIZE</span><b>→</b><span>SETTLE</span><b>→</b><span>RECEIPT</span></div>`;
+            break;
+          case "escrow":
+            body = `<div class="equation"><span>FUNDED</span><b>−</b><span>SPENT</span><b>−</b><span>RESERVED</span><b>−</b><span class="accent">ESCROWED</span><b>=</b><span>AVAILABLE</span></div><div class="escrow-card"><div class="escrow-label">ONE ALLOWANCE · ONE ACCOUNTING MODEL</div><div class="balance-bar"><span class="spent-segment"></span><span class="escrow-segment"></span><span class="available-segment"></span></div><div class="bar-legend"><span>Spent</span><span>Committed in channel</span><span>Available</span></div></div><div class="policy-foot">${pill("UNCERTAIN OUTCOME", "amber")}<span>Hold the commitment until chain evidence resolves it.</span></div>`;
+            break;
+          case "interfaces":
+            body = `<div class="interface-grid">${box("SDK", "payingFetch()", "01")}${box("CLI", "status · policy · audit", "02")}${box("MCP", "five payment tools", "03")}${box("DASHBOARD", "spending · approvals · switch", "04")}</div>${terminal("AUDIT LEDGER", evidence.demo.toolLines || "payment  $0.030000  deposit $0.100000  refund $0.070000")}`;
+            break;
+          case "proof":
+            body = `<div class="proof-head">${pill("PUBLIC DEVNET", "green")}<span>Recorded canary · independent RPC result</span></div><div class="metrics">${metric("$0.03", "settled to seller", "accent")}${metric("$0.07", "returned to buyer")}${metric("498173798", "finalized slot")}</div><div class="signature"><span>TRANSACTION</span><code>${esc(evidence.devnet.signature)}</code></div>`;
+            break;
+          case "install":
+            body = terminal("TERMINAL · LOCAL PRACTICE", "$ node --version\nv24.18.0\n$ npm ci\n$ npm run demo:mcp\n\nNo wallet key. No funded account. No external API.") + `<div class="caption-line">The transcript below is captured from this command.</div>`;
+            break;
+          case "tools":
+            body = `<div class="tool-layout"><div class="tool-list">${(evidence.demo.toolNames || ["pay_fetch", "get_budget", "list_channels", "decide_approval", "reclaim_channel"]).map((item, i) => `<div class="tool-item"><span>0${i + 1}</span><code>${esc(item)}</code><b>AVAILABLE</b></div>`).join("")}</div><div class="tool-side">${pill("REAL MCP PROTOCOL", "green")}<h2>Discover<br>then decide.</h2><p>The client and server use a linked transport in this deterministic example.</p></div></div>`;
+            break;
+          case "exact":
+            body = `<div class="proof-head">${pill("LOCAL PRACTICE RAIL", "amber")}<span>This is a mock settlement, not a Solana transaction.</span></div>${terminal("CAPTURED · npm run demo:mcp", evidence.demo.exactExcerpt)}<div class="metrics compact">${metric("$0.001", "weather API call", "accent")}${metric("$5.00", "quoted request")}</div>`;
+            break;
+          case "block":
+            body = `<div class="block-banner"><span class="stop-mark">×</span><div><b>BLOCKED BEFORE PAYMENT</b><span>Structured result · per call cap</span></div></div>${terminal("CAPTURED · npm run demo:mcp", evidence.demo.blockExcerpt)}<div class="policy-foot">${pill("NOT PAID", "green")}<span>The caller receives the rule, quoted price, and cap.</span></div>`;
+            break;
+          case "upto":
+            body = `<div class="proof-head">${pill("OFFLINE SELLER SIMULATION", "amber")}<span>Separate from the public devnet canary.</span></div><div class="channel-diagram"><div class="wallet-node"><span>BUYER</span><b>approve</b><small>$0.10 ceiling</small></div><div class="channel-track"><span>OPEN CHANNEL</span><div class="track"></div><span>PINNED BLOCKHASH · ZERO RPC</span></div><div class="wallet-node seller"><span>SELLER</span><b>meter</b><small>30 rows</small></div></div>${terminal("LOCAL DEMO · NO CHAIN", evidence.demo.uptoExcerpt)}`;
+            break;
+          case "refund":
+            body = `<div class="proof-head">${pill("CAPTURED LOCAL DEMO", "amber")}<span>Seller simulation · not the devnet transaction.</span></div><div class="metrics large">${metric("$0.10", "ceiling deposited")}${metric("− $0.03", "actual usage", "accent")}${metric("$0.07", "returned to allowance", "green-text")}</div><div class="balance-bar refund-bar"><span></span><span></span></div>${terminal("CAPTURED · npm run demo:mcp", evidence.demo.refundExcerpt)}`;
+            break;
+          case "recovery":
+            body = `<div class="recovery-grid">${box("01 · SETTLED", "Record the charge before releasing the unused ceiling.", "RECEIPT")}${box("02 · UNCERTAIN", "Keep the commitment held until chain evidence resolves it.", "HOLD")}${box("03 · LATE RECEIPT", "Use the channel record to avoid counting one payment twice.", "IDEMPOTENT")}</div><div class="recovery-foot">STATE FILES ARE DURABLE  ·  CORRUPT STATE FAILS CLOSED</div>`;
+            break;
+          case "cleanup":
+            body = `<div class="cleanup-flow"><div class="cleanup-node">PERSIST<br><small>channel state</small></div><b>→</b><div class="cleanup-node">SWEEP<br><small>eligible channels</small></div><b>→</b><div class="cleanup-node">SHUT DOWN<br><small>worker lifecycle</small></div></div>${terminal("SELLER OPERATIONS", "createSolanaUptoOperator()\n  + persistent cleanup manager\n\nExplicit sweep  ·  restart recovery  ·  graceful stop")}<div class="caption-line">Seller secrets stay in the environment.</div>`;
+            break;
+          case "chain":
+            body = `<div class="proof-head">${pill("SOLANA DEVNET", "green")}<span>Recorded public transaction · finalized · no transaction error</span></div><div class="metrics">${metric("$0.03", "seller transfer", "accent")}${metric("$0.07", "buyer refund", "green-text")}${metric(String(evidence.devnet.slot), "slot")}</div><div class="signature"><span>TRANSACTION SIGNATURE</span><code>${esc(evidence.devnet.signature)}</code></div><div class="explorer">explorer.solana.com/tx/${esc(evidence.devnet.signature)}?cluster=devnet</div>`;
+            break;
+          case "finish":
+            body = `<div class="finish-grid"><div><div class="finish-check">✓</div><h2>Reproduce</h2><code>npm run demo:mcp</code></div><div><div class="finish-check">✓</div><h2>Verify</h2><code>npm test</code></div><div><div class="finish-check">✓</div><h2>Inspect</h2><code>docs/canary-runs/</code></div></div><div class="finish-url">github.com/fskroes/AllowanceKit <span>·</span> MIT <span>·</span> Solana devnet proof</div>`;
+            break;
+          default:
+            body = `<div class="fallback">${esc(scene.subtitle)}</div>`;
+        }
+        document.getElementById("stage").innerHTML = frame(scene, body);
+      };
+    })();
+  </script>
+</body>
+</html>

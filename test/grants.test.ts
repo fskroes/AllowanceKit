@@ -142,3 +142,36 @@ test("two agents in one directory keep separate limits, allowances and approvals
   assert.ok(fs.existsSync(path.join(dir, "config.json")), "the first agent keeps the original file name");
   assert.ok(fs.existsSync(path.join(dir, "config.writer.json")));
 });
+
+test("unknown channel holds its grant until crash-safe recovery records the actual once", async (t) => {
+  const { ChannelStore, reconcileChannels, CHANNEL_STATUS } = await import("../src/channels.ts");
+  const { base58Encode } = await import("../src/base58.ts");
+  const rt = agentWithGate();
+  const id = await queue(rt, usd(0.4));
+  decideApproval(rt, id, true, { budgetMicro: usd(1) });
+  const decision = await rt.ctx.authorize(usd(0.4), URL_A, "upto");
+  assert.equal(decision.allowed, true);
+  const store = new ChannelStore(rt.stateDir);
+  const rec = store.add({ channelId: base58Encode(new Uint8Array(32).fill(7)), agent: rt.agentName,
+    url: URL_A, host: "api.example.com", network: "solana-devnet", depositMicro: usd(0.4), withdrawDelay: 900,
+    reservationId: decision.allowed ? decision.reservationId : undefined });
+  store.markUnknown(rec.channelId);
+  await rt.ctx.releaseReservation!(rec.reservationId!);
+  assert.equal(rt.approvals.remainingMicro(rt.approvals.list().find((r) => r.id === id)!), usd(0.6));
+  const original = fs.renameSync;
+  const failure = t.mock.method(fs, "renameSync", (from, to) => {
+    if (String(to).endsWith("channels.json")) throw new Error("crash after grant refund");
+    return original(from, to);
+  });
+  assert.throws(() => store.settle(rec.channelId, usd(0.1)), /crash after grant refund/);
+  failure.mock.restore();
+  const account = Buffer.alloc(256);
+  account[0] = 1; account[1] = 1; account[3] = CHANNEL_STATUS.DISTRIBUTED;
+  account.writeBigUInt64LE(usd(0.4), 12); account.writeBigUInt64LE(usd(0.1), 20);
+  await reconcileChannels({ getAccountData: async () => account }, store);
+  await reconcileChannels({ getAccountData: async () => account }, store);
+  assert.equal(rt.ledger.spendTotal(rt.agentName), usd(0.1));
+  assert.equal(rt.approvals.remainingMicro(rt.approvals.list().find((r) => r.id === id)!), usd(0.9));
+  assert.equal(rt.reservations.total(rt.agentName), 0n);
+  rt.stopHeartbeat?.();
+});

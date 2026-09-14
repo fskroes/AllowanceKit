@@ -436,3 +436,27 @@ test("C-10: doctor reports the cloud row when the channel is enabled", async () 
     await srv.close();
   }
 });
+
+test("the local recovery beat runs without Cloud and stops without overlap", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let calls = 0;
+  let resolveBeat: (() => void) | undefined;
+  const stop = startCloudHeartbeat(undefined, { agent: "default" }, {
+    everyMs: 250,
+    send: async () => { assert.fail("local recovery must not send a Cloud request"); },
+    beat: () => { calls++; return new Promise<void>((resolve) => { resolveBeat = resolve; }); },
+  });
+  assert.equal(calls, 1);
+  t.mock.timers.tick(1000);
+  assert.equal(calls, 1, "a running reconcile does not overlap");
+  resolveBeat!();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(250);
+  assert.equal(calls, 2);
+  stop();
+  resolveBeat!();
+  await Promise.resolve();
+  t.mock.timers.tick(1000);
+  assert.equal(calls, 2);
+});

@@ -485,11 +485,46 @@ test("paymentGate routes an upto payment to the channel gate and settles metered
   assert.equal(respOf(cap.rec).amount, "25000");
 });
 
+test("paymentGate shutdown waits for an accepted payment before stopping cleanup", async () => {
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let stops = 0;
+  const operator = Object.assign(new InMemoryUptoOperator(), { async stop() { stops++; } });
+  const gate = paymentGate({
+    priceMicro: 1_000n, description: "metered", payTo: SELLER,
+    network: "solana-devnet", facilitator: new MockChain(),
+    upto: { ceilingMicro: CEILING, operator },
+  }, async (_req, res, meter) => {
+    entered();
+    await pending;
+    meter!.charge(30_000n);
+    res.end("done");
+  });
+  const response = fakeRes();
+  const serving = gate({ headers: { host: "s", "x-payment": header() }, url: "/x" } as never, response.res);
+  await started;
+  const stopping = gate.stop();
+  assert.equal(stops, 0);
+  const rejected = fakeRes();
+  await gate({ headers: { host: "s" } } as never, rejected.res);
+  assert.equal(rejected.rec.status, 503);
+  release();
+  await serving;
+  await stopping;
+  assert.equal(response.rec.status, 200);
+  assert.equal(operator.calls.claim, 1);
+  assert.equal(stops, 1);
+  await gate.stop();
+  assert.equal(stops, 1, "shutdown is idempotent");
+});
+
 // --- Sandbox: one real open-serve-settle on 402.surfnet.dev ---------------
 // Gated by SOLANA_SANDBOX=1 (docs/SOLANA-ARCHITECTURE.md §2.7, §7). Off by
 // default so CI never touches the network; it needs a hosted Surfpool fork with
 // the payment-channels program, mainnet USDC, and the treasury ATA present.
-test("SOLANA_SANDBOX: real open → serve → settle with on-chain settled == actual", { skip: process.env.SOLANA_SANDBOX !== "1" }, async () => {
+test("SOLANA_SANDBOX: real open → serve → settle with on-chain settled == actual", { skip: process.env.SOLANA_SANDBOX !== "1" }, async (t) => {
   const { createSolanaUptoOperator } = await import("../src/seller-upto.ts");
   const { normalizeSolanaKey } = await import("../src/solana.ts");
   const feeEnv = process.env.SELLER_FEE_PAYER_KEY;
@@ -503,6 +538,7 @@ test("SOLANA_SANDBOX: real open → serve → settle with on-chain settled == ac
     receiverAuthorizerSecret: normalizeSolanaKey(authEnv!),
     rpcUrl,
   });
+  t.after(() => operator.stop());
   // The full buyer open + settle loop is exercised by the SOL-05 sandbox test
   // (test/solana-sandbox.test.ts); here we prove the operator constructs and the
   // offer advertises against the sandbox network.

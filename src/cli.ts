@@ -31,7 +31,7 @@ import {
 } from "./solana.ts";
 import { ChannelStore, reconcileAndNotify, reclaimChannel, solanaAccountRpc } from "./channels.ts";
 import { withLock } from "./lock.ts";
-import { checkTreasuryAta } from "./seller-upto.ts";
+import { checkTreasuryAta, createSolanaUptoOperator } from "./seller-upto.ts";
 import { runtimeVersion } from "./version.ts";
 import { usdcBalanceMicro, RPC_DEFAULTS } from "./usdc.ts";
 import { payingFetch } from "./payer.ts";
@@ -63,6 +63,7 @@ Commands
   channels [list] [--json]        Solana upto payment channels and money in escrow
   channels reconcile              read the chain and resolve open/unknown channels
   channels reclaim <id> | sweep   take a stuck deposit back (needs a little SOL)
+  channels sweep --seller        retry seller refunds and rent cleanup (seller keys required)
   notify                          where alerts are sent, and on what
   agents                          every agent sharing this state directory
   dashboard [--port <n>]          live dashboard (default http://localhost:4030)
@@ -103,6 +104,7 @@ Alerts you can set with \`notify\`
 
 Options
   --state <dir>                   state directory (default ./.allowance)
+  --seller-state-dir <dir>        seller cleanup index (default ./.allowance-seller)
   --agent <name>                  which agent in that directory (default ${DEFAULT_AGENT_NAME})
   --port <n>                      dashboard port (default 4030)
   --json                          machine-readable output where offered
@@ -147,6 +149,7 @@ interface Flags {
   method?: string;
   body?: string;
   seller: boolean;
+  sellerStateDir?: string;
   rest: string[];
 }
 
@@ -167,6 +170,7 @@ function parseFlags(argv: string[]): Flags {
   let method: string | undefined;
   let body: string | undefined;
   let seller = false;
+  let sellerStateDir: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--state" || a === "--state-dir") state = required(argv[++i], "--state <dir>");
@@ -195,13 +199,15 @@ function parseFlags(argv: string[]): Flags {
     else if (a === "--body") body = required(argv[++i], "--body <json>");
     else if (a.startsWith("--body=")) body = a.slice(7);
     else if (a === "--seller") seller = true;
+    else if (a === "--seller-state-dir") sellerStateDir = required(argv[++i], "--seller-state-dir <dir>");
+    else if (a.startsWith("--seller-state-dir=")) sellerStateDir = a.slice(19);
     else rest.push(a);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UserError(`--port must be a number between 1 and 65535`);
   if (budget !== undefined && (!Number.isFinite(budget) || budget <= 0))
     throw new UserError(`--budget must be a positive dollar amount`);
   if (!agentName.trim()) throw new UserError(`--agent needs a name`);
-  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, seller, rest };
+  return { state: path.resolve(state), agent: agentName.trim(), port, json, from, via, budget, expires, live, network, rpc, yes, method, body, seller, sellerStateDir, rest };
 }
 
 function required(value: string | undefined, usage: string): string {
@@ -665,6 +671,33 @@ async function main(): Promise<void> {
       const store = new ChannelStore(stateDir);
       const [sub, id] = args;
 
+      if (flags.seller) {
+        if (sub !== "sweep") throw new UserError("--seller supports channels sweep only");
+        const network = flags.network;
+        if (!network || !solanaNetworkInfo(network))
+          throw new UserError("seller sweep needs an explicit --network solana-devnet or --network solana");
+        await confirmMainnet(network, flags.yes);
+        const feeRaw = process.env.SELLER_FEE_PAYER_KEY?.trim();
+        const authRaw = process.env.SELLER_AUTHORIZER_KEY?.trim();
+        if (!feeRaw || !authRaw)
+          throw new UserError("seller sweep needs SELLER_FEE_PAYER_KEY and SELLER_AUTHORIZER_KEY in the environment");
+        const operator = await createSolanaUptoOperator({
+          network, rpcUrl: flags.rpc, stateDir: flags.sellerStateDir,
+          feePayerSecret: normalizeSolanaKey(feeRaw), receiverAuthorizerSecret: normalizeSolanaKey(authRaw),
+          cleanupIntervalSecs: false,
+        });
+        try {
+          const report = await operator.sweep();
+          if (flags.json) console.log(JSON.stringify(report));
+          else {
+            console.log(`seller cleanup: ${report.closed.length} closed/distributed, ${report.reclaimed.reduce((n, r) => n + r.channelIds.length, 0)} rent accounts reclaimed, ${report.pending} pending`);
+            for (const error of report.errors) console.error(`  ${error.channelId ?? "cleanup"}: ${error.error}`);
+          }
+          if (report.errors.length) process.exitCode = 1;
+        } finally { await operator.stop(); }
+        break;
+      }
+
       if (!sub || sub === "list") {
         const rows = store.list(flags.agent);
         if (flags.json) {
@@ -719,10 +752,12 @@ async function main(): Promise<void> {
           solanaAccountRpc(rpcUrl),
           store,
           (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
-          { agent: flags.agent, lock },
+          { agent: flags.agent, lock, network: mode.network },
         );
         if (!changes.length) {
-          console.log(`all channels already resolved — nothing changed.`);
+          const unresolved = store.active(flags.agent).length;
+          console.log(unresolved ? `${unresolved} channel(s) still unresolved; escrow remains held until a finalized outcome is available.`
+            : `all channels already resolved — nothing changed.`);
           break;
         }
         for (const c of changes) console.log(`  ${c.channelId.slice(0, 12)}…  ${c.from} → ${c.to}`);
@@ -746,7 +781,7 @@ async function main(): Promise<void> {
             solanaAccountRpc(rpcUrl),
             store,
             (phase, rec) => notifierFor(rec.agent).channel(phase, rec),
-            { agent: flags.agent, lock },
+            { agent: flags.agent, lock, network: mode.network },
           );
           targets = store.dueForReclaim(flags.agent);
           if (!targets.length) {
@@ -757,7 +792,7 @@ async function main(): Promise<void> {
 
         for (const rec of targets) {
           console.log(`reclaiming ${rec.channelId.slice(0, 12)}… (deposit ${fmtUsd(BigInt(rec.depositMicro))})`);
-          const res = await reclaimChannel(rec, signer, { rpcUrl });
+          const res = await reclaimChannel(rec, signer, { rpcUrl, network: mode.network });
           if (res.reclaimed) {
             const updated = await lock(() => store.markReclaimed(rec.channelId, res.refundMicro));
             notifierFor(updated.agent).channel("reclaimed", updated);

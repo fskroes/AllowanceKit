@@ -280,9 +280,11 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   // Solana `upto` buyer hooks — built only on a Solana network (§4.3). A Base
   // agent leaves this undefined, so `payingFetch` never takes the upto path.
   let upto: UptoBuyer | undefined;
-  // Reads the escrow locked in open channels for the budget rail (§5). Set only
-  // on Solana; a Base agent has no channels, so the rails see zero escrow.
-  let escrowedMicro: ((openReservationIds?: ReadonlySet<string>) => bigint) | undefined;
+  // A state directory keeps the same USD allowance across network changes.
+  // Old Solana deposits therefore remain committed even on a Base runtime.
+  const channels = new ChannelStore(stateDir);
+  const escrowedMicro = (openReservationIds?: ReadonlySet<string>) =>
+    channels.escrowedMicro(agentName, openReservationIds ? { excludeReservationIds: openReservationIds } : {});
   // The per-beat heartbeat hook: on Solana it reconciles the chain, emits
   // `channel/orphaned`/`settled` once each, and reports live escrow (SOL-08, §6).
   let heartbeatBeat: (() => Promise<Partial<CloudHeartbeat>>) | undefined;
@@ -304,13 +306,11 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     // Escrow is a third money state (§0, §3.3): the channel store is the buyer's
     // book of open deposits. It shares the allowance lock so a channel mutation
     // and a reservation never interleave. The store loads no Solana library.
-    const channels = new ChannelStore(stateDir);
-    escrowedMicro = (openReservationIds) =>
-      channels.escrowedMicro(agentName, openReservationIds ? { excludeReservationIds: openReservationIds } : {});
     const lockPath = path.join(stateDir, "allowance.lock");
     const reconcileRpc = solanaAccountRpc(rpcUrl);
     upto = {
       open: async (unsigned, meta) => {
+        balances.invalidate();
         // Encode outside the lock (it may build a transaction / read a
         // blockhash), then persist the escrow row under the lock before the send.
         const { header, channel } = await encodePaymentSolanaUpto(signer, unsigned, { rpcUrl });
@@ -338,11 +338,18 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       resolve: async (channelId, outcome) => {
         let resolved: { phase: ChannelPhase; rec: ChannelRecord } | undefined;
         await withLock(lockPath, () => {
-          if (outcome.kind === "settled") resolved = { phase: "settled", rec: channels.settle(channelId, outcome.settledMicro) };
-          else if (outcome.kind === "refunded") resolved = { phase: "refunded", rec: channels.refund(channelId) };
+          const current = channels.get(channelId);
+          if (current && ["settled", "refunded", "reclaimed"].includes(current.status)) {
+            if (outcome.kind !== "unknown" && BigInt(current.settledMicro) !== (outcome.kind === "settled" ? outcome.settledMicro : 0n))
+              throw new Error(`channel ${channelId} receipt conflicts with recovered settlement`);
+            return;
+          }
+          if (outcome.kind === "settled") resolved = { phase: "settled", rec: channels.settle(channelId, outcome.settledMicro, outcome.txHash) };
+          else if (outcome.kind === "refunded") resolved = { phase: "refunded", rec: channels.refund(channelId, outcome.txHash) };
           else channels.markUnknown(channelId); // no event: `unknown` is transient, reconcile resolves it
         });
         if (resolved) notifier.channel(resolved.phase, resolved.rec);
+        balances.invalidate();
       },
     };
     // Escrow watchdog, runtime half (§6): each heartbeat reconciles any in-flight
@@ -353,6 +360,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       if (channels.active(agentName).length) {
         await reconcileAndNotify(reconcileRpc, channels, (phase, rec) => notifier.channel(phase, rec), {
           agent: agentName,
+          network,
           // Share the allowance lock with `upto.open`/`resolve`, so a 60 s reconcile
           // write never clobbers a channel opened or settled during its RPC read.
           lock: (fn) => withLock(lockPath, fn),
@@ -482,7 +490,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     rpcUrl,
     walletBalanceMicro: readBalance,
     policy: () => policyStore.load(),
-    ...(escrowedMicro ? { escrowedMicro } : {}),
+    escrowedMicro,
     stopHeartbeat,
   };
 }

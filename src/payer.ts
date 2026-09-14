@@ -56,8 +56,8 @@ export interface UptoOpen {
 
 /** How the seller's receipt (or its absence) resolved an `upto` channel row. */
 export type UptoOutcome =
-  | { kind: "settled"; settledMicro: bigint }
-  | { kind: "refunded" }
+  | { kind: "settled"; settledMicro: bigint; txHash?: string }
+  | { kind: "refunded"; txHash?: string }
   | { kind: "unknown" };
 
 /**
@@ -506,8 +506,8 @@ async function payUpto(
   try {
     paid = await fetch(url, { ...init, headers: { ...(init?.headers ?? {}), "X-PAYMENT": header } });
   } catch (e) {
-    // Transport error before the seller could broadcast (§4.3 row 1): mark the
-    // row `unknown` so a later reconcile drops it once it confirms no PDA.
+    // The seller may have broadcast before the transport failed. Keep escrow
+    // until finalized channel state or transaction history proves the outcome.
     await upto.resolve(channelId, { kind: "unknown" });
     await release();
     const detail = `could not reach ${host}: ${e instanceof Error ? e.message : String(e)}`;
@@ -542,7 +542,7 @@ async function payUpto(
     const claimed = receipt.actualMicro ?? 0n;
     const actual = claimed > depositMicro ? depositMicro : claimed;
     const refundMicro = depositMicro - actual;
-    await upto.resolve(channelId, { kind: "settled", settledMicro: actual });
+    await upto.resolve(channelId, { kind: "settled", settledMicro: actual, txHash: receipt.txHash });
     await ctx.recordPayment(url, host, actual, receipt.txHash ?? "", reservationId, {
       scheme: "upto",
       depositMicro,
@@ -566,7 +566,7 @@ async function payUpto(
   // declined) and the deposit came back. Record a 0 `payment` row so the ledger
   // shows the attempt (§4.3 row 2); release the hold and any grant fully.
   if (receipt?.transaction && (receipt.refundMicro ?? 0n) > 0n) {
-    await upto.resolve(channelId, { kind: "refunded" });
+    await upto.resolve(channelId, { kind: "refunded", txHash: receipt.txHash });
     await release();
     await ctx.recordPayment(url, host, 0n, receipt.txHash ?? "", undefined, {
       scheme: "upto",
