@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { writeStateFile } from "./state-file.ts";
 
 /**
  * The queue of payments parked for a human, and the grants those decisions
@@ -29,6 +30,8 @@ export interface ApprovalRequest {
   grantBudgetMicro?: string;
   /** How much of that budget is already committed to settled or in-flight payments. */
   usedMicro?: string;
+  /** Durable keys prevent a crash/retry from returning a channel refund twice. */
+  settledChannels?: string[];
 }
 
 interface ApprovalFile {
@@ -62,7 +65,7 @@ export class ApprovalStore {
   }
 
   private write(f: ApprovalFile): void {
-    fs.writeFileSync(this.file, JSON.stringify(f, null, 2));
+    writeStateFile(this.file, f);
   }
 
   private mine(r: ApprovalRequest): boolean {
@@ -161,6 +164,16 @@ export class ApprovalStore {
   settleCommitment(id: string, committedMicro: bigint, actualMicro: bigint): void {
     const back = committedMicro - actualMicro;
     if (back > 0n) this.refund(id, back);
+  }
+
+  settleChannel(id: string, channelId: string, committedMicro: bigint, actualMicro: bigint): void {
+    const f = this.read();
+    const req = f.requests.find((r) => r.id === id && this.mine(r));
+    if (!req || req.settledChannels?.includes(channelId)) return;
+    const used = BigInt(req.usedMicro ?? "0") - (committedMicro - actualMicro);
+    req.usedMicro = (used > 0n ? used : 0n).toString();
+    req.settledChannels = [...(req.settledChannels ?? []), channelId];
+    this.write(f);
   }
 
   private adjust(id: string, deltaMicro: bigint): void {

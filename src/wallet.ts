@@ -145,12 +145,14 @@ export function buildPolicyRails(
   const reservations = input.reservations ?? new ReservationStore(stateDir);
   const notifier = input.notifier ?? new Notifier(new NotifyStore(stateDir, agentName), agentName);
   const lockPath = path.join(stateDir, "allowance.lock");
+  const channels = new ChannelStore(stateDir);
 
   return {
     policy: () => policyStore.load(),
 
     authorize(amountMicro, url, scheme) {
       return withLock(lockPath, async () => {
+        channels.repairAccounting(agentName);
         const policy = policyStore.load();
         const host = new URL(url).host;
         const windowMs = policy.windowSeconds * 1000;
@@ -162,7 +164,9 @@ export function buildPolicyRails(
         // backed by an open reservation is already counted in `inFlight`, so it
         // is excluded here — reserved and escrowed must not overlap. Read under
         // the same lock as everything else. Zero off Solana.
-        const escrowedMicro = input.escrowedMicro?.(new Set(openReservations.map((r) => r.id))) ?? 0n;
+        const reservationIds = new Set(openReservations.map((r) => r.id));
+        const escrowedMicro = input.escrowedMicro?.(reservationIds) ??
+          channels.escrowedMicro(agentName, { excludeReservationIds: reservationIds });
 
         // On a live rail the ledger says what the human allowed; the chain says
         // what is actually there. Both have to hold. Escrow has already left the
@@ -228,6 +232,20 @@ export function buildPolicyRails(
 
     async recordPayment(url, host, amountMicro, txHash, reservationId, annotations) {
       await withLock(lockPath, () => {
+        if (annotations?.channelId) {
+          const existing = ledger.read().find((e) => e.t === "payment" && e.channelId === annotations.channelId);
+          if (existing?.t === "payment") {
+            if (existing.agent !== agentName || existing.amountMicro !== amountMicro.toString())
+              throw new Error(`channel ${annotations.channelId} settlement conflicts with its audit payment`);
+            return;
+          }
+          const channel = channels.get(annotations.channelId);
+          if (channel) {
+            if (amountMicro === 0n) channels.refund(channel.channelId, txHash);
+            else channels.settle(channel.channelId, amountMicro, txHash);
+            return;
+          }
+        }
         const closed = reservationId ? reservations.close(reservationId) : undefined;
         // A grant is drawn down by the reserved amount at authorize. On `exact`
         // that equals the settled amount, so this is a no-op; on `upto` the
@@ -278,8 +296,11 @@ export function buildPolicyRails(
 
     releaseReservation(id) {
       return withLock(lockPath, () => {
+        // Unknown escrow still owns this grant commitment, even after the
+        // short reservation is released or expires. Recovery refunds it once.
+        const escrow = channels.active(agentName).find((c) => c.reservationId === id);
         const released = reservations.close(id);
-        if (released?.grantId) approvals.refund(released.grantId, BigInt(released.amountMicro));
+        if (released?.grantId && !escrow) approvals.refund(released.grantId, BigInt(released.amountMicro));
       });
     },
   };

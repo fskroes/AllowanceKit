@@ -1,5 +1,6 @@
 .allowance/
 .allowance-demo/
+.allowance-seller/
 node_modules/
 .DS_Store
 *.log

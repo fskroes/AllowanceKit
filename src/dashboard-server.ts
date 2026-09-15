@@ -150,7 +150,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
   // runtime never masks a network change.
   const channelCtx = (
     target: AllowanceRuntime,
-  ): { store: ChannelStore; rpcUrl: string; notifier: Notifier; lock: ChannelLock } | null => {
+  ): { store: ChannelStore; rpcUrl: string; network: string; notifier: Notifier; lock: ChannelLock } | null => {
     const m = readMode(target.stateDir);
     if (m.mode !== "live" || family(m.network ?? "") !== "solana" || !m.network) return null;
     const rpcUrl = m.rpcUrl ?? solanaNetworkInfo(m.network)?.defaultRpc;
@@ -161,7 +161,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
     // never clobbers a concurrent open/settle in the agent's own process.
     const lockPath = path.join(target.stateDir, "allowance.lock");
     const lock: ChannelLock = (fn) => withLock(lockPath, fn);
-    return { store, rpcUrl, notifier, lock };
+    return { store, rpcUrl, network: m.network, notifier, lock };
   };
 
   // The escrow watchdog's dashboard half (§6): each state poll reconciles any
@@ -180,7 +180,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
       solanaAccountRpc(ctx.rpcUrl),
       ctx.store,
       (phase, rec) => ctx.notifier.channel(phase, rec),
-      { agent: target.agentName, lock: ctx.lock },
+      { agent: target.agentName, lock: ctx.lock, network: ctx.network },
     ).catch((e) => console.warn(`channel reconcile failed: ${e instanceof Error ? e.message : String(e)}`));
   };
 
@@ -199,7 +199,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
     if (!key) return { ok: false, error: "AGENT_PRIVATE_KEY is not set in the dashboard's environment — reclaim needs the wallet key" };
     const signer = solanaSigner(normalizeSolanaKey(key));
     reclaiming.add(channelId);
-    void reclaimChannel(rec, signer, { rpcUrl: ctx.rpcUrl })
+    void reclaimChannel(rec, signer, { rpcUrl: ctx.rpcUrl, network: ctx.network })
       .then(async (result) => {
         if (result.reclaimed) {
           const updated = await ctx.lock(() => ctx.store.markReclaimed(channelId, result.refundMicro));
@@ -245,7 +245,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
           solanaAccountRpc(ctx.rpcUrl),
           ctx.store,
           (phase, rec) => ctx.notifier.channel(phase, rec),
-          { agent: target.agentName, lock: ctx.lock },
+          { agent: target.agentName, lock: ctx.lock, network: ctx.network },
         );
         return json(res, 200, { ok: true, changed: changes.length, agent: target.agentName });
       }

@@ -168,8 +168,10 @@ export interface ChannelRecord {
   mint?: string;
   /** The `open` transaction signature, once broadcast. */
   txHash?: string;
-  /** The reservation this escrow converted from, so a drop hands the budget back. */
+  /** The opening reservation, released after the channel owns its commitment. */
   reservationId?: string;
+  /** Grant committed by the opening reservation; survives reservation expiry. */
+  grantId?: string;
   /** ISO timestamp the channel was marked `orphaned` — the reclaim clock's start. */
   orphanedAt?: string;
 }

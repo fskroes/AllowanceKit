@@ -551,7 +551,7 @@ export function startCloudHeartbeat(
     beat?: () => Partial<CloudHeartbeat> | void | Promise<Partial<CloudHeartbeat> | void>;
   } = {},
 ): () => void {
-  if (!cloud?.enabled) return () => undefined;
+  if (!cloud?.enabled && !opts.beat) return () => undefined;
   const env = opts.env ?? process.env;
   const send = opts.send ?? postCloudHeartbeat;
   const everyMs = Math.max(250, opts.everyMs ?? 60_000);
@@ -567,7 +567,7 @@ export function startCloudHeartbeat(
         extra = undefined; // the beat hook (chain read) must not stop the ping
       }
       const body = extra ? { ...meta, ...extra } : meta;
-      await Promise.resolve(send(cloud, body, env)).catch(() => undefined);
+      if (cloud?.enabled) await Promise.resolve(send(cloud, body, env)).catch(() => undefined);
     } finally {
       running = false;
     }

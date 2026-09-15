@@ -7,7 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { base58Encode } from "../src/base58.ts";
-import { createAgent, DEFAULT_AGENT_NAME } from "../src/wallet.ts";
+import { createAgent, topUp, DEFAULT_AGENT_NAME } from "../src/wallet.ts";
+import { ReservationStore } from "../src/reservations.ts";
+import { encodeVoucher } from "../src/voucher.ts";
 import { Ledger } from "../src/ledger.ts";
 import {
   ChannelStore,
@@ -18,6 +20,7 @@ import {
   reconcileAndNotify,
   planReclaim,
   buildReclaimInstructions,
+  solanaAccountRpc,
   type ChannelRpc,
 } from "../src/channels.ts";
 import * as kit from "@solana/kit";
@@ -82,6 +85,34 @@ test("add records an opened channel and counts it as escrow", () => {
   assert.equal(store.escrowedMicro("default"), 100_000n);
   assert.equal(store.get(rec.channelId)?.channelId, rec.channelId);
   assert.equal(store.list("default").length, 1);
+});
+
+test("recovery records actual spend before releasing the recovered deposit", async () => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  store.markUnknown(rec.channelId);
+  await reconcileChannels(fakeRpc({
+    [rec.channelId]: fakeAccount({ status: CHANNEL_STATUS.DISTRIBUTED, depositMicro: 100_000n, settledMicro: 30_000n }),
+  }), store);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+  assert.equal(store.escrowedMicro(), 0n);
+});
+
+test("a missing channel account cannot prove that a deposit was never spent", async () => {
+  const store = new ChannelStore(tmpDir());
+  const rec = store.add(openInput());
+  store.markUnknown(rec.channelId);
+  await reconcileChannels(fakeRpc({ [rec.channelId]: null }), store);
+  assert.equal(store.escrowedMicro(), 100_000n);
+});
+
+test("a corrupt channel file blocks allowance authorization", async () => {
+  const dir = tmpDir();
+  const rt = createAgent(dir);
+  fs.writeFileSync(path.join(dir, "channels.json"), '{"channels":[');
+  await assert.rejects(rt.ctx.authorize(1n, "https://api.example.com/meter"), /channels.json.*corrupt/);
+  rt.stopHeartbeat?.();
 });
 
 test("a duplicate channelId is rejected as a replay", () => {
@@ -183,11 +214,13 @@ test("decodeChannelAccount reads the spec offsets", () => {
 });
 
 test("reconcile flips unknown and opened to their true on-chain state", async () => {
-  const store = new ChannelStore(tmpDir());
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const inflight = new ReservationStore(dir).open("default", "https://api.example.com/meter", "api.example.com", 40_000n);
 
   const sealed = store.add(openInput({ depositMicro: 100_000n }));
   const openUnknown = store.add(openInput({ depositMicro: 40_000n }));
-  const openInflight = store.add(openInput({ depositMicro: 40_000n }));
+  const openInflight = store.add(openInput({ depositMicro: 40_000n, reservationId: inflight.id }));
   const vanished = store.add(openInput({ depositMicro: 40_000n }));
   const closing = store.add(openInput({ depositMicro: 40_000n }));
   store.markUnknown(openUnknown.channelId);
@@ -196,7 +229,7 @@ test("reconcile flips unknown and opened to their true on-chain state", async ()
 
   const changes = await reconcileChannels(
     fakeRpc({
-      [sealed.channelId]: fakeAccount({ status: CHANNEL_STATUS.SEALED, depositMicro: 100_000n, settledMicro: 25_000n }),
+      [sealed.channelId]: fakeAccount({ status: CHANNEL_STATUS.DISTRIBUTED, depositMicro: 100_000n, settledMicro: 25_000n }),
       [openUnknown.channelId]: fakeAccount({ status: CHANNEL_STATUS.OPEN, depositMicro: 40_000n }),
       [openInflight.channelId]: fakeAccount({ status: CHANNEL_STATUS.OPEN, depositMicro: 40_000n }),
       [vanished.channelId]: null,
@@ -213,18 +246,18 @@ test("reconcile flips unknown and opened to their true on-chain state", async ()
   assert.equal(store.get(openUnknown.channelId)!.status, "orphaned");
   // opened + OPEN → still in flight, untouched
   assert.equal(store.get(openInflight.channelId)!.status, "opened");
-  // unknown + absent → dropped
-  assert.equal(store.get(vanished.channelId), undefined);
+  // An absent PDA can have spent money; incomplete evidence keeps the hold.
+  assert.equal(store.get(vanished.channelId)?.status, "unknown");
   // CLOSING → orphaned
   assert.equal(store.get(closing.channelId)!.status, "orphaned");
 
   const byTo = Object.fromEntries(changes.map((c) => [c.channelId, c.to]));
   assert.equal(byTo[sealed.channelId], "settled");
-  assert.equal(byTo[vanished.channelId], "dropped");
+  assert.equal(byTo[vanished.channelId], undefined);
   assert.equal(changes.find((c) => c.channelId === openInflight.channelId), undefined);
 });
 
-test("SOL-08: reconcileAndNotify emits settled/orphaned once, never for a dropped row, and runs writes under the lock", async () => {
+test("SOL-08: reconcileAndNotify emits resolved phases once and runs writes under the lock", async () => {
   const store = new ChannelStore(tmpDir());
   const sealed = store.add(openInput({ depositMicro: 100_000n }));
   const closing = store.add(openInput({ depositMicro: 40_000n }));
@@ -236,7 +269,7 @@ test("SOL-08: reconcileAndNotify emits settled/orphaned once, never for a droppe
   let locked = 0;
   const changes = await reconcileAndNotify(
     fakeRpc({
-      [sealed.channelId]: fakeAccount({ status: CHANNEL_STATUS.SEALED, depositMicro: 100_000n, settledMicro: 25_000n }),
+      [sealed.channelId]: fakeAccount({ status: CHANNEL_STATUS.DISTRIBUTED, depositMicro: 100_000n, settledMicro: 25_000n }),
       [closing.channelId]: fakeAccount({ status: CHANNEL_STATUS.CLOSING, depositMicro: 40_000n }),
       [vanished.channelId]: null,
     }),
@@ -250,8 +283,8 @@ test("SOL-08: reconcileAndNotify emits settled/orphaned once, never for a droppe
     },
   );
 
-  assert.equal(locked, 1, "the write phase ran inside the provided lock exactly once");
-  assert.equal(changes.length, 3);
+  assert.equal(locked, 2, "legacy accounting repair and new resolution both hold the allowance lock");
+  assert.equal(changes.length, 2);
   // settled and orphaned are emitted with the freshly-mutated record; dropped is not a phase.
   assert.deepEqual(
     phases.map((p) => p.phase).sort(),
@@ -260,7 +293,7 @@ test("SOL-08: reconcileAndNotify emits settled/orphaned once, never for a droppe
   const settledEvt = phases.find((p) => p.phase === "settled")!;
   assert.equal(settledEvt.channelId, sealed.channelId);
   assert.equal(store.get(sealed.channelId)!.settledMicro, "25000");
-  assert.equal(store.get(vanished.channelId), undefined, "the vanished row was dropped, not emitted");
+  assert.equal(store.get(vanished.channelId)?.status, "unknown", "unverified escrow remains held");
 });
 
 test("reconcile leaves terminal channels untouched", async () => {
@@ -412,3 +445,215 @@ test("`channels list` shows escrow, and audit prints the deposit and refund colu
   assert.match(audit.stdout, /deposit/);
   assert.match(audit.stdout, /refund/);
 });
+
+test("SEALED holds the ceiling until its payer refund is finalized, and orphaned rows are rechecked", async () => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  const rpc = fakeRpc({ [rec.channelId]: fakeAccount({ status: CHANNEL_STATUS.SEALED, depositMicro: 100_000n, settledMicro: 30_000n }) });
+  await reconcileChannels(rpc, store);
+  assert.equal(store.get(rec.channelId)?.status, "orphaned");
+  assert.equal(store.escrowedMicro(), 100_000n);
+  assert.equal(new Ledger(dir).spendTotal("default"), 0n);
+  await reconcileChannels(fakeRpc({ [rec.channelId]: fakeAccount({ status: CHANNEL_STATUS.SEALED,
+    depositMicro: 100_000n, settledMicro: 30_000n, payerWithdrawnAt: 1n }) }), store);
+  assert.equal(store.escrowedMicro(), 0n);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+  await reconcileChannels(rpc, store);
+  assert.equal(new Ledger(dir).read().filter((e) => e.t === "payment").length, 1);
+});
+
+test("ledger failure leaves escrow held; retry cannot create duplicate spend", (t) => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  const failure = t.mock.method(Ledger.prototype, "append", () => { throw new Error("disk full"); });
+  assert.throws(() => store.settle(rec.channelId, 30_000n), /disk full/);
+  assert.equal(store.escrowedMicro(), 100_000n);
+  failure.mock.restore();
+  store.settle(rec.channelId, 30_000n);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+});
+
+test("a crash after ledger append leaves a complete channel snapshot and recovers exactly once", (t) => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  const original = fs.renameSync;
+  const failure = t.mock.method(fs, "renameSync", (from, to) => {
+    if (String(to).endsWith("channels.json")) throw new Error("crash before channel commit");
+    return original(from, to);
+  });
+  assert.throws(() => store.settle(rec.channelId, 30_000n), /crash before channel commit/);
+  assert.equal(store.escrowedMicro(), 100_000n);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+  assert.equal(fs.readdirSync(dir).some((file) => file.endsWith(".tmp")), false);
+  failure.mock.restore();
+  store.settle(rec.channelId, 30_000n);
+  assert.equal(store.escrowedMicro(), 0n);
+  assert.equal(new Ledger(dir).read().filter((e) => e.t === "payment").length, 1);
+});
+
+test("valid JSON with missing, duplicate, or invalid channel rows also fails closed", () => {
+  for (const value of [{}, { channels: {} }, { channels: [null] }, { channels: [{ status: "garbage" }] }]) {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, "channels.json"), JSON.stringify(value));
+    assert.throws(() => new ChannelStore(dir).escrowedMicro(), /corrupt/);
+  }
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  fs.writeFileSync(path.join(dir, "channels.json"), JSON.stringify({ channels: [rec, rec] }));
+  assert.throws(() => store.escrowedMicro(), /corrupt/);
+});
+
+test("recovered spend still blocks the next authorization at the total budget", async () => {
+  const dir = tmpDir();
+  const rt = createAgent(dir);
+  topUp(rt, 0.10);
+  rt.policyStore.save({ allowHostSuffixes: ["api.example.com"] });
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput({ agent: rt.agentName }));
+  await reconcileChannels(fakeRpc({ [rec.channelId]: fakeAccount({ status: CHANNEL_STATUS.DISTRIBUTED,
+    depositMicro: 100_000n, settledMicro: 30_000n }) }), store);
+  const over = await rt.ctx.authorize(80_000n, rec.url);
+  assert.equal(over.allowed, false);
+  assert.equal(!over.allowed && over.rule, "budget_exhausted");
+  const within = await rt.ctx.authorize(70_000n, rec.url);
+  assert.equal(within.allowed, true);
+  rt.stopHeartbeat?.();
+});
+
+test("legacy terminal rows missing a payment are repaired before authorizing more spend", async () => {
+  const dir = tmpDir();
+  const rt = createAgent(dir);
+  topUp(rt, 0.10);
+  rt.policyStore.save({ allowHostSuffixes: ["api.example.com"] });
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput({ agent: rt.agentName }));
+  fs.writeFileSync(path.join(dir, "channels.json"), JSON.stringify({ channels: [{ ...rec, status: "settled",
+    settledMicro: "30000", refundMicro: "70000" }] }));
+  assert.equal((await rt.ctx.authorize(80_000n, rec.url)).allowed, false);
+  assert.equal(rt.ledger.spendTotal(rt.agentName), 30_000n);
+  rt.stopHeartbeat?.();
+});
+
+test("a receipt that arrives during reconciliation wins without duplicate ledger rows", async () => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  await reconcileChannels({ getAccountData: async () => {
+    store.settle(rec.channelId, 30_000n, "receipt");
+    return fakeAccount({ status: CHANNEL_STATUS.DISTRIBUTED, depositMicro: 100_000n, settledMicro: 30_000n });
+  } }, store);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+  assert.equal(new Ledger(dir).read().filter((e) => e.t === "payment").length, 1);
+});
+
+function historyFixture(channelId: string, actual: bigint) {
+  const voucher = Buffer.alloc(162);
+  voucher.set(encodeVoucher({ channelId, cumulativeAmount: actual, expiresAt: 0n }), 112);
+  const ix = (data: number[], accounts: string[]) => ({ programId: PAYMENT_CHANNELS_PROGRAM, accounts, data: base58Encode(Uint8Array.from(data)) });
+  return {
+    claim: { meta: { err: null }, transaction: { message: { instructions: [
+      { programId: "Ed25519SigVerify111111111111111111111111111", data: base58Encode(voucher) },
+      ix([4, 1], [addr(), channelId, addr()]), ix([7], [channelId]),
+    ] } } },
+    open: { meta: { err: null }, transaction: { message: { instructions: [ix([1], [addr(), addr(), addr(), addr(), addr(), channelId])] } } },
+  };
+}
+
+test("finalized transaction history recovers a successful charge after PDA deallocation", async (t) => {
+  const dir = tmpDir();
+  const store = new ChannelStore(dir);
+  const rec = store.add(openInput());
+  store.markUnknown(rec.channelId);
+  const txs = historyFixture(rec.channelId, 30_000n);
+  const calls: string[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const { method, params } = JSON.parse(String(init.body));
+    calls.push(method);
+    const result = method === "getAccountInfo" ? { value: null }
+      : method === "getSignaturesForAddress" ? [{ signature: "claim", err: null }, { signature: "open", err: null }]
+      : method === "getTransaction" ? txs[params[0] as keyof typeof txs] : undefined;
+    assert.notEqual(result, undefined, method);
+    return Response.json({ jsonrpc: "2.0", id: 1, result });
+  });
+  await reconcileChannels(solanaAccountRpc("https://rpc.example.com"), store);
+  assert.equal(store.escrowedMicro(), 0n);
+  assert.equal(new Ledger(dir).spendTotal("default"), 30_000n);
+  assert.equal(store.get(rec.channelId)?.txHash, "claim");
+  assert.deepEqual(calls, ["getAccountInfo", "getSignaturesForAddress", "getTransaction", "getTransaction"]);
+});
+
+test("pruned transaction history cannot release escrow", async (t) => {
+  const store = new ChannelStore(tmpDir());
+  const rec = store.add(openInput());
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const { method } = JSON.parse(String(init.body));
+    const result = method === "getAccountInfo" ? { value: null }
+      : method === "getSignaturesForAddress" ? [{ signature: "claim", err: null }] : null;
+    return Response.json({ result });
+  });
+  await reconcileChannels(solanaAccountRpc("https://rpc.example.com"), store);
+  assert.equal(store.escrowedMicro(), 100_000n);
+  assert.equal(store.get(rec.channelId)?.status, "opened");
+});
+
+test("an expired open can release its hold only with complete empty history", async (t) => {
+  const store = new ChannelStore(tmpDir());
+  const rec = store.add(openInput({ openSlot: 2000 }));
+  let first = 2500;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const { method } = JSON.parse(String(init.body));
+    const result = method === "getAccountInfo" ? { value: null } : method === "getSignaturesForAddress" ? []
+      : method === "getSlot" ? 4000 : first;
+    return Response.json({ result });
+  });
+  await reconcileChannels(solanaAccountRpc("https://rpc.example.com"), store);
+  assert.equal(store.escrowedMicro(), 100_000n, "pruned open-era history cannot prove absence");
+  first = 100;
+  await reconcileChannels(solanaAccountRpc("https://rpc.example.com"), store);
+  assert.equal(store.escrowedMicro(), 0n);
+  assert.equal(store.get(rec.channelId)?.status, "refunded");
+});
+
+test("reconciliation cannot refund a devnet channel using a mainnet runtime RPC", async () => {
+  const store = new ChannelStore(tmpDir());
+  const rec = store.add(openInput({ network: "solana-devnet", openSlot: 1000 }));
+  store.markUnknown(rec.channelId);
+  let reads = 0;
+  await reconcileChannels({
+    getAccountData: async () => { reads++; return null; },
+    getClosedOutcome: async () => ({ settledMicro: 0n }),
+  }, store, { network: "solana" });
+  assert.equal(store.escrowedMicro(), 100_000n);
+  assert.equal(reads, 0, "the wrong cluster must not be asked for this channel's outcome");
+});
+
+for (const invalid of ["failed", "wrong program", "wrong voucher channel", "unrecognized CPI"] as const) {
+  test(`history recovery holds escrow for ${invalid} evidence`, async (t) => {
+    const store = new ChannelStore(tmpDir());
+    const rec = store.add(openInput());
+    const txs = historyFixture(rec.channelId, 30_000n);
+    if (invalid === "failed") Object.assign(txs.claim.meta, { err: { InstructionError: [1, "failed"] } });
+    if (invalid === "wrong program") txs.claim.transaction.message.instructions[1].programId = addr();
+    if (invalid === "wrong voucher channel") {
+      const bytes = Buffer.alloc(162);
+      bytes.set(encodeVoucher({ channelId: addr(), cumulativeAmount: 30_000n, expiresAt: 0n }), 112);
+      txs.claim.transaction.message.instructions[0].data = base58Encode(bytes);
+    }
+    if (invalid === "unrecognized CPI") Object.assign(txs.claim.meta, { innerInstructions: [{ instructions: [
+      { programId: PAYMENT_CHANNELS_PROGRAM, data: base58Encode(Uint8Array.of(2)) },
+    ] }] });
+    t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+      const { method, params } = JSON.parse(String(init.body));
+      const result = method === "getAccountInfo" ? { value: null }
+        : method === "getSignaturesForAddress" ? [{ signature: "claim", err: null }, { signature: "open", err: null }]
+        : txs[params[0] as keyof typeof txs];
+      return Response.json({ result });
+    });
+    await reconcileChannels(solanaAccountRpc("https://rpc.example.com"), store);
+    assert.equal(store.escrowedMicro(), 100_000n);
+  });
+}

@@ -29,15 +29,23 @@ supported line.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.4.x   | ✅        |
-| < 0.4   | ❌        |
+| 0.6.x   | ✅        |
+| < 0.6   | ❌        |
+
+The 0.6 line contains the Solana escrow accounting and recovery fixes. Until its
+release is published, use the reviewed 0.6 source branch; the npm 0.5 line does
+not include those fixes. Do not treat a successful historical devnet canary as
+proof of mainnet or sustained production operation.
 
 ## Scope
 
 In scope — anything that lets money move against the rules, or leaks a secret:
 
 - **Money paths**: `chain.ts`, `seller.ts`, `payer.ts`, `live.ts`, `wallet.ts`,
-  `reservations.ts`, `policy.ts`. A payment that settles twice, a rail
+  `reservations.ts`, `policy.ts`, `solana.ts`, `channels.ts`, `seller-upto.ts`.
+  Incorrect escrow release, missing or duplicated settlement accounting, unsafe
+  recovery after missing RPC evidence or corrupt saved state, and seller replay
+  or concurrency failures are in scope. A payment that settles twice, a rail
   (budget, per-call cap, velocity, host allowlist, approval, kill switch) that can be
   bypassed or raced, a reservation that can be double-spent.
 - **Secret handling**: any path that writes a private key, an API key, or a control

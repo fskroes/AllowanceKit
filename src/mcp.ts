@@ -33,6 +33,8 @@ import { payingFetch } from "./payer.ts";
 import { fmtUsdExact } from "./money.ts";
 import { runtimeVersion } from "./version.ts";
 import type { ChannelRecord } from "./types.ts";
+import path from "node:path";
+import { withLock } from "./lock.ts";
 
 // The SDK's low-level types, declared locally so the build never depends on the
 // optional peer's type surface (the same trick solana.ts uses for @x402/svm).
@@ -366,7 +368,7 @@ async function toolReclaimChannel(b: McpBinding, args: Record<string, unknown>):
     );
 
   const signer = solanaSigner(normalizeSolanaKey(b.privateKey));
-  const result = await reclaimChannel(record, signer, { rpcUrl: b.rpcUrl });
+  const result = await reclaimChannel(record, signer, { rpcUrl: b.rpcUrl, network: b.network });
 
   // Nothing was swept — the channel was already resolved on-chain. Reconcile the
   // local row so it stops counting as escrow, but say plainly that no money moved.
@@ -377,7 +379,10 @@ async function toolReclaimChannel(b: McpBinding, args: Record<string, unknown>):
     };
   }
 
-  const updated = store.markReclaimed(id, result.refundMicro);
+  const updated = await withLock(path.join(b.runtime.stateDir, "allowance.lock"), () => {
+    const current = store.get(id)!;
+    return ["settled", "refunded", "reclaimed"].includes(current.status) ? current : store.markReclaimed(id, result.refundMicro);
+  });
   return {
     content: [
       { type: "text", text: `Reclaimed ${id}, ${fmtUsdExact(result.refundMicro)} back to the wallet.` },

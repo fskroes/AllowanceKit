@@ -32,3 +32,6 @@ ticket **SOL-09** (the Solana `upto` canary). Recorded:
   explorer-verifiable finalized signature (SOL-09 done-when): metered $0.03 of a $0.10 ceiling,
   $0.07 refunded, buyer wallet delta exactly $0.03. Also landed the canary balance-poll fix for
   devnet finalization lag.
+- `2026-09-14-solana-devnet-readiness.md` — the prepared 0.6.0 runtime settled a
+  fresh public devnet channel for $0.03 with a $0.07 refund. Finalized transaction
+  history also recovered exactly one payment with zero remaining escrow.

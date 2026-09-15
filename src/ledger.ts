@@ -48,7 +48,11 @@ export class Ledger {
   }
 
   append(event: LedgerEvent): void {
-    fs.appendFileSync(this.file, JSON.stringify(event) + "\n");
+    const fd = fs.openSync(this.file, "a", 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(event) + "\n");
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
     this.cache = null;
   }
 

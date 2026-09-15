@@ -289,13 +289,15 @@ async function realSettle(opts: {
     feePayerSecret: feePayer.secret,
     receiverAuthorizerSecret: authorizer.secret,
     rpcUrl,
+    stateDir: dir,
   });
-  const seller = await startSeller(network, operator, keypair().address);
-
-  const live = await createLiveAgent({ stateDir: dir, privateKey: buyer.json, network, rpcUrl, preferScheme: "upto" });
-  setCanaryPolicy(live);
+  let seller: Awaited<ReturnType<typeof startSeller>> | undefined;
+  let live: Awaited<ReturnType<typeof createLiveAgent>> | undefined;
 
   try {
+    seller = await startSeller(network, operator, keypair().address);
+    live = await createLiveAgent({ stateDir: dir, privateKey: buyer.json, network, rpcUrl, preferScheme: "upto" });
+    setCanaryPolicy(live);
     const before = await usdcBalanceMicroSolana(rpcUrl, mint, buyer.address);
     info(`  buyer USDC before: ${usd(before)}`);
 
@@ -316,7 +318,7 @@ async function realSettle(opts: {
       if (onChainSettled !== ACTUAL_MICRO) fail(`on-chain settled ${onChainSettled} != ${ACTUAL_MICRO}`);
       ok(`On-chain: channel PDA settled watermark = ${usd(onChainSettled)}`);
     } else {
-      info("  channel PDA already closed by distribute (rent returned) — settled taken from the receipt");
+      info("  channel PDA not visible at this finalized read; using the receipt amount (this does not prove closure)");
     }
 
     // The wallet lost exactly the metered amount (deposit out, the rest refunded).
@@ -348,8 +350,9 @@ async function realSettle(opts: {
       refundMicro: res.refundMicro!, cluster: opts.cluster,
     });
   } finally {
-    live.stopHeartbeat?.();
-    await seller.close();
+    live?.stopHeartbeat?.();
+    try { await seller?.close(); }
+    finally { await operator.stop(); }
   }
 }
 

@@ -186,9 +186,12 @@ about channels. This is a product fact, not a bug.
 
 ### 2.6 The MCP server is a separate package.
 
-`packages/wallie-mcp` depends on `allowance-kit` and `@modelcontextprotocol/sdk`. The
-zero-dep rule holds for `allowance-kit`; the MCP package is a thin adapter and may have
-deps. Published as `wallie-mcp` (the `wallie` alias pattern, see `packages/wallie/`).
+`packages/wallie-mcp` depends on `allowance-kit`, `@modelcontextprotocol/sdk`, and
+the supported chain libraries: `viem`, `@solana/kit`, `@x402/svm`, and
+`@solana-program/token`. Direct dependencies make a fresh MCP installation resolve
+the live runtime without relying on a transitive hoist. The zero-runtime-dependency
+rule holds for `allowance-kit`, where these remain optional peers. Published as
+`wallie-mcp` (the `wallie` alias pattern, see `packages/wallie/`).
 
 ### 2.7 Test rail: sandbox first, devnet second, mainnet by canary only.
 
@@ -216,7 +219,7 @@ gated today. Mainnet is a recorded canary run in `docs/canary-runs/`, never CI.
   │  │   selectOffer picks by chain,     │ rail: Solana exact → v0 tx via @x402/svm (NEW)
   │  │   then by scheme preference       │ rail: Solana upto  → open tx + channel store (NEW)
   │  ▼                                   ▼
-  │ MCP server (packages/wallie-mcp) ── tools: pay_fetch · get_budget · list_channels · approve
+  │ MCP server (packages/wallie-mcp) ── tools: pay_fetch · get_budget · list_channels · decide_approval
   │
   ▼
  seller: paymentGate(opts, handler)
@@ -341,10 +344,10 @@ Failure branches the buyer must handle:
 
 | Symptom | Buyer action |
 |---|---|
-| HTTP error before the seller could broadcast `open` (connection refused, 4xx other than 402) | `recordBlocked`/error, release reservation, `ChannelStore.drop` after `reconcile` confirms no PDA on-chain |
+| HTTP error after preparing the signed `open` | Record the error and retain the channel commitment. Release it only after finalized history and the expired open-validity window establish that no open occurred. A missing PDA alone is insufficient. |
 | Response arrives with `amount: "0"` | refund: `recordPayment(0)` is wrong; record a `payment` row with `amountMicro: 0`, `refundMicro: CEIL`, so the ledger shows the attempt |
-| Timeout or 5xx after the send | channel status `unknown`; `reconcile` reads the PDA: absent → drop; SEALED/DISTRIBUTED → read `settled` from chain and record; OPEN → status `orphaned`, start the `withdrawDelay` clock, emit Cloud `channel/orphaned` |
-| `orphaned` and `withdrawDelay` elapsed | `channels reclaim <id>`: `requestClose` → wait grace → `seal` → `withdrawPayer` (needs dust SOL, §2.5) |
+| Timeout or 5xx after the send | Mark `unknown`. Reconcile only on the channel's network. A missing PDA triggers finalized transaction-history recovery, not a refund assumption. Record a resolved payment in the ledger before releasing escrow. SEALED retains escrow until distribution or payer withdrawal is established. Incomplete or unsupported history remains held. OPEN can become `orphaned` and emit a channel event. |
+| `orphaned` and `withdrawDelay` elapsed | `channels reclaim <id>`: `requestClose` → wait grace → reread the watermark → `seal` → `withdrawPayer` (needs dust SOL, §2.5). Record the actual settled amount and refund once. |
 | Kill switch flipped mid-request | no new opens; in-flight request finishes (the seller settles in seconds); `channels reconcile` runs on the next CLI/dashboard tick |
 
 The buyer trusts the seller for the metered amount up to the ceiling. That is the protocol.
@@ -378,10 +381,16 @@ Steps inside the gate for an `upto` header: decode; check `accepted` echoes our 
 hook; run handler with a `Meter`; on handler success `settleClaim(actual)`; on handler
 throw or `meter` untouched, refund with `amount: "0"`; write `PAYMENT-RESPONSE`; call
 `opts.facilitator`-style `onSettled` for the ledger. The gate must never charge for a
-handler that threw. The gate runs `distribute` after `settleAndSeal` so rent returns to
-`feePayer`; if `distribute` fails, a `RentCleanup` retry list persists in the seller's state
-dir and `channels sweep` retries it (the library's `UptoSvmRentCleanupManager` does this;
-wrap it, do not rewrite it).
+handler that threw. The current library includes `settleAndSeal` and `distribute`
+in one atomic transaction. A failure can therefore leave the channel OPEN instead
+of partly settled. Its `UptoSvmRentCleanupManager` starts automatically and uses
+a persistent `SellerChannelStorage` index in the seller state directory.
+`channels sweep --seller --network solana-devnet` runs an explicit pass. Expired
+abandoned channels follow the library's abandon-close path after its 120 second
+grace period; cleanup refunds and reclaims rent rather than replaying a failed
+metered charge. The wrapper uses the library's transaction implementation.
+Servers await `gate.ready()` before listening and `gate.stop()` after closing;
+direct operator users await `operator.stop()`.
 
 The treasury ATA for the mint must exist or SEALED `distribute` fails (`docs/spikes/2026-09-13-spike-payment-channels-program.md` §1 and open
 question 9). `doctor --seller` checks it.
@@ -426,8 +435,9 @@ buyer's USDC is returned by `settleAndSeal`+`distribute` regardless of rent).
   `depositMicro`, `settledMicro`, `refundMicro`, `withdrawDelay`, `txHash`. Emitted after
   the lock, like every event. The cloud adds `"channel"` to `INGEST_KINDS` and stores it; the
   server adapts to the runtime (RELEASE-PLAN §3.1.1 rule).
-- **Escrow watchdog.** Runtime side: `channels reconcile` runs from the dashboard tick and
-  from `startCloudHeartbeat` every 60 s when any channel is `opened` or `unknown`; it emits
+- **Escrow watchdog.** Runtime side: reconciliation runs on startup and on an
+  unreferenced interval even when Cloud is disabled, as well as from the dashboard
+  tick and explicit CLI commands. It checks network scope and emits
   `orphaned` once per channel. Cloud side: an alert rule "channel orphaned" (email + SMS) and
   a second rule "escrow unsettled longer than N minutes" computed from `opened` events with no
   matching `settled`/`refunded` within N (default 10 min). Heartbeat body gains
@@ -475,7 +485,8 @@ ATA exists". `pay` unchanged (the scheme is chosen by the runtime).
 
 MCP tools (`packages/wallie-mcp`): `pay_fetch(url, method?, body?)` → `PaidResult`;
 `get_budget()` → spent, reserved, escrowed, remaining, window state; `list_channels()`;
-`approve(id)` / `deny(id)`; `reclaim_channel(id)`. Stdio transport. One example agent in
+`decide_approval(id, approve)`; `reclaim_channel(id)`. Approval is administrative
+authority, not a separate human authentication boundary. Stdio transport. One example agent in
 `demo/mcp-agent/` that buys from two of the demo sellers, one `exact` and one `upto`, and
 hits the ceiling once so judges see a block.
 

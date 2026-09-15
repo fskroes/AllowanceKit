@@ -232,3 +232,22 @@ test("a live agent's rails consult the chain before authorizing", async () => {
     await node.close();
   }
 });
+
+test("switching an allowance to Base keeps old Solana escrow in budget and reporting", async () => {
+  const { ChannelStore } = await import("../src/channels.ts");
+  const { base58Encode } = await import("../src/base58.ts");
+  const dir = tmpDir();
+  const local = createAgent(dir);
+  topUp(local, 0.10);
+  local.policyStore.save({ allowHostSuffixes: ["api.example.com"] });
+  new ChannelStore(dir).add({ channelId: base58Encode(new Uint8Array(32).fill(8)), agent: local.agentName,
+    url: "https://api.example.com/meter", host: "api.example.com", network: "solana-devnet",
+    depositMicro: 100_000n, withdrawDelay: 900 });
+  local.stopHeartbeat?.();
+  const live = await createLiveAgent({ stateDir: dir, network: "base-sepolia", privateKey: KEY, checkOnChainBalance: false });
+  try {
+    const decision = await live.ctx.authorize(1n, "https://api.example.com/meter");
+    assert.equal(decision.allowed, false);
+    assert.equal(allowanceRemaining(live), 0n);
+  } finally { live.stopHeartbeat?.(); }
+});

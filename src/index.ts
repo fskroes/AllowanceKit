@@ -97,6 +97,7 @@ export type {
   ChannelRpc,
   ChannelOnChain,
   ReconcileChange,
+  ReconcileOptions,
   ReclaimOptions,
   ReclaimResult,
   ReclaimStep,
@@ -138,8 +139,13 @@ export type {
   BeforeServeDecision,
   InMemoryUptoOperatorOptions,
   SolanaUptoOperatorOptions,
+  SolanaUptoOperator,
+  SellerRentCleanupManager,
+  SellerCleanupReport,
   TreasuryAtaCheck,
 } from "./seller-upto.ts";
+export { SellerChannelStorage, sellerStateDir } from "./seller-channels.ts";
+export type { SellerChannelRecord } from "./seller-channels.ts";
 
 export {
   PolicyStore,
