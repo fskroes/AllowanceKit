@@ -54,7 +54,7 @@ function parseDevnetProof(input: unknown): DevnetEvidence {
   const result = root?.result ?? root;
   const signature = result?.transaction?.signatures?.[0];
   const slot = Number(result?.slot);
-  if (slot !== 498173798) throw new Error(`Expected recorded devnet slot 498173798, received ${slot}`);
+  if (slot !== 498210157) throw new Error(`Expected recorded devnet slot 498210157, received ${slot}`);
   if (!signature || result?.meta?.err !== null) throw new Error("Devnet proof needs a signature and meta.err=null");
 
   const transfers: string[] = [];
@@ -76,7 +76,7 @@ function parseDevnetProof(input: unknown): DevnetEvidence {
   const balance = (rows: any[], owner: string) => rows?.find((row) => row.owner === owner)?.uiTokenAmount?.amount;
   const before = balance(result.meta.preTokenBalances, buyer);
   const after = balance(result.meta.postTokenBalances, buyer);
-  if (before !== "19870000" || after !== "19940000") throw new Error("Devnet buyer balance delta does not match the recorded 0.07 USDC refund");
+  if (before !== "19840000" || after !== "19910000") throw new Error("Devnet buyer balance delta does not match the recorded 0.07 USDC refund");
   return { signature, slot, sellerMicro: "30000", refundMicro: "70000", buyerRefundMicro: "70000" };
 }
 
@@ -172,19 +172,56 @@ async function firstExisting(candidates: string[]): Promise<string | null> {
   return null;
 }
 
+// Mastering chain applied to a human recording before loudness normalization.
+// Order matters: strip rumble and boxiness, then even out the dynamics with a
+// gentle compressor so the loudness stage never has to slam loud syllables. The
+// first cut sent raw phone audio (crest factor ~12) straight into a single-pass
+// dynamic loudnorm, which pumped and clipped the loud words and lifted the room
+// tone into a hollow sound.
+const RECORDED_PRE_FILTER = [
+  "highpass=f=90",                    // remove sub-bass rumble and handling noise
+  "equalizer=f=300:t=q:w=1.4:g=-3",   // cut boxy low-mid so the voice is less hollow
+  "equalizer=f=4200:t=q:w=2:g=2.5",   // gentle presence lift for intelligibility
+  "acompressor=threshold=-21dB:ratio=3:attack=6:release=140:makeup=3:knee=6",
+].join(",");
+const LOUDNORM_TARGET = "I=-16:TP=-2.0:LRA=11";
+
+const TARGET_LUFS = -16;
+
+/** Measure the filtered source integrated loudness (LUFS) with ffmpeg loudnorm pass one. */
+async function measureLoudness(recorded: string): Promise<number> {
+  const { stderr } = await execFile("ffmpeg", [
+    "-y", "-hide_banner", "-i", recorded, "-ac", "1", "-ar", "48000",
+    "-af", `${RECORDED_PRE_FILTER},loudnorm=${LOUDNORM_TARGET}:print_format=json`,
+    "-f", "null", "-",
+  ], { maxBuffer: 8 * 1024 * 1024 });
+  const match = stderr.match(/"input_i"\s*:\s*"(-?\d+(?:\.\d+)?)"/);
+  if (!match) throw new Error("loudnorm measurement did not return an integrated loudness value");
+  return Number(match[1]);
+}
+
 /**
  * Produce one scene's narration aiff. A human recording named `<base>.<ext>` in
- * voiceDir wins; otherwise fall back to local macOS `say`. A recording is cleaned
- * up in place (mono, rumble high-pass, broadcast loudness) with ffmpeg, so the
- * pipeline stays fully local and never touches a hosted speech API.
+ * voiceDir wins; otherwise fall back to local macOS `say`. A recording is
+ * mastered in place with ffmpeg (mono 48 kHz, high-pass, de-box EQ, compression,
+ * a single static gain to the target loudness, then a look-ahead true-peak
+ * limiter). The pipeline stays fully local and never touches a hosted speech API.
+ *
+ * The first cut used a single-pass dynamic loudnorm, whose time-varying gain
+ * pumped and clipped the loud words and lifted the room tone into a hollow sound.
+ * The compressor now evens the dynamics, one measured static gain sets the
+ * loudness (no time-varying gain, so no pumping), and the limiter alone holds the
+ * -2 dBTP ceiling, catching only the few isolated peaks (<1.8 dB here).
  */
 async function narrate(args: { voiceDir: string; base: string; narration: string; voice: string; out: string }): Promise<"recorded" | "say"> {
   const { voiceDir, base, narration, voice, out } = args;
   const recorded = await firstExisting(RECORDED_EXTENSIONS.map((ext) => path.join(voiceDir, base + ext)));
   if (recorded) {
+    const gainDb = (TARGET_LUFS - (await measureLoudness(recorded))).toFixed(2);
     await run("ffmpeg", [
       "-y", "-hide_banner", "-loglevel", "error", "-i", recorded,
-      "-ac", "1", "-ar", "44100", "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11", out,
+      "-ac", "1", "-ar", "48000",
+      "-af", `${RECORDED_PRE_FILTER},volume=${gainDb}dB,alimiter=limit=0.794:level=false`, out,
     ]);
     return "recorded";
   }
@@ -241,7 +278,7 @@ async function renderSet(args: {
       "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", String(FPS), "-i", frame, "-i", audio,
       "-filter_complex", `${videoFilter};${audioFilter}`, "-map", "[v]", "-map", "[a]", "-frames:v", String(FPS * SCENE_SECONDS), "-t", String(SCENE_SECONDS),
       "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", String(FPS), "-bf", "0",
-      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", clip,
+      "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", clip,
     ]);
     clips.push(clip);
     if (index === 0) await fs.copyFile(frame, path.join(outDir, `${name}-poster.png`));
@@ -256,7 +293,7 @@ async function renderSet(args: {
     "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listPath,
     "-filter_complex", audioVideoFilter, "-map", "[v]", "-map", "[a]", "-frames:v", String(targetDuration * FPS), "-t", String(targetDuration),
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", String(FPS), "-bf", "0",
-    "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", videoPath,
+    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", videoPath,
   ]);
   const captions = makeVtt(scenes, speechDurations);
   await fs.writeFile(path.join(outDir, `${name}.vtt`), captions);
@@ -335,9 +372,9 @@ async function main() {
         narration: {
           recordedScenes: pitch.recordedScenes + walkthrough.recordedScenes,
           synthesizedScenes: (pitch.totalScenes + walkthrough.totalScenes) - (pitch.recordedScenes + walkthrough.recordedScenes),
-          source: pitch.recordedScenes + walkthrough.recordedScenes > 0 ? "human recordings (ffmpeg highpass+loudnorm), macOS say fallback" : "macOS say",
+          source: pitch.recordedScenes + walkthrough.recordedScenes > 0 ? "human recordings (ffmpeg highpass+de-box EQ+compressor+static loudness gain+true-peak limiter), macOS say fallback" : "macOS say",
         },
-        audio: "ffmpeg AAC 160k",
+        audio: "ffmpeg AAC 192k",
         video: "ffmpeg libx264 yuv420p faststart",
       },
       evidence: { devnetSlot: devnet.slot, devnetSignature: devnet.signature, sellerMicro: devnet.sellerMicro, refundMicro: devnet.refundMicro, demoTranscript: "mcp-transcript.txt" },

@@ -103,9 +103,9 @@
     {
       "eyebrow": "09 / 10 · Independent chain evidence",
       "title": "The public devnet settlement is finalized.",
-      "subtitle": "Slot 498173798 · no transaction error · seller +$0.03 · buyer +$0.07 refund",
+      "subtitle": "Slot 498210157 · no transaction error · seller +$0.03 · buyer +$0.07 refund",
       "visual": "chain",
-      "narration": "This is the separate public Solana devnet proof. The recorded transaction finalized at slot 498173798, with no error. Its token-balance changes show thirty thousand micro-units going to the seller and seventy thousand coming back to the buyer. The submission links the full transaction and the exact canary command. These numbers were read from Solana's own RPC, not lifted from a screenshot."
+      "narration": "This is the separate public Solana devnet proof. The recorded transaction finalized at slot 498210157, with no error. Its token-balance changes show thirty thousand micro-units going to the seller and seventy thousand coming back to the buyer. The submission links the full transaction and the exact canary command. These numbers were read from Solana's own RPC, not lifted from a screenshot."
     },
     {
       "eyebrow": "10 / 10 · Hand-in package",
