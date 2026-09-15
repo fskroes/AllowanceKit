@@ -317,13 +317,13 @@ It funds a $0.20 allowance with a $0.05 per-call cap, settles a real $0.01 payme
 
 ## Solana
 
-The prepared version 0.6.0 adds Solana `exact` and `upto` payments. The recorded public devnet
+Version 0.6.0 adds Solana `exact` and `upto` payments. The recorded public devnet
 canary deposited **$0.10**, paid **$0.03**, and refunded **$0.07** in a finalized
 transaction. [Inspect the canary record](docs/canary-runs/2026-09-14-solana-devnet-readiness.md).
 This is devnet evidence; it does not establish Solana mainnet production readiness.
 
 For a repeatable demo with no keys or funded accounts, use Node 24 or later.
-The commands below require the public 0.6.0 release, which is still pending.
+The commands below use the published [0.6.0 release](https://github.com/fskroes/AllowanceKit/releases/tag/v0.6.0).
 Before publication, run `npm ci` and `npm run demo:mcp` in the prepared checkout:
 
 ```bash
@@ -335,8 +335,11 @@ npm run demo:mcp
 
 The exact phase uses the local practice rail. The Solana metered phase builds the
 channel transaction and uses an offline seller operator. The public devnet canary
-is separate. [Stocklana submission draft](docs/submission/README.md); videos are
-deferred to the project owner.
+is separate. The [stock monitor](https://www.onewallie.com/stock-monitor.html)
+uses this runtime to buy AAPLx, NVDAx and SPYx reports within a simulated USDC
+budget. It offers scenario or live DEX data and stock-specific alerts. See the
+[Stocklana submission pack](docs/submission/README.md); videos are deferred to
+the project owner.
 
 For a live Solana project, install the optional chain libraries:
 

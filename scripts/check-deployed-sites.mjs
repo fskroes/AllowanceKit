@@ -23,8 +23,17 @@ const html = noindex => body => {
   if (noindex) assert.match(body, /<meta[^>]+name="robots"[^>]+content="[^"]*noindex/i);
 };
 for (const pathname of ['/', '/cloud.html', '/docs.html', '/x402-spending-limits.html', '/privacy.html', '/terms.html', '/solana']) {
-  check('site', pathname, 200, html(false));
+  check('site', pathname, 200, body => {
+    html(false)(body);
+    if (['/privacy.html', '/terms.html'].includes(pathname)) assert.match(body, /Eames, Biesbosch 273, 1181 JC, Amstelveen, The Netherlands\./);
+  });
 }
+for (const pathname of ['/stock-monitor.html', '/stock-monitor']) check('site', pathname, 200, body => {
+  html(false)(body);
+  assert.match(body, /npm run demo:stocks/);
+  assert.match(body, /AAPLx/);
+  assert.match(body, /simulated USDC/);
+});
 check('site', '/solana.html', 200, body => {
   html(false)(body);
   assert.match(body, /Run the offline demo/);
@@ -32,6 +41,7 @@ check('site', '/solana.html', 200, body => {
 });
 check('site', '/sitemap.xml', 200, body => {
   assert.match(body, /\/solana(?:\.html)?<\/loc>/);
+  assert.match(body, /\/stock-monitor\.html<\/loc>/);
   assert(!body.includes('/404'), '404 must not be indexed');
 });
 check('site', '/robots.txt', 200, body => assert.match(body, /Sitemap:/i));
@@ -40,8 +50,11 @@ check('site', '/api/waitlist', 405, body => assert.equal(JSON.parse(body).ok, fa
 // Vercel also routes .js aliases to the functions. Verify JSON execution, not a
 // source-file response; MRR depends on optional Stripe configuration in previews.
 check('site', '/api/waitlist.js', 405, body => assert.equal(JSON.parse(body).ok, false));
+for (const pathname of ['/api/stock-monitor', '/api/stock-monitor.js']) check('site', pathname, 405, body => assert.match(JSON.parse(body).error, /Use POST/));
+check('site', '/assets/stock-monitor.mjs', 200, body => assert.match(body, /\/api\/stock-monitor/));
+check('site', '/assets/stock-monitor.css', 200, body => assert.match(body, /\.stock-page/));
 check('site', '/api/mrr.js', [200, 502, 503], body => assert.equal(typeof JSON.parse(body), 'object'));
-for (const pathname of ['/scripts/build-assets.mjs', '/scripts/indexnow-config.json', '/vercel.json', '/.env']) {
+for (const pathname of ['/scripts/build-assets.mjs', '/scripts/indexnow-config.json', '/lib/stock-monitor/runtime.mjs', '/vercel.json', '/.env']) {
   check('site', pathname, 404);
 }
 for (const pathname of ['/', '/overview', '/key', '/events', '/alerts', '/billing', '/welcome']) {

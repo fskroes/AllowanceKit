@@ -1,6 +1,6 @@
 # AllowanceKit 0.6.0: Solana payments and channel recovery
 
-This release prepares `allowance-kit`, `wallie` and `wallie-mcp` at version 0.6.0.
+This release includes `allowance-kit`, `wallie` and `wallie-mcp` at version 0.6.0.
 It adds Solana exact payments and metered `upto` channels to the allowance tools,
 with the same spending controls exposed through the SDK, CLI, dashboard and MCP.
 
@@ -43,6 +43,9 @@ Cloud operators must apply `002_channels.sql` and run `npm run check:schema`
 before using hosted escrow overview and heartbeats. This package release does not
 apply a hosted database migration.
 
-The [demo page](https://www.onewallie.com/solana.html) leads with the runnable
-offline demo. Submission videos are deferred. The Stocklana entry remains a draft
-until a tokenized-stock use case is implemented and demonstrated.
+The separate [stock monitor](https://www.onewallie.com/stock-monitor.html) uses
+this released runtime to buy AAPLx, NVDAx and SPYx price/risk reports within a
+simulated USDC allowance. It offers scenario or live DEX data, stock alerts,
+refunds and a budget stop. Its application source lives in the website repository;
+it is not part of this versioned package. The [payment proof page](https://www.onewallie.com/solana.html)
+retains the generic offline demo and devnet canary. Submission videos are deferred.

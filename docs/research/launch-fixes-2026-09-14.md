@@ -1,5 +1,11 @@
 # Wallie launch fixes, 14 September 2026
 
+**Update, 15 September:** See the [deployment record](launch-deployment-2026-09-15.md)
+for the applied production migration and published release. Use the isolated
+`scripts/cloud-production.mjs` commands in that record for production database
+work. Vercel CLI can let local dotenv values override downloaded production
+values in the older commands below.
+
 This records the fixes made after the [readiness audit](stocklana-readiness-2026-09-14.md).
 Scope: onewallie.com, Wallie Cloud and the prepared AllowanceKit 0.6.0 release.
 The owner deferred submission videos. No production deployment, database write,
