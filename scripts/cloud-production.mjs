@@ -3,10 +3,11 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [cloudDir, action] = process.argv.slice(2);
-if (!cloudDir || !['check:schema', 'migrate'].includes(action)) {
-  console.error('Usage: node scripts/cloud-production.mjs CLOUD_DIR check:schema|migrate');
+if (!cloudDir || !['check:schema', 'migrate', 'verify'].includes(action)) {
+  console.error('Usage: node scripts/cloud-production.mjs CLOUD_DIR check:schema|migrate|verify');
   process.exit(2);
 }
 const project = path.resolve(cloudDir);
@@ -28,9 +29,11 @@ try {
   // A clean cwd excludes dotenv; clearing DATABASE_URL excludes a shell override.
   const env = { ...process.env };
   delete env.DATABASE_URL;
-  const script = path.join(project, 'scripts', action === 'migrate' ? 'migrate.ts' : 'check-schema.ts');
+  const command = action === 'verify'
+    ? [fileURLToPath(new URL('./check-cloud-production.mjs', import.meta.url)), project]
+    : [path.join(project, 'scripts', action === 'migrate' ? 'migrate.ts' : 'check-schema.ts')];
   const code = await new Promise((resolve, reject) => {
-    const child = spawn('vercel', ['env', 'run', '-e', 'production', '--', process.execPath, script], {
+    const child = spawn('vercel', ['env', 'run', '-e', 'production', '--', process.execPath, ...command], {
       cwd: scratch, env, stdio: 'inherit',
     });
     child.on('error', reject);

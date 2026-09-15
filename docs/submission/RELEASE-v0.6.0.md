@@ -1,6 +1,6 @@
 # AllowanceKit 0.6.0: Solana payments and channel recovery
 
-This release prepares `allowance-kit`, `wallie` and `wallie-mcp` at version 0.6.0.
+This release includes `allowance-kit`, `wallie` and `wallie-mcp` at version 0.6.0.
 It adds Solana exact payments and metered `upto` channels to the allowance tools,
 with the same spending controls exposed through the SDK, CLI, dashboard and MCP.
 

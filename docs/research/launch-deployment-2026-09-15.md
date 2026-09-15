@@ -16,6 +16,7 @@ Use the isolated production runner from this repository:
 ```sh
 node scripts/cloud-production.mjs ../wallie-cloud check:schema
 node scripts/cloud-production.mjs ../wallie-cloud migrate
+node scripts/cloud-production.mjs ../wallie-cloud verify
 ```
 
 Vercel CLI 54.20.1 merges local dotenv and parent environment values over the
@@ -24,6 +25,14 @@ a different database. The runner constructs a clean temporary Vercel link,
 excludes dotenv files and clears inherited `DATABASE_URL`. Credentials remain
 inside the child process. Both the original and isolated checks reported the
 missing migration before it was applied; the isolated check passed afterward.
+
+The `verify` command creates a temporary synthetic workspace, API key and
+single-use sign-in link. It calls the deployed sign-in callback, which creates
+the real session cookie without sending email. Two authenticated heartbeats set
+escrow to 250,000 micro-USDC and clear it to zero. Two account-overview reads
+confirm those values and current liveness. The command removes its workspace,
+keys, sessions, agents and rate-limit fixture afterward, including on failure.
+This production check passed. No customer credentials or rows were used.
 
 ## Release review corrections
 
@@ -60,10 +69,48 @@ transaction was performed.
 - Cloud: 91 tests passed; typecheck and build passed.
 - Website: 7 tests passed; page checks and build passed.
 - Production schema check passed after migration.
+- Production sign-in callback, 2 authenticated heartbeats and 2 authenticated
+  overview reads passed. Synthetic fixture removed; no email or alert sent.
+- 35 public GET checks passed for pages, assets, 404s, discovery, API routing
+  and source exclusions on `www.onewallie.com` and `app.onewallie.com`.
+- Registry installation of all three 0.6.0 packages passed, including CLI
+  version checks, SDK imports, MCP discovery and the pinned Solana dependency.
+- Public `v0.6.0` clone, `npm ci` and `npm run demo:mcp` passed. Installation
+  reported zero vulnerabilities; the demo discovered all five MCP tools.
+- Both production sites sent an actual sanitized Insights pageview with HTTP
+  202. This confirms transport acceptance, not a separate dashboard inspection.
 
 ## Deployment status
 
 - Cloud PR #2 merged as `ceb40858f5a310032606ff3551cc34f99e3aac54`.
 - Website PR #2 merged as `d80710d8408d1e00df5d9abcd1d37f68ceac1150`.
-- Production website/domain checks and npm publication are in progress.
-- No email, checkout or Stocklana portal submission was sent.
+- Cloud production: `dpl_3FK23CyKGNCxjXz2r4bra5eiDavu`, aliased to
+  [api.onewallie.com](https://api.onewallie.com) and
+  [app.onewallie.com](https://app.onewallie.com).
+- Website production: `dpl_AkauKkCQp9wmkrAJbMgK6bhbHLSm`, aliased explicitly
+  to [onewallie.com](https://onewallie.com) and
+  [www.onewallie.com](https://www.onewallie.com).
+- Web Analytics enabled for both projects. The synthetic browser must disable
+  its test-only WebDriver/headless markers to exercise transport; Vercel skips
+  ordinary bot visits. Product code remains unchanged by the test.
+- AllowanceKit PR #6 merged after Node 20.11, 22 and 24 CI plus PR Lens passed.
+- Published `allowance-kit@0.6.0`, `wallie@0.6.0` and `wallie-mcp@0.6.0` from
+  release commit `7f9009b`, then pushed `v0.6.0` and created the
+  [GitHub release](https://github.com/fskroes/AllowanceKit/releases/tag/v0.6.0).
+- No email, checkout, funded chain transaction or Stocklana portal submission
+  was sent during this work. Videos remain deferred.
+
+Repeat the public page and real analytics transport checks:
+
+```sh
+node scripts/check-deployed-sites.mjs ../onewallie-site ../wallie-cloud https://www.onewallie.com https://app.onewallie.com /tmp/wallie-production-get.json
+node scripts/check-production-analytics.mjs /path/to/playwright/index.mjs /path/to/chrome
+```
+
+## Still needs owner input
+
+The postal address is not published because no approved text was supplied.
+The Stocklana entry remains a draft because no tokenized-stock flow was selected.
+The requested options were a paid stock-data monitor, a paper-trading demo, or
+live tokenized-stock trading with an explicitly selected provider and funding.
+No stock-specific claims or fabricated address were added to the website.
