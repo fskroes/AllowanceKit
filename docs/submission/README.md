@@ -89,6 +89,8 @@ website deployment and verification.
 | MCP package | https://www.npmjs.com/package/wallie-mcp/v/0.6.0 |
 | Canary record | https://github.com/fskroes/AllowanceKit/blob/v0.6.0/docs/canary-runs/2026-09-14-solana-devnet-readiness.md |
 | Devnet transaction | https://explorer.solana.com/tx/oAcbQ7M8gj3E1LveUr8nf8bcqVEmJPpjWXcS3Z5Ez5JYF7YqfnCpcssdnD2hfPeTJNL6tZBeTERNSiiLB3K2FGT?cluster=devnet |
+| Meteora DBC bounty repo | https://github.com/fskroes/wallie-dbc |
+| Meteora DBC bounty page | https://fskroes.github.io/wallie-dbc/ |
 
 The page leads with the interactive stock monitor. Video links stay hidden until the
 owner supplies and approves the submission videos. The existing video source and
@@ -170,6 +172,23 @@ rather than charging an uncompleted request again.
 Run `node scripts/verify-release.ts` to pack all three npm packages, install them
 in a fresh temporary consumer, and check SDK imports, the CLI alias and demo, and
 MCP discovery over stdio. This is separate from source-level tests.
+
+## Meteora DBC bounty (separate repo)
+
+The Meteora DBC bounty entry lives in [wallie-dbc](https://github.com/fskroes/wallie-dbc),
+not in this runtime, so AllowanceKit stays zero-dependency. It answers one question
+from on-chain DBC state: if I buy into this launch now and it never graduates, what
+do I get back, and when. It maps IPO terms (opening price, listing price, float,
+lockup, flip window) onto a DBC config, computes exit value, exit fee, shortfall to
+graduation and locked supply, and has a Wallie agent buy each report through the
+`upto` channel inside a fixed allowance.
+
+Proof: a real launch on the Surfnet mainnet fork against the deployed DBC program
+(pool `F3nFkEPrWkNV1BNJUTgAPGVcCLXTXRDmwrWv8PAEftXD`), three real buys, four paid
+reports, 21 offline tests, and a static page with a scrubbable simulation. See the
+[submission note](https://github.com/fskroes/wallie-dbc/blob/main/docs/submission-note.md)
+for the bounty addendum. Select the Meteora DBC bounty on the portal form and link
+that repo in the same entry.
 
 ## Scope stated in the entry
 
