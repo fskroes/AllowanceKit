@@ -10,6 +10,8 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-15
+
 The Solana rail and submission package (tickets **SOL-01 … SOL-10**) add a
 second chain family — `exact` payments symmetric with Base, and a self-facilitated `upto`
 payment-channel scheme for metered calls — behind the same allowance runtime, rails, ledger
@@ -322,7 +324,8 @@ The release that makes real money work, and makes a "yes" stop meaning "yes, for
   rails (budget, per-call cap, velocity circuit breaker, host allowlist, kill switch),
   the append-only audit ledger, and practice-money settlement on a local mock chain.
 
-[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/fskroes/AllowanceKit/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fskroes/AllowanceKit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fskroes/AllowanceKit/compare/v0.3.0...v0.4.0
