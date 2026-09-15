@@ -1,5 +1,10 @@
 # Wallie readiness and launch checklist
 
+Follow-up, 15 September: the owner selected the tokenized-stock monitor. Its
+website implementation, published runtime and repaired production Cloud schema
+are recorded in [the deployment report](launch-deployment-2026-09-15.md). The
+findings below are the historical review before those changes.
+
 Checked 14 September 2026 against the live websites, GitHub, npm, Vercel deployment metadata, Solana devnet RPC, and three local repositories. This is an audit. No production changes, package publications, account emails, purchases, or new blockchain transactions were made.
 
 **Verdict: not ready for Stocklana submission.** Solana payments work, but the inspected product does not demonstrate a tokenized-stock use case. The advertised submission page, videos, release tag, and versioned packages are also unavailable publicly.

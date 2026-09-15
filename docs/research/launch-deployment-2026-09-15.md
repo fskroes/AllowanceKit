@@ -1,8 +1,9 @@
 # Launch deployment, 15 September 2026
 
 Follow-up to [launch fixes](launch-fixes-2026-09-14.md). The owner requested
-remaining blocker fixes and deployment. Videos remain deferred. Postal contact
-text and the Stocklana tokenized-stock scope are awaiting owner input.
+remaining blocker fixes and deployment. Videos remain deferred. The owner chose
+the tokenized-stock monitor and approved the business postal address, with the
+organization spelling explicitly corrected to **Eames**.
 
 ## Cloud database
 
@@ -67,7 +68,21 @@ transaction was performed.
 - AllowanceKit: 231 passed, 3 opt-in sandbox tests skipped, 0 failed.
 - TypeScript build, offline MCP demo and all three fresh tarball consumer checks passed.
 - Cloud: 91 tests passed; typecheck and build passed.
-- Website: 7 tests passed; page checks and build passed.
+- Initial website launch: 7 tests passed; page checks and build passed.
+- Stock monitor revision: 15 tests passed, including real local x402 accounting,
+  refund failures, malformed API input and isolated sessions. Build and SEO checks
+  passed for all 9 HTML pages.
+- Stock monitor browser: 36 checks passed at widths 320, 360, 390, 768 and 1440,
+  including live DEX data, budget stops, micro-USDC precision, errors/retries,
+  theme changes, no overflow and approved legal contact text.
+- Stock preview API: scenario and live mode both returned HTTP 200, four reports,
+  0.012 charged, 0.002 remaining and zero escrow. All three live asset feeds passed.
+- 42 deployed GET checks passed against the stock preview and production Cloud,
+  including stock routes, source exclusions and API execution rather than source.
+- Final production rerun: all 36 stock browser checks and all 42 public GET
+  checks passed on `www.onewallie.com` and `app.onewallie.com` after alias updates.
+- Final analytics rerun: the website homepage, stock monitor and Cloud homepage
+  each sent a sanitized pageview accepted with HTTP 202.
 - Production schema check passed after migration.
 - Production sign-in callback, 2 authenticated heartbeats and 2 authenticated
   overview reads passed. Synthetic fixture removed; no email or alert sent.
@@ -87,12 +102,21 @@ transaction was performed.
 - Cloud production: `dpl_3FK23CyKGNCxjXz2r4bra5eiDavu`, aliased to
   [api.onewallie.com](https://api.onewallie.com) and
   [app.onewallie.com](https://app.onewallie.com).
-- Website production: `dpl_AkauKkCQp9wmkrAJbMgK6bhbHLSm`, aliased explicitly
+- Initial website production: `dpl_AkauKkCQp9wmkrAJbMgK6bhbHLSm`, aliased explicitly
   to [onewallie.com](https://onewallie.com) and
   [www.onewallie.com](https://www.onewallie.com).
 - Web Analytics enabled for both projects. The synthetic browser must disable
   its test-only WebDriver/headless markers to exercise transport; Vercel skips
   ordinary bot visits. Product code remains unchanged by the test.
+- Stock monitor preview: `dpl_7brJHZWeGtFa4dAJkse6anNoYtNC` at
+  `https://onewallie-61t7seann-fernando-silva-kroes-projects.vercel.app`.
+- Website PR #3 merged as `e7d8d3fe011f0ee2b46803a1f614fc063f8e6d8d` after CI
+  and PR Lens completed. Independent review found and fixed a malformed nested
+  watchlist input; the final review had no findings.
+- Stock monitor production: `dpl_A3y9ssms1gMjf48cfd1gTFBTzVDN`, from that merged
+  commit, at `https://onewallie-8handrd69-fernando-silva-kroes-projects.vercel.app`.
+  Both `onewallie.com` and `www.onewallie.com` serve this deployment. Public demo:
+  [stock-monitor.html](https://www.onewallie.com/stock-monitor.html).
 - AllowanceKit PR #6 merged after Node 20.11, 22 and 24 CI plus PR Lens passed.
 - Published `allowance-kit@0.6.0`, `wallie@0.6.0` and `wallie-mcp@0.6.0` from
   release commit `7f9009b`, then pushed `v0.6.0` and created the
@@ -107,10 +131,33 @@ node scripts/check-deployed-sites.mjs ../onewallie-site ../wallie-cloud https://
 node scripts/check-production-analytics.mjs /path/to/playwright/index.mjs /path/to/chrome
 ```
 
-## Still needs owner input
+## Stock monitor and postal contact
 
-The postal address is not published because no approved text was supplied.
-The Stocklana entry remains a draft because no tokenized-stock flow was selected.
-The requested options were a paid stock-data monitor, a paper-trading demo, or
-live tokenized-stock trading with an explicitly selected provider and funding.
-No stock-specific claims or fabricated address were added to the website.
+Approved postal text: **Eames, Biesbosch 273, 1181 JC, Amstelveen, The Netherlands.**
+The organization spelling matches the existing legal pages. Both legal contact
+sections and the applicable product footers use this text.
+
+The chosen Stocklana flow is implemented in the website repository's
+`lib/stock-monitor/`, `api/stock-monitor.js` and `stock-monitor.html`. It uses
+published `allowance-kit@0.6.0` and exact Solana dependency versions. Actual HTTP
+x402 negotiation and Solana message signing run against an isolated in-memory
+operator. All public payment amounts are labeled simulated USDC; the server
+generates a fresh unfunded key and temporary state, then removes it after the run.
+
+The default 0.014 allowance buys four reports at 0.003 each, reserving 0.005 and
+refunding 0.002 on each successful request. The fifth request is refused before
+data access. Provider failure returns the full reservation. Session limits cap
+input at three issuer-bound assets, a 0.1 budget and five requests.
+
+Live DEX data reads succeeded for AAPLx, NVDAx and SPYx. Mint addresses were
+verified against issuer metadata. The report selects the deepest priced Solana
+base-token pool and derives 24-hour movement and liquidity alerts. Unknown
+metrics remain unknown. DEX Screener supplies no quote update timestamp, so fetch
+observation is not described as proof of quote freshness. Stale reported cache
+age, HTTP errors and invalid pool data fail without substituting scenario prices.
+
+The public API is free; Wallie prices its derived report in the simulation, and
+no payment is sent to DEX Screener. Neither a stock trade nor a funded stock data
+transaction was performed. The submission pack discloses the existing runtime
+and this new stock-specific work. Videos and portal submission remain with the
+owner.

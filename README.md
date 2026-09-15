@@ -335,8 +335,11 @@ npm run demo:mcp
 
 The exact phase uses the local practice rail. The Solana metered phase builds the
 channel transaction and uses an offline seller operator. The public devnet canary
-is separate. [Stocklana submission draft](docs/submission/README.md); videos are
-deferred to the project owner.
+is separate. The [stock monitor](https://www.onewallie.com/stock-monitor.html)
+uses this runtime to buy AAPLx, NVDAx and SPYx reports within a simulated USDC
+budget. It offers scenario or live DEX data and stock-specific alerts. See the
+[Stocklana submission pack](docs/submission/README.md); videos are deferred to
+the project owner.
 
 For a live Solana project, install the optional chain libraries:
 

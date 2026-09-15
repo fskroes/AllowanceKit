@@ -11,7 +11,7 @@ const { chromium } = playwright;
 assert(chromium, 'Playwright Chromium is required');
 
 const browser = await chromium.launch({ headless: true, ...(chromeArg ? { executablePath: path.resolve(chromeArg) } : {}) });
-const urls = ['https://www.onewallie.com/', 'https://app.onewallie.com/'];
+const urls = ['https://www.onewallie.com/', 'https://www.onewallie.com/stock-monitor.html', 'https://app.onewallie.com/'];
 try {
   for (const url of urls) {
     const context = await browser.newContext();

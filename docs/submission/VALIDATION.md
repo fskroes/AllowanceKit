@@ -74,6 +74,11 @@ is claimed as submitted by this report.
 
 ## Launch checklist fixes, 14 September 2026
 
+Historical results below precede deployment. The missing production migration
+was applied on 15 September. Authenticated heartbeats and account overviews now
+pass, and 0.6.0 is published. See the [15 September deployment record](../research/launch-deployment-2026-09-15.md)
+for the stock monitor, approved postal contact and later validation.
+
 | Check | Result |
 | --- | --- |
 | AllowanceKit full test suite | 226 passed, 3 opt-in sandbox tests skipped, 0 failed |
