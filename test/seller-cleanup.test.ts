@@ -12,6 +12,8 @@ import { base58Encode, base58Decode } from "../src/base58.ts";
 import { spawnSync } from "node:child_process";
 import { paymentGate } from "../src/seller.ts";
 import { MockChain } from "../src/chain.ts";
+import { sellerCleanupSigner } from "../src/seller-cleanup.ts";
+import { PAYMENT_CHANNELS_PROGRAM } from "../src/channels.ts";
 
 const NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -116,6 +118,129 @@ function accountData(status: number, feePayer: string): Buffer {
   for (const offset of [88, 120, 152, 184, 216]) Buffer.from(base58Decode(feePayer)).copy(data, offset);
   return data;
 }
+
+test("cleanup distributes raw Sealed=1 and leaves raw Closing=2 alone", async (t) => {
+  const storage = new SellerChannelStorage(temp(t));
+  const fee = await createKeyPairSignerFromBytes(secret());
+  const row = record();
+  await storage.upsert(row);
+  let raw = accountData(1, fee.address);
+  const submitted: number[] = [];
+  const signer = {
+    getSigner: () => fee, getAddresses: () => [fee.address],
+    getLatestBlockhash: async () => ({ blockhash: PROGRAM, lastValidBlockHeight: 1000n }),
+    getSlot: async () => 5000n,
+    getAccountInfo: async () => ({ data: [raw.toString('base64'), 'base64'] as const, owner: PAYMENT_CHANNELS_PROGRAM, executable: false, lamports: 1n, space: 256n }),
+  };
+  const manager = new UptoSvmRentCleanupManager({ network: NETWORK, storage, signer: sellerCleanupSigner(signer, storage) as never });
+  t.mock.method(manager, 'submitCloseOrDistribute' as never, async (_fee: unknown, _row: unknown, _live: unknown, status: number) => { submitted.push(status); return 'distribution'; });
+  const errors: unknown[] = [];
+  await manager.cleanup({ onError: error => errors.push(error) });
+  assert.deepEqual(errors, []);
+  assert.equal(submitted.length, 1, 'a sealed channel must finish distribution');
+  assert.notEqual(submitted[0], 0, 'only distribution, without another seal');
+  assert.equal(raw[3], 1, 'cleanup must not mutate the RPC buffer');
+  assert.equal(Buffer.from((await signer.getAccountInfo()).data[0], 'base64')[3], 1, 'ordinary facilitator reads are unchanged');
+  raw = accountData(2, fee.address);
+  await manager.cleanup({ onError: error => errors.push(error) });
+  assert.equal(submitted.length, 1, 'a closing channel must not be distributed');
+  assert.deepEqual(errors, []);
+});
+
+test("cleanup keeps an absent pending deposit across restart", async (t) => {
+  const dir = temp(t);
+  const storage = new SellerChannelStorage(dir);
+  const row = record();
+  await storage.upsert(row);
+  const fee = await createKeyPairSignerFromBytes(secret());
+  const signer = {
+    getSigner: () => fee, getAddresses: () => [fee.address],
+    getLatestBlockhash: async () => ({ blockhash: PROGRAM, lastValidBlockHeight: 1000n }),
+    getSlot: async () => 1000n,
+    getAccountInfo: async () => null,
+  };
+  const manager = new UptoSvmRentCleanupManager({ network: NETWORK, storage, signer: sellerCleanupSigner(signer, storage) as never });
+  await manager.cleanup();
+  assert.deepEqual(await new SellerChannelStorage(dir).get(row.channelId), row, 'no account is not proof that a deposit cannot land');
+});
+
+test("cleanup deletes absent deposits only with finalized context beyond the signed open window", async (t) => {
+  const storage = new SellerChannelStorage(temp(t));
+  const row = record({ openSlot: 100 });
+  await storage.upsert(row);
+  const fee = await createKeyPairSignerFromBytes(secret());
+  const signer = {
+    getSigner: () => fee, getAddresses: () => [fee.address],
+    getLatestBlockhash: async () => ({ blockhash: PROGRAM, lastValidBlockHeight: 1000n }),
+    getSlot: async () => 9999n,
+    getAccountInfo: async (_id: string, _network: string, opts?: { commitment?: string }) => { assert.equal(opts?.commitment, 'finalized'); return null; },
+  };
+  let result: unknown = { context: { slot: 1600 }, value: null };
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    const request = JSON.parse(String(init.body));
+    assert.equal(request.params[1].commitment, 'finalized');
+    assert.equal(request.params[1].minContextSlot, 1601);
+    return Response.json({ result });
+  });
+  const manager = new UptoSvmRentCleanupManager({ network: NETWORK, storage, signer: sellerCleanupSigner(signer, storage, 'https://rpc.invalid') as never });
+  for (const uncertain of [{ context: { slot: 1600 }, value: null }, { context: { slot: 1601 }, value: {} }, { value: null }, { context: { slot: 1601 } }]) {
+    result = uncertain;
+    await manager.cleanup();
+    assert.ok(await storage.get(row.channelId), 'stale, present or incomplete evidence retains the row');
+  }
+  result = { context: { slot: 1601 }, value: null };
+  await manager.cleanup();
+  assert.equal(await storage.get(row.channelId), undefined);
+});
+
+test("real operator indexes the signed slot before broadcast and cleanup cannot erase it", async (t) => {
+  const stateDir = temp(t);
+  const row = record();
+  let indexed!: () => void;
+  const indexing = new Promise<void>(resolve => { indexed = resolve; });
+  let release!: () => void;
+  const broadcast = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  t.mock.method(UptoSvmScheme.prototype, 'settle', async function (this: UptoSvmScheme) {
+    await this.getChannelStorage().upsert(row);
+    indexed();
+    await broadcast;
+    return { success: true, transaction: 'open' };
+  });
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ jsonrpc: '2.0', id: 1, result: { context: { slot: 1000 }, value: null } }));
+  const options = { network: NETWORK, feePayerSecret: secret(), receiverAuthorizerSecret: secret(), stateDir, rpcUrl: 'https://rpc.invalid', cleanupIntervalSecs: false as const };
+  const operator = await createSolanaUptoOperator(options);
+  t.after(() => operator.stop());
+  const opening = operator.openDeposit({
+    x402Version: 2, accepted: { scheme: 'upto', network: NETWORK, amount: '100000', payTo: row.payTo },
+    payload: { channelId: row.channelId, from: address(), maxAmount: '100000', expiresAt: 100, openSlot: 1000, nonce: '1', openTransaction: 'signed-open' },
+  });
+  await indexing;
+  await operator.sweep();
+  const stored = await new SellerChannelStorage(stateDir).get(row.channelId);
+  assert.equal(stored?.openSlot, 1000, 'write-ahead slot remains durable during broadcast');
+  release();
+  await opening;
+  await operator.stop();
+  const restarted = await createSolanaUptoOperator(options);
+  t.after(() => restarted.stop());
+  await restarted.sweep();
+  assert.deepEqual(await new SellerChannelStorage(stateDir).get(row.channelId), stored);
+});
+
+test("deposit contexts cannot cross-wire concurrent channel slots or erase them later", async (t) => {
+  const storage = new SellerChannelStorage(temp(t));
+  const rows = [record(), record()];
+  await Promise.all(rows.map((row, i) => storage.withDeposit(row.channelId, i + 1, async () => {
+    await Promise.resolve();
+    await storage.upsert(row);
+  })));
+  for (const [i, row] of rows.entries()) {
+    await storage.upsert(row);
+    assert.equal((await storage.get(row.channelId))?.openSlot, i + 1);
+    await assert.rejects(storage.upsert({ ...row, openSlot: 999 }), /conflicting immutable facts/);
+  }
+});
 
 test("library cleanup retries failed settlement after process restart and refunds expired abandoned deposits once", async (t) => {
   const dir = temp(t);

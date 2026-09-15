@@ -6,6 +6,7 @@ import { offerAmount, offerAsset, offerPayTo } from "./types.ts";
 import type { AcceptsEntry, UptoPayload } from "./types.ts";
 import { RpcError } from "./usdc.ts";
 import { SellerChannelStorage } from "./seller-channels.ts";
+import { sellerCleanupSigner, type CleanupSigner } from "./seller-cleanup.ts";
 
 /**
  * The seller side of the Solana `upto` scheme, self-facilitated
@@ -649,7 +650,7 @@ interface UptoFacilitator {
     payload: Record<string, unknown>,
     requirements: Record<string, unknown>,
   ): Promise<FacilitatorSettleResponse>;
-  createRentCleanupManager(network: string): SellerRentCleanupManager;
+  createRentCleanupManager(network: string, options?: { signer: unknown }): SellerRentCleanupManager;
 }
 
 /**
@@ -738,7 +739,9 @@ export async function createSolanaUptoOperator(
 
   // Our own Ed25519 receiver-authorizer, address derived from the secret.
   const authorizerAddress = deriveAddress(opts.receiverAuthorizerSecret);
-  const cleanup = facilitator.createRentCleanupManager(info.caip2);
+  const cleanup = facilitator.createRentCleanupManager(info.caip2, {
+    signer: sellerCleanupSigner(facSigner as CleanupSigner, storage, rpcUrl),
+  });
   if (cleanupIntervalSecs !== false) cleanup.start({
     intervalSecs: cleanupIntervalSecs,
     onError: opts.onCleanupError ?? ((error, context) => {
@@ -778,7 +781,8 @@ export async function createSolanaUptoOperator(
     async openDeposit(env: UptoPaymentEnvelope): Promise<DepositOutcome> {
       const p = env.payload;
       const payload = { x402Version: env.x402Version, accepted: env.accepted, payload: toFacilitatorUptoPayload(p, "deposit", authorizerAddress) };
-      const resp = await facilitator.settle(payload, requirementsFor(env.accepted, BigInt(p.maxAmount)));
+      const resp = await storage.withDeposit(p.channelId, Number(p.openSlot), () =>
+        facilitator.settle(payload, requirementsFor(env.accepted, BigInt(p.maxAmount))));
       if (!resp.success) throw new Error(`open rejected: ${resp.errorReason ?? "unknown"} ${resp.errorMessage ?? ""}`.trim());
       return {
         channelId: p.channelId,

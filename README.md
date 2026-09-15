@@ -341,7 +341,7 @@ deferred to the project owner.
 For a live Solana project, install the optional chain libraries:
 
 ```bash
-npm install allowance-kit@0.6.0 @solana/kit@^5.5.1 @x402/svm@^2.25.0 @solana-program/token@^0.9.0
+npm install allowance-kit@0.6.0 @solana/kit@^5.5.1 @x402/svm@2.25.0 @solana-program/token@^0.9.0
 export AGENT_PRIVATE_KEY='your Solana secret key'
 npx allowance-kit init --live --network solana-devnet
 npx allowance-kit doctor
@@ -385,6 +385,15 @@ library's abandon-close rules after expiry and its 120 second grace period. It
 does not replay a failed charge. Await `gate.ready()` before listening and
 `gate.stop()` after closing the HTTP server. Direct operator users must await
 `operator.stop()` too.
+
+Seller cleanup uses a compatibility adapter for the pinned `@x402/svm@2.25.0`:
+the library reverses the program's Sealed and Closing state values. Only cleanup
+reads use the corrected mapping; payment verification receives original data.
+The index records each signed `openSlot` before broadcast. An absent channel is
+removed only when a finalized RPC response proves absence after `openSlot + 1500`.
+RPC errors and old records without an open slot remain indexed for retry. Do not
+delete these records to clear a pending count. Upgrade the library only with the
+cleanup integration tests and adapter changes together.
 
 ## MCP server
 

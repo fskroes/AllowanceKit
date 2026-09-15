@@ -11,6 +11,8 @@ with the same spending controls exposed through the SDK, CLI, dashboard and MCP.
   funds on another network, or corrupt state, as available allowance.
 - Seller cleanup starts automatically, persists public channel facts, retries
   according to the program's expiry/refund rules and drains work on shutdown.
+- Cleanup corrects the pinned library's Sealed/Closing mapping and retains
+  pending deposit records until finalized absence past the signed open window.
 - The offline MCP demo exercises a purchase, a blocked over-budget request and a
   metered payment. Fresh-consumer checks install and run all three npm packages.
 
@@ -26,7 +28,7 @@ npm run demo:mcp
 No keys or funded wallets are required. The Solana part uses an offline seller
 operator; it is separate from the public devnet proof.
 
-Validation: 226 tests passed, 3 opt-in sandbox tests skipped; TypeScript build and
+Validation: 231 tests passed, 3 opt-in sandbox tests skipped; TypeScript build and
 fresh installation checks passed. The recorded readiness canary deposited $0.10,
 charged $0.03 and returned $0.07 in finalized devnet settlement at slot 498210157.
 Recovery against the actual chain history recorded one payment and released the

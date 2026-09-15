@@ -30,6 +30,11 @@ resolves them. All entries below are grouped newest ticket first.
   stops through `gate.stop()` or `operator.stop()`. `channels sweep --seller`
   provides an explicit recovery command. Atomic claim failures leave channels
   recoverable under the program's expiry and refund rules.
+- **Seller cleanup state and deposit recovery fixes.** Correct the pinned
+  `@x402/svm@2.25.0` cleanup enum through its public signer override. Raw Sealed
+  channels finish distribution; Closing channels wait. Record the signed open
+  slot in the pre-broadcast index and require finalized absence beyond its
+  replay window before cleanup can remove a pending deposit.
 
 - **Solana canary + compat docs (SOL-09).** `scripts/canary-solana.ts` is the Solana twin
   of `scripts/canary.ts`: phase A proves the `upto` buyer, rails and escrow book hermetically
