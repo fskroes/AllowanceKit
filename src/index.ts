@@ -190,6 +190,26 @@ export type {
 
 export { Ledger } from "./ledger.ts";
 export type { LedgerEvent, LedgerTotals } from "./ledger.ts";
+
+// Behavior-derived attestation (PoC): compress the ledger into a signed,
+// portable reputation claim the agent signs with its own payer key, and a
+// seller verifies. See docs/attestation.md.
+export {
+  summarize,
+  attest,
+  attestFromLedger,
+  verifyAttestation,
+  canonicalJson,
+  ATTESTATION_DOMAIN,
+  ATTESTATION_TYPES,
+} from "./attestation.ts";
+export type {
+  BehaviorSummary,
+  SignedAttestation,
+  AttestationSigner,
+  AttestOptions,
+  VerifyAttestationResult,
+} from "./attestation.ts";
 export { ApprovalStore, DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 export type { ApprovalRequest, DecideOptions } from "./approvals.ts";
 export { ReservationStore } from "./reservations.ts";
