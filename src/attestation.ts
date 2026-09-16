@@ -122,8 +122,16 @@ const DEFAULT_TTL_SECS = 30 * 24 * 60 * 60;
 /**
  * Derive a behavior summary from an agent's ledger. Pure: no network, no viem,
  * no signing. One pass over the agent's own rows.
+ *
+ * `agent` is the wallet address that becomes the claim's identity (`summary.agent`)
+ * and, by default, the key the ledger rows are filtered by. The live runtime
+ * keys its ledger rows by an `agentName` string, not the address, so pass
+ * `opts.ledgerKey` to read rows under that name while still stamping the wallet
+ * address as the identity. When they are the same (the standalone demo/tests),
+ * `ledgerKey` is unnecessary.
  */
-export function summarize(ledger: Ledger, agent: string): BehaviorSummary {
+export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: string } = {}): BehaviorSummary {
+  const ledgerKey = opts.ledgerKey ?? agent;
   let periodStart: string | null = null;
   let periodEnd: string | null = null;
   let payments = 0;
@@ -136,7 +144,7 @@ export function summarize(ledger: Ledger, agent: string): BehaviorSummary {
   const hosts = new Set<string>();
 
   for (const e of ledger.read() as LedgerEvent[]) {
-    if (e.agent !== agent) continue;
+    if (e.agent !== ledgerKey) continue;
     if (periodStart === null || e.at < periodStart) periodStart = e.at;
     if (periodEnd === null || e.at > periodEnd) periodEnd = e.at;
     switch (e.t) {
@@ -250,14 +258,18 @@ export async function attest(
   return { version: 1, agent: summary.agent, issuedAt, expiresAt, summary, digest, signature };
 }
 
-/** Issue an attestation straight from a ledger: `summarize` then `attest`. */
+/**
+ * Issue an attestation straight from a ledger: `summarize` then `attest`.
+ * `opts.ledgerKey` lets the ledger filter key differ from the wallet address
+ * that signs and becomes the identity (see {@link summarize}).
+ */
 export async function attestFromLedger(
   signer: AttestationSigner,
   ledger: Ledger,
   agent: string,
-  opts: AttestOptions = {},
+  opts: AttestOptions & { ledgerKey?: string } = {},
 ): Promise<SignedAttestation> {
-  return attest(signer, summarize(ledger, agent), opts);
+  return attest(signer, summarize(ledger, agent, { ledgerKey: opts.ledgerKey }), opts);
 }
 
 export type VerifyAttestationResult =

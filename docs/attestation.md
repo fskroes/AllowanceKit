@@ -84,6 +84,56 @@ if (result.valid) {
 }
 ```
 
+### One call on a live agent
+
+A live agent signs an attestation from its own ledger with one call. It uses the
+same payer key, so the attesting address is the paying address:
+
+```ts
+const runtime = await createLiveAgent({ stateDir, network: "base-sepolia", privateKey });
+const attestation = await runtime.attest({ ttlSecs: 604800 });
+```
+
+The live ledger keys its rows by `agentName`, not the wallet address, so
+`runtime.attest()` reads the rows under `agentName` but stamps the wallet address
+as the claim identity (`summarize(..., { ledgerKey })`). Attestation is EIP-712,
+so it is EVM-only in v1; on a Solana runtime `attest()` rejects.
+
+### Seller gate
+
+`requireAttestation(policy, handler)` is the seller half: it wraps a handler,
+verifies the buyer's attestation from the `X-Attestation` header (base64 JSON,
+same convention as `X-PAYMENT`), checks the claim clears the seller's bar, and
+only then runs the handler. It has the same Node handler shape as a `paymentGate`
+handler, so it composes on either side of one:
+
+```ts
+import { paymentGate, requireAttestation } from "allowance-kit";
+
+// Payment first, then reputation (bindToPayer can then tie the two together).
+const gated = paymentGate(gateOpts, requireAttestation({
+  minPayments: 5,
+  minVerifiableTxCount: 3,
+  bindToPayer: true,          // the paying address must equal the attestation agent
+}, handler));
+
+// Or reputation first, before quoting a price.
+const gated2 = requireAttestation({ minVerifiableTxCount: 3 }, paymentGate(gateOpts, handler));
+```
+
+Policy floors: `minPayments`, `minVerifiableTxCount`, `minApprovalsApproved`,
+`minDistinctHosts`, `minSpendMicro`, plus `maxAgeSecs` (freshness), `agents` (an
+address allowlist), and `accept(summary, signer)` for anything custom. A rejected
+request gets `403 { error: "attestation_rejected", reason }`; override with
+`onReject`. On a served request the handler reads the verified claim with
+`attestationOf(req)`.
+
+**Replay.** An attestation is signed but not secret, so on its own it proves only
+that *some* high-reputation agent signed these numbers, not that the agent in
+front of you is that one. `bindToPayer: true` closes this when the same request
+carries the `X-PAYMENT`: the payer address must equal the attestation agent, so a
+copied attestation from an address that did not pay is refused.
+
 `summarize` is dependency-free (pure ledger math). `attest` and
 `verifyAttestation` import `viem` lazily, so an agent that only reads its own
 ledger never pulls a signing library in — the same optional-peer pattern as

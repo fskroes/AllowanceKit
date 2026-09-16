@@ -210,6 +210,12 @@ export type {
   AttestOptions,
   VerifyAttestationResult,
 } from "./attestation.ts";
+export { requireAttestation, attestationOf } from "./attestation-gate.ts";
+export type {
+  AttestationPolicy,
+  AttestedHandler,
+  VerifiedAttestation,
+} from "./attestation-gate.ts";
 export { ApprovalStore, DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 export type { ApprovalRequest, DecideOptions } from "./approvals.ts";
 export { ReservationStore } from "./reservations.ts";
