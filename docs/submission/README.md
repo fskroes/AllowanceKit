@@ -90,7 +90,8 @@ website deployment and verification.
 | Canary record | https://github.com/fskroes/AllowanceKit/blob/v0.6.0/docs/canary-runs/2026-09-14-solana-devnet-readiness.md |
 | Devnet transaction | https://explorer.solana.com/tx/oAcbQ7M8gj3E1LveUr8nf8bcqVEmJPpjWXcS3Z5Ez5JYF7YqfnCpcssdnD2hfPeTJNL6tZBeTERNSiiLB3K2FGT?cluster=devnet |
 | Meteora DBC bounty repo | https://github.com/fskroes/wallie-dbc |
-| Meteora DBC bounty page | https://fskroes.github.io/wallie-dbc/ |
+| Meteora DBC bounty page | https://www.onewallie.com/dbc.html |
+| Meteora DBC bounty page (GitHub Pages mirror) | https://fskroes.github.io/wallie-dbc/ |
 
 The page leads with the interactive stock monitor. Video links stay hidden until the
 owner supplies and approves the submission videos. The existing video source and
@@ -185,7 +186,8 @@ graduation and locked supply, and has a Wallie agent buy each report through the
 
 Proof: a real launch on the Surfnet mainnet fork against the deployed DBC program
 (pool `F3nFkEPrWkNV1BNJUTgAPGVcCLXTXRDmwrWv8PAEftXD`), three real buys, four paid
-reports, 21 offline tests, and a static page with a scrubbable simulation. See the
+reports, 21 offline tests, and a static page with a scrubbable simulation, live at
+[onewallie.com/dbc.html](https://www.onewallie.com/dbc.html) on the Wallie design system. See the
 [submission note](https://github.com/fskroes/wallie-dbc/blob/main/docs/submission-note.md)
 for the bounty addendum. Select the Meteora DBC bounty on the portal form and link
 that repo in the same entry.
