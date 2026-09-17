@@ -5,91 +5,116 @@ own wire code, quote the x402 v2 specification and the CDP/x402.org docs from pr
 sources, then hit real live x402 sellers with a plain read-only `GET` (no payment, nothing
 signed) and record the raw 402s. All source URLs and access date are given inline.
 
-This document is the output required by L-01. It does not change any code. Ticket L-02 acts
-on the recommendation at the end.
+This document began as the output of L-01 (research only). It now tracks the shipped code:
+L-02 added v2 alongside v1 and closed against a real settled payment (§8, §9), and the Solana
+rail landed (§10). **Status as of 2026-09-16:** the buyer (`payingFetch`) speaks v1 and v2 by
+auto-detection; the `CdpFacilitator` is v2-capable and version-selectable; our own EVM seller
+(`paymentGate`) still advertises v1 on purpose (its Base 402 stays byte-identical), and only
+the Solana rail advertises v2. §1, §2, §5 and §6 describe the current code; §3 and §4 are the
+primary-source evidence dated 2026-09-07.
 
 ---
 
 ## 1. Summary verdict
 
-**The live ecosystem has moved to x402 v2, and this repo speaks v1 only. As it stands today,
-the buyer path (`payingFetch`) cannot transact against a single seller in the public CDP
-directory.** Every one of the 100 resources in Coinbase's own live bazaar, and every one of
-the five real endpoints I hit by hand, answers with **`x402Version: 2`**, advertises its
-network in **CAIP-2** form (`eip155:8453` for Base, `eip155:84532` for Base Sepolia),
-carries the challenge in the **`PAYMENT-REQUIRED` header** (base64), and names the price
-field **`amount`** — not the v1 `X-PAYMENT` request header, not bare `base`/`base-sepolia`,
-not `maxAmountRequired`. The x402 v2 specification (`coinbase/x402`, spec version v2.0 dated
-2025-12-09; publicly launched as "x402 V2" on x402.org) makes `x402Version: 2` and CAIP-2
-networks **required**. The CDP facilitator docs list support as "x402 v2".
+**The live ecosystem is x402 v2, and this repo's buyer now speaks v1 and v2.** Every one of
+the 100 resources in Coinbase's live CDP bazaar, and every real endpoint the §4 probe hit,
+answers with `x402Version: 2`, a CAIP-2 network (`eip155:8453` Base, `eip155:84532` Base
+Sepolia), the challenge in the `PAYMENT-REQUIRED` header, and the price field named `amount`.
+No live v1 seller exists in the bazaar. A v1-only buyer cannot transact against any of them,
+and it fails before it reaches a facilitator: it reads `accepts` from the JSON body, has no
+`eip155:*` mapping, and reads the `maxAmountRequired` field v2 sellers omit.
 
-v1 is **not formally killed**: the x402 V2 launch post states "x402's reference SDKs are
-fully backward-compatible with V1" and promises "no breaking changes," and the discovery
-schema still carries a per-resource `x402Version` that may read `1`. But *no live v1 seller
-exists in the CDP bazaar today*, so backward-compatibility protects old clients talking to
-old servers — it does not let our v1-only client talk to the v2 servers that now make up the
-market. And our client breaks **before it ever reaches a facilitator**: it reads `accepts`
-from the JSON body (empty `{}` on reference-SDK sellers, who put it in the header), it has no
-mapping for `eip155:*` networks, and it does `BigInt(offer.maxAmountRequired)` on a field
-v2 sellers omit. Per decision **D-5**, v1 stays supported; **v2 must be added alongside it
-(L-02) before the buyer canary can pass against a third-party seller.**
+The buyer handles both wires by detecting the version from `x402Version` and answering in kind
+(`src/payer.ts:216`, `:276`). It reads the challenge from the `PAYMENT-REQUIRED` header or the
+JSON body, whichever carries `accepts[]` (`payer.ts:201-215`); reads the price from `amount` or
+`maxAmountRequired` (`src/types.ts:30`); maps CAIP-2 to and from bare names so a seller quoting
+`eip155:84532` is the same chain as a `base-sepolia` agent (`src/live.ts:80-92`, `:128`); sends
+the v2 `PAYMENT-SIGNATURE` header and nested `{ accepted, payload }` envelope, or the v1
+`X-PAYMENT` header and flat envelope (`payer.ts:302`, `src/live.ts:548-561`); and reads the
+receipt from `PAYMENT-RESPONSE`/`transaction` (v2) or `x-payment-response`/`txHash` (v1)
+(`payer.ts:334`, `:344`). This is proven end to end: real testnet USDC settled against a
+third-party v2 seller (§9), and real mainnet USDC settled (M-01/M-02, 2026-09-07).
 
-One honesty caveat: I could not directly test whether the CDP `POST /verify` and `/settle`
-endpoints still *accept* a v1-shaped body with a bare network name — that needs CDP
-credentials and a signed EIP-3009 payload, which is out of scope for read-only research.
-The verdict above rests on what sellers *advertise* and what the spec *requires*, both of
-which are conclusive on their own: even a v1-tolerant facilitator would not help, because our
-buyer never gets past parsing the seller's v2 402.
+v1 is not removed (decision **D-5**). Two places stay v1 on purpose. Our own EVM seller
+(`paymentGate`) advertises `x402Version: 1`, reads `x-payment`, and replies `X-PAYMENT-RESPONSE`
+so its Base 402 body is byte-identical to what it always emitted (`src/seller.ts:73-75`, `:232`,
+`:299`); only the Solana rail advertises v2 (`seller.ts:95-109`). And `CdpFacilitator` defaults
+to `x402Version: 1` so a v1 seller keeps working, taking `2` when a v2 caller constructs it
+(`src/facilitator-cdp.ts:74`, `:119-123`). The whole v1 path stays covered in
+`test/wire.test.ts`.
+
+One caveat carried from L-01: the CDP `/verify` and `/settle` v2 body shape follows the spec
+and matches what live sellers advertise, but has not been round-tripped against a real CDP
+`/verify` with CDP credentials. The §9 settlement went through Mart402's own facilitator, not
+CDP. See the honesty note in `facilitator-cdp.ts`.
 
 ---
 
-## 2. What this repo sends today (quoted, with file:line)
+## 2. What this repo does today (current code, file:line)
 
-All from branch `feat/live-money-0.4.0`.
+The buyer path is version-detecting; the seller and facilitator keep v1 as the default and add
+v2 where a seller needs it.
 
-**`x402Version` is hard-coded to `1`:**
+**Version detection and reply (buyer):**
 
-- `src/payer.ts:147` — the buyer's outgoing payment: `x402Version: 1,`
-- `src/seller.ts:44`, `:76`, `:83` — our seller's 402 body: `x402Version: 1,`
-- `src/facilitator-cdp.ts:63` — `this.x402Version = opts.x402Version ?? 1;`
-- `src/types.ts:17,22` — `PaymentRequiredBody` / `PaymentPayload` carry a numeric
-  `x402Version` (set to 1 everywhere it is produced).
+- `src/payer.ts:216` — `const isV2 = Number(headerJson?.x402Version ?? bodyJson?.x402Version ?? 1) >= 2;`
+- `src/payer.ts:276` — the outgoing payment answers in kind: `x402Version: isV2 ? 2 : 1,`
+- `src/payer.ts:201-215` — reads the challenge from the base64 `PAYMENT-REQUIRED` header or the
+  JSON body, preferring whichever carries `accepts[]` (a v2 seller often leaves the body `{}`,
+  §4c).
 
-**Header names are the v1 `X-PAYMENT` family:**
+**Header names (buyer): both families, chosen by version:**
 
-- `src/payer.ts:167` — buyer sends `headers: { …, "X-PAYMENT": encoded }`
-- `src/payer.ts:191` — buyer reads the receipt from `paid.headers.get("x-payment-response")`
-- `src/seller.ts:41` — our seller reads `req.headers["x-payment"]`
-- `src/seller.ts:87` — our seller replies with `res.setHeader("X-PAYMENT-RESPONSE", …)`
+- `src/payer.ts:302` — request header `isV2 ? "PAYMENT-SIGNATURE" : "X-PAYMENT"`
+- `src/payer.ts:334` — receipt header `isV2 ? "payment-response" : "x-payment-response"`
+- `src/payer.ts:344` — receipt hash `receipt.transaction ?? receipt.txHash` (v2 names it
+  `transaction`, v1 `txHash`)
 
-**Network identifiers are bare names, and only two are known:**
+**Network identifiers: bare names and CAIP-2, mapped both ways:**
 
-- `src/live.ts:42-58` — `NETWORKS` is keyed by `"base-sepolia"` (chainId 84532) and
-  `"base"` (chainId 8453). There is no `eip155:*` key anywhere.
-- `src/seller.ts:17` — `const network = opts.network ?? "mock-ledger";`
-- `src/live.ts:171-175` — a live agent throws if `unsigned.requirements.network !== network`
-  (string-equality against the bare name), so a seller quoting `eip155:8453` is refused
-  before signing even if it is the same chain.
+- `src/live.ts:56-72` — `NETWORKS` keyed by `base` (8453) and `base-sepolia` (84532)
+- `src/live.ts:80-83` — `CAIP2_ALIASES`: `eip155:8453 → base`, `eip155:84532 → base-sepolia`
+- `src/live.ts:90-92` — `networkInfo` resolves a bare name or a CAIP-2 id
+- `src/live.ts:128-142`, `:451` — the live agent's hard network constraint is `sameChain`, not
+  string-equality, so `eip155:84532` is accepted for a `base-sepolia` agent and a genuinely
+  different chain is still refused before anything is signed.
 
-**The buyer expects `accepts[]` in the JSON body, and reads `maxAmountRequired`:**
+**Price field: `amount` (v2) or `maxAmountRequired` (v1):**
 
-- `src/payer.ts:119-121` — `const required = (await first.json()) as PaymentRequiredBody;
-  const offer = required.accepts?.[0];` (no header fallback)
-- `src/payer.ts:132` — `const amountMicro = BigInt(offer.maxAmountRequired);`
-- `src/types.ts:3-14` — `AcceptsEntry` has `maxAmountRequired` and `network` (bare), no
-  `amount`, no `currency`, no `recipient`.
+- `src/types.ts:3-24` — `AcceptsEntry` carries both `amount` and `maxAmountRequired`, plus the
+  CDP bazaar's `recipient`/`currency` aliases (§4a)
+- `src/types.ts:30-42` — `offerAmount`/`offerPayTo`/`offerAsset` read the v2 field first, fall
+  back to v1
+- `src/payer.ts:231` — the buyer reads the amount through `offerAmount(rawOffer)`
 
-**The CDP facilitator call already uses the v2 URL path but a v1 body/version:**
+**Signed payload shape: flat (v1) or nested (v2), same signature:**
 
-- `src/facilitator-cdp.ts:82` — `POST {baseUrl}/platform/v2/x402/${action}` (verify/settle)
-- `src/facilitator-cdp.ts:87-91` — body is
-  `{ x402Version: this.x402Version /* =1 */, paymentPayload, paymentRequirements }`.
-  The envelope key names match v2 (§4), but the version and the nested payload shape are v1.
+- `src/live.ts:507-572` — `encodePaymentEvm` signs one EIP-712 `TransferWithAuthorization`, then
+  emits either the flat v1 `{ x402Version, scheme, network, resource, payload }` or the nested
+  v2 `{ x402Version:2, accepted, payload }`, chosen from `unsigned.x402Version`
+- `src/live.ts:558`, `src/payer.ts:287` — the v2 `accepted` echoes the seller's chosen offer
+  verbatim (`acceptedOffer`), because a v2 facilitator matches it against what it advertised and
+  throws on fields it never sent
+- `src/payer.ts:400-413` — the mock encoder mirrors both shapes so a keyless test buyer can
+  answer either seller
 
-**The signed EVM payload shape (`src/live.ts:231-247`)** is
-`{ x402Version, scheme, network, resource, payload: { signature, authorization } }` —
-scheme/network at the top level. v2 instead nests the chosen requirements under an
-`accepted` object (see §3, spec §5.2).
+**Facilitator: v2-capable, version-selectable, v1 by default:**
+
+- `src/facilitator-cdp.ts:74` — `this.x402Version = opts.x402Version ?? 1;`
+- `src/facilitator-cdp.ts:114-123` — posts `{ x402Version, paymentPayload, paymentRequirements }`
+  to `/platform/v2/x402/{verify,settle}` opaquely, so the same class serves both versions
+- `src/facilitator-cdp.ts:108` — reads `res.transaction ?? res.txHash` for the settled hash
+
+**Seller (`paymentGate`): v1 for EVM by design, v2 for Solana:**
+
+- `src/seller.ts:73-75` — `versionFor`: Solana → 2, EVM and mock → 1
+- `src/seller.ts:232`, `:299` — the EVM seller reads `x-payment` and replies `X-PAYMENT-RESPONSE`
+- `src/seller.ts:95-109` — a Solana gate advertises v2: CAIP-2 network, the USDC mint as
+  `asset`, and `extra.feePayer` from the facilitator's `/supported`
+
+`extra.name` / `extra.version` (the EIP-712 USDC domain) are unchanged between v1 and v2
+(`src/live.ts:574-583`).
 
 ---
 
@@ -230,64 +255,72 @@ gap changes the verdict; the CDP bazaar and the four 402s above are conclusive.
 
 ---
 
-## 5. Exact diff — v1 (this repo) vs v2 (live today)
+## 5. Field-by-field: what the code does, against what v2 requires
 
-| Field / header | v1 — what this repo does | v2 — what live sellers & the spec require |
+The middle column is the current code. The buyer handles both wires; each row notes where the
+seller or facilitator differs.
+
+| Field / header | What this repo does now | v2 — what live sellers & the spec require |
 | --- | --- | --- |
-| `x402Version` | `1` (`payer.ts:147`, `seller.ts:44`, `facilitator-cdp.ts:63`) | `2` (required; spec §5.1.2) |
-| Challenge transport | 402 **JSON body** with `accepts[]` (`payer.ts:119`) | 402 **`PAYMENT-REQUIRED` header** (base64); body often `{}` (4c) |
-| Payment request header | `X-PAYMENT` (`payer.ts:167`, `seller.ts:41`) | `PAYMENT-SIGNATURE` (launch post; spec §5.1.1 error string) |
-| Receipt header | `X-PAYMENT-RESPONSE` (`payer.ts:191`, `seller.ts:87`) | `PAYMENT-RESPONSE` (launch post; 4e CORS list) |
-| Network id | bare `base` / `base-sepolia` (`live.ts:42-58`) | CAIP-2 `eip155:8453` / `eip155:84532` (spec §11.1; every endpoint in §4) |
-| Price field | `maxAmountRequired` (`types.ts:6`, `payer.ts:132`) | `amount` (spec §5.1.2; §4b/4c/4d emit `amount` only) |
-| Recipient field | `payTo` | `payTo` (unchanged); CDP directory adds `recipient` alias (4a) |
-| Asset field | `asset` | `asset`; CDP directory adds `currency` alias (4a) |
-| `PaymentPayload` shape | flat: `{ x402Version, scheme, network, resource, payload:{signature,authorization} }` (`live.ts:231-247`) | nested: `{ x402Version:2, resource?, accepted:{PaymentRequirements}, payload:{…}, extensions? }` (spec §5.2.2) |
-| Facilitator `/verify` `/settle` path | `/platform/v2/x402/verify` (`facilitator-cdp.ts:82`) | same path; body `{ x402Version:2, paymentPayload, paymentRequirements }` (spec §7.1) |
-| Facilitator request body | `{ x402Version:1, paymentPayload, paymentRequirements }` (`facilitator-cdp.ts:87-91`) | same keys, `x402Version:2` + v2 nested payload |
-| Schemes seen | `exact` only | `exact`, plus `batch-settlement` and non-x402 rails (`tempo`/`mpp`) advertised alongside (4a) |
+| `x402Version` | buyer detects and echoes (`payer.ts:216`, `:276`); facilitator selectable, default 1 (`facilitator-cdp.ts:74`); EVM seller 1, Solana seller 2 (`seller.ts:73`) | `2` (required; spec §5.1.2) |
+| Challenge transport | buyer reads the `PAYMENT-REQUIRED` header or the body, whichever has `accepts[]` (`payer.ts:201-215`) | 402 **`PAYMENT-REQUIRED` header** (base64); body often `{}` (§4c) |
+| Payment request header | buyer sends `PAYMENT-SIGNATURE` (v2) or `X-PAYMENT` (v1) (`payer.ts:302`); EVM seller reads `x-payment` (`seller.ts:232`) | `PAYMENT-SIGNATURE` (launch post; spec §5.1.1) |
+| Receipt header | buyer reads `payment-response` (v2) or `x-payment-response` (v1); hash `transaction ?? txHash` (`payer.ts:334`, `:344`) | `PAYMENT-RESPONSE` (launch post; §4e) |
+| Network id | buyer maps `eip155:8453 ↔ base`, `eip155:84532 ↔ base-sepolia` (`live.ts:80-92`); same-chain gate (`live.ts:128`, `:451`) | CAIP-2 `eip155:8453` / `eip155:84532` (spec §11.1; every §4 endpoint) |
+| Price field | buyer reads `amount ?? maxAmountRequired` (`types.ts:30`, `payer.ts:231`) | `amount` (spec §5.1.2; §4b/4c/4d emit `amount` only) |
+| Recipient / asset | buyer reads `payTo ?? recipient`, `asset ?? currency` (`types.ts:35-42`) | `payTo` / `asset`; CDP directory adds `recipient` / `currency` aliases (§4a) |
+| `PaymentPayload` shape | flat (v1) or nested `{ accepted, payload }` (v2), `accepted` echoed verbatim (`live.ts:548-561`, `payer.ts:287`) | nested: `{ x402Version:2, resource?, accepted, payload, extensions? }` (spec §5.2.2) |
+| Facilitator `/verify` `/settle` | `/platform/v2/x402/{action}`, body `{ x402Version, paymentPayload, paymentRequirements }` (`facilitator-cdp.ts:114-123`) | same path and keys, `x402Version:2` + v2 nested payload (spec §7.1) |
+| Offer selection | buyer keeps `exact`/`upto` on its own chain that settle as plain USDC, cheapest (`live.ts:166-209`) | sellers advertise several offers/chains/tiers at once (§4a, §8) |
 
-`extra.name` / `extra.version` (the EIP-712 USDC domain, e.g. `"USD Coin"` / `"2"`) are
-**unchanged** between v1 and v2 — the one part of `advertise()`/`evmDomain()` that already
-matches what live sellers send.
+`extra.name` / `extra.version` (the EIP-712 USDC domain, `"USD Coin"` / `"2"`) are unchanged
+between v1 and v2 (`live.ts:574-583`), the one part of the domain that already matched.
 
 ---
 
-## 6. Recommendation for ticket L-02
+## 6. How the buyer speaks both (implemented; L-02 closed)
 
-**v2 must be added alongside v1 (per D-5, v1 is not removed). v1 alone is not sufficient:**
-the current buyer cannot complete a single real purchase against the live ecosystem, and it
-fails before reaching any facilitator. Concretely, L-02 needs, at minimum:
+L-02 added v2 alongside v1; the money-path proof is §8 and §9. This section is what the code
+does, in the order a request flows. The subsections are cited from the source.
 
-1. **Read the challenge from the `PAYMENT-REQUIRED` header, not only the body** (`payer.ts`
-   around :119). Reference-SDK sellers (useless-fact, vibesprings) return body `{}` — today
-   we mis-report them as "no acceptable payment methods." Detect the version from
-   `x402Version` (header or body) and branch.
-2. **Accept `amount` as well as `maxAmountRequired`** (`payer.ts:132`, `types.ts`). Add
-   `amount`/`currency`/`recipient` to `AcceptsEntry` as optional v2 aliases.
-3. **Map CAIP-2 networks both ways** — `base ↔ eip155:8453`, `base-sepolia ↔ eip155:84532`
-   (`live.ts` `NETWORKS` + the hard-constraint check at `:171-175`, and `seller.ts:17`). This
-   is the single biggest blocker: our network gate is a bare-string compare that rejects
-   `eip155:*` outright.
-4. **Send v2 when the seller sent v2:** `x402Version: 2`, the `PAYMENT-SIGNATURE` request
-   header, the `PAYMENT-RESPONSE` receipt header, and the nested `{ accepted, payload }`
-   PaymentPayload shape (`payer.ts`, `live.ts:encodePaymentEvm`).
-5. **Bump `CdpFacilitator` to `x402Version: 2`** by default (or negotiate per request) and
-   emit the v2 nested `paymentPayload` (`facilitator-cdp.ts`). The URL path is already
-   `/platform/v2/…`.
-6. Keep the whole v1 path intact behind the version detection, and cover every shape in
-   `test/wire.test.ts` (per L-02's "done when").
+### 6.1 Detect the version and read the challenge
+The buyer reads both the base64 `PAYMENT-REQUIRED` header and the JSON body, prefers whichever
+carries `accepts[]`, and sets `isV2` from `x402Version` (`payer.ts:201-216`). Reference-SDK
+sellers return body `{}` (§4c); reading the body alone, as v1 did, mis-reported them as "no
+payment methods".
 
-L-02's acceptance test — the buyer canary passing against a real third-party seller on Base
-Sepolia — implies also finding a **testnet (`eip155:84532`)** seller; the CDP bazaar sample I
-pulled was all Base mainnet (`eip155:8453`), so L-02 should source a Sepolia endpoint from
-the bazaar's testnet filter or from the `coinbase/x402` examples.
+### 6.2 Read the price and the aliased fields
+`offerAmount` reads `amount` (v2) or `maxAmountRequired` (v1); `offerPayTo`/`offerAsset` read
+the `recipient`/`currency` aliases the CDP bazaar dual-populates (`types.ts:30-42`, §4a).
 
-**Re-check date:** the ecosystem is moving fast (v2 spec 2025-12-09, launch post updated
-2026-06-24). This document should be re-verified by **2026-12-07** (3 months out), or sooner
-if L-02 slips — specifically re-run the §4 discovery + curl probe and re-read the CDP
-facilitator doc, watching for (a) any live v1 seller reappearing, (b) removal of the
-"backward-compatible with V1" promise, or (c) a v3.
+### 6.3 Match the network by chain, not by string
+`CAIP2_ALIASES` maps `eip155:*` to and from bare names and `sameChain` compares by chainId, so
+`eip155:84532` is accepted for a `base-sepolia` agent and a different chain is refused before
+signing (`live.ts:80-142`, `:451`). This was the single biggest v1 blocker: the old gate was a
+bare-string compare that rejected every `eip155:*` seller.
+
+### 6.4 Answer in the version the seller spoke
+The outgoing `x402Version` mirrors the seller's (`payer.ts:276`). The signing is identical
+between versions; only the envelope differs, chosen from `unsigned.x402Version`: flat for v1,
+nested `{ x402Version:2, accepted, payload }` for v2, with `accepted` echoing the seller's
+offer verbatim (`live.ts:503-561`, `payer.ts:287`). The wire headers follow the version too:
+`PAYMENT-SIGNATURE`/`PAYMENT-RESPONSE` for v2, `X-PAYMENT`/`X-PAYMENT-RESPONSE` for v1
+(`payer.ts:302`, `:334`).
+
+### 6.5 Post the facilitator body
+`CdpFacilitator` posts `{ x402Version, paymentPayload, paymentRequirements }` to
+`/platform/v2/x402/{verify,settle}`; the three keys are the same in both versions, so the class
+is v2-capable by construction and `x402Version` selects the envelope (default 1)
+(`facilitator-cdp.ts:74`, `:114-123`).
+
+v1 stays supported (decision **D-5**) and green in `test/wire.test.ts`. Our own EVM
+`paymentGate` still emits v1 (§1, §2); the Solana rail is v2 (§10).
+
+**Re-check date:** the ecosystem moves fast (v2 spec 2025-12-09, launch post updated
+2026-06-24). Re-verify this document by **2026-12-07** (3 months out): re-run the §4 discovery
+and curl probe and re-read the CDP facilitator doc, watching for (a) any live v1 seller
+reappearing, (b) removal of the "backward-compatible with V1" promise, (c) a v3, and (d)
+whether our EVM seller should move to v2.
 
 ---
 
