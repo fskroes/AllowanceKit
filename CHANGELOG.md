@@ -10,6 +10,43 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+Behavior-derived attestation turns the agent's private audit ledger into a
+signed, portable reputation claim, and takes the trust model all the way to
+chain-anchored: a seller can verify **what the agent did** (payments, on-chain)
+and **who the agent is** (ERC-8004 registry) without trusting the Wallie brand.
+
+### Added
+
+- **Behavior attestation core (`src/attestation.ts`).** `summarize` (pure,
+  zero-dep), `attest` / `attestFromLedger`, and `verifyAttestation` compress the
+  ledger into a counts-only summary and sign it with an EIP-712 envelope over a
+  keccak256 digest of the canonical JSON. Hosts, urls, and per-payment amounts
+  never leave the agent. viem is a lazy optional peer, so the core stays
+  dependency-free.
+- **Issuer + seller wiring.** `runtime.attest()` on `LiveAgentRuntime`
+  (`src/live.ts`) signs a claim from the agent's own ledger with the payer key,
+  so the payer address is the identity. `requireAttestation(policy, handler)`
+  and `attestationOf(req)` (`src/attestation-gate.ts`) let a seller gate a route
+  on cheap floors (`minPayments`, `agents` allowlist, `accept()`, `maxAgeSecs`,
+  ...), with `bindToPayer` closing the copied-attestation replay gap.
+- **v2 on-chain payment re-check (`src/attestation-chain.ts`).**
+  `verifyAttestationOnChain` / `enforceOnChain` confirm each opt-in evidence
+  `txHash` has a `success` receipt carrying an ERC-20 `Transfer` **log** whose
+  `from` is the agent (USDC when the network is known). Reading the log, not
+  `tx.from`, is what makes it correct for x402's facilitator-relayed EIP-3009
+  settlement.
+- **v2 ERC-8004 registry identity (`src/attestation-identity.ts`).**
+  `verifyAttestationIdentity` / `enforceIdentity` resolve the agent's opt-in
+  `registryAgentId` against the on-chain Identity Registry and confirm the
+  attesting address is the agent's `getAgentWallet` or `ownerOf`. Canonical
+  registry addresses ship as defaults (`ERC8004_IDENTITY_REGISTRY`, Base +
+  Base Sepolia). `isContractRevert` walks the viem cause chain so an RPC outage
+  propagates instead of being misread as "not registered".
+- **Tests, demo, docs.** 59 attestation tests
+  (`test/attestation{,-gate,-chain,-identity}.test.ts`), a no-network end-to-end
+  `demo/attestation.ts` (issue, verify, tamper, on-chain re-check, registry
+  resolve), and `docs/attestation.md`. All exported from `src/index.ts`.
+
 ## [0.6.0] - 2026-09-15
 
 The Solana rail and submission package (tickets **SOL-01 … SOL-10**) add a
