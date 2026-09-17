@@ -1,6 +1,7 @@
 import type { LedgerEvent } from "./ledger.ts";
 import { Ledger } from "./ledger.ts";
 import { runtimeVersion } from "./version.ts";
+import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts";
 
 /**
  * Behavior-derived attestation (PoC, v1 — brand-anchored self-attestation).
@@ -22,11 +23,13 @@ import { runtimeVersion } from "./version.ts";
  * stage it is at:
  *   - v1 (here): the signature proves the agent's key produced the claim. It
  *     does NOT prove the numbers against the chain. `verifiableTxCount` names
- *     how much of the claim is on-chain-checkable so a later verifier can raise
- *     the bar without a wire change.
- *   - v2 (not built): a verifier re-checks each `txHash` on-chain, and the agent
- *     identity anchors in an ERC-8004 Identity Registry so the reputation is
- *     resolvable across sellers without trusting the Wallie brand at all.
+ *     how much of the claim is on-chain-checkable.
+ *   - v2 (built, `src/attestation-chain.ts`): a verifier re-checks each `txHash`
+ *     on-chain. The agent opts in to exposing the hashes (`includeEvidence`),
+ *     the seller reads each receipt and confirms the agent moved USDC from its
+ *     own key, and the payments claim stops depending on the Wallie brand. The
+ *     remaining v2 half — anchoring the agent identity in an ERC-8004 Identity
+ *     Registry so reputation resolves across sellers — is not built.
  *
  * `summarize` is dependency-free (pure ledger math). Only `attest` and
  * `verifyAttestation` touch viem, and they import it lazily, so importing this
@@ -70,10 +73,18 @@ export interface BehaviorSummary {
   spendTotalMicro: string;
   /**
    * Payments that carry a non-empty `txHash` — the subset a verifier can
-   * re-check on-chain. In v1 nobody checks; the field exists so v2 can, with no
-   * wire change. Always <= `payments`.
+   * re-check on-chain. Always <= `payments`.
    */
   verifiableTxCount: number;
+  /**
+   * The actual txHashes behind `verifiableTxCount`, present only when the agent
+   * opts in (`includeEvidence`). This is the evidence a seller re-checks on-chain
+   * (v2, `src/attestation-chain.ts`). It is omitted by default because a txHash
+   * is public: exposing it lets anyone resolve the counterparty on-chain, so an
+   * agent trades that privacy for trustlessness only when it chooses to. When
+   * present, `verifiableTxHashes.length === verifiableTxCount`.
+   */
+  verifiableTxHashes?: string[];
   /** Attempts the policy rails refused. Self-reported: no third party can confirm a block. */
   blocks: number;
   /** How many distinct hosts the agent paid or was blocked against — breadth of counterparties. */
@@ -115,6 +126,13 @@ export interface AttestOptions {
   ttlSecs?: number;
   /** Override "now" (unix seconds), for tests. */
   now?: number;
+  /**
+   * Include the txHash evidence (`summary.verifiableTxHashes`) so a seller can
+   * re-check the payments on-chain (v2). Opt-in: it exposes public txHashes and
+   * thus the counterparties. Ignored by `attest` (which takes a ready summary);
+   * used by `summarize` and `attestFromLedger`.
+   */
+  includeEvidence?: boolean;
 }
 
 const DEFAULT_TTL_SECS = 30 * 24 * 60 * 60;
@@ -130,7 +148,11 @@ const DEFAULT_TTL_SECS = 30 * 24 * 60 * 60;
  * address as the identity. When they are the same (the standalone demo/tests),
  * `ledgerKey` is unnecessary.
  */
-export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: string } = {}): BehaviorSummary {
+export function summarize(
+  ledger: Ledger,
+  agent: string,
+  opts: { ledgerKey?: string; includeEvidence?: boolean } = {},
+): BehaviorSummary {
   const ledgerKey = opts.ledgerKey ?? agent;
   let periodStart: string | null = null;
   let periodEnd: string | null = null;
@@ -142,6 +164,7 @@ export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: str
   let approvalsApproved = 0;
   let policyChanges = 0;
   const hosts = new Set<string>();
+  const txHashes: string[] = [];
 
   for (const e of ledger.read() as LedgerEvent[]) {
     if (e.agent !== ledgerKey) continue;
@@ -151,7 +174,10 @@ export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: str
       case "payment":
         payments++;
         spendTotalMicro += BigInt(e.amountMicro);
-        if (e.txHash) verifiableTxCount++;
+        if (e.txHash) {
+          verifiableTxCount++;
+          txHashes.push(e.txHash);
+        }
         hosts.add(e.host);
         break;
       case "blocked":
@@ -170,7 +196,7 @@ export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: str
     }
   }
 
-  return {
+  const summary: BehaviorSummary = {
     agent,
     issuer: "wallie",
     runtimeVersion: runtimeVersion(),
@@ -185,6 +211,10 @@ export function summarize(ledger: Ledger, agent: string, opts: { ledgerKey?: str
     approvalsApproved,
     policyChanges,
   };
+  // Only attach the evidence when asked, so the default wire stays counts-only
+  // and its digest is unchanged from v1.
+  if (opts.includeEvidence) summary.verifiableTxHashes = txHashes;
+  return summary;
 }
 
 /**
@@ -269,11 +299,15 @@ export async function attestFromLedger(
   agent: string,
   opts: AttestOptions & { ledgerKey?: string } = {},
 ): Promise<SignedAttestation> {
-  return attest(signer, summarize(ledger, agent, { ledgerKey: opts.ledgerKey }), opts);
+  return attest(
+    signer,
+    summarize(ledger, agent, { ledgerKey: opts.ledgerKey, includeEvidence: opts.includeEvidence }),
+    opts,
+  );
 }
 
 export type VerifyAttestationResult =
-  | { valid: true; signer: string; summary: BehaviorSummary }
+  | { valid: true; signer: string; summary: BehaviorSummary; onChain?: OnChainVerifyResult }
   | { valid: false; reason: string };
 
 /**
@@ -284,13 +318,18 @@ export type VerifyAttestationResult =
  *   4. the EIP-712 signature recovers to the claimed agent.
  *
  * A `true` result means "this address controls the key and signed exactly these
- * numbers." It does NOT mean the numbers were checked against the chain — that is
- * v2 (see the module header). In v1 the seller trusts the contents on the Wallie
- * brand once the signature is proven.
+ * numbers." By default it does NOT check the numbers against the chain — the
+ * seller trusts the contents on the Wallie brand once the signature is proven.
+ *
+ * Pass `opts.onChain` to add step 5: re-check the txHash evidence on-chain
+ * (v2, `src/attestation-chain.ts`). It requires the agent to have attested with
+ * `includeEvidence`, adds RPC latency, and folds the on-chain tally into the
+ * result (`result.onChain`) or fails verification when the evidence does not
+ * clear the policy.
  */
 export async function verifyAttestation(
   att: SignedAttestation,
-  opts: { now?: number; verifyContentsOnChain?: never } = {},
+  opts: { now?: number; onChain?: OnChainPolicy } = {},
 ): Promise<VerifyAttestationResult> {
   if (att.version !== 1) return { valid: false, reason: `unknown attestation version ${att.version}` };
 
@@ -325,6 +364,15 @@ export async function verifyAttestation(
     return { valid: false, reason: `signature check failed: ${e instanceof Error ? e.message : String(e)}` };
   }
   if (!ok) return { valid: false, reason: "signature does not recover to the claimed agent" };
+
+  if (opts.onChain) {
+    // Lazy so a seller that never asks for on-chain verification never imports
+    // an RPC client (same optional-peer pattern as the signing path).
+    const { enforceOnChain } = await import("./attestation-chain.ts");
+    const chain = await enforceOnChain(att, opts.onChain);
+    if (!chain.ok) return { valid: false, reason: chain.reason };
+    return { valid: true, signer: att.agent, summary: att.summary, onChain: chain.result };
+  }
 
   return { valid: true, signer: att.agent, summary: att.summary };
 }

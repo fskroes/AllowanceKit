@@ -10,7 +10,9 @@
  *      a portable, non-custodial reputation claim;
  *   3. a seller verifies the signature recovers to the agent and reads the
  *      claim, the way it would gate access on it;
- *   4. a tampered claim is shown being rejected.
+ *   4. a tampered claim is shown being rejected;
+ *   5. the seller re-checks the payment evidence on-chain (v2) — here against an
+ *      injected fake RPC so the demo stays offline.
  *
  * Needs viem (a dev/optional peer dep, already installed): npm i viem
  */
@@ -19,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { Ledger } from "../src/ledger.ts";
 import { summarize, attest, verifyAttestation, type SignedAttestation } from "../src/attestation.ts";
+import { verifyAttestationOnChain, ERC20_TRANSFER_TOPIC, type TxReader } from "../src/attestation-chain.ts";
 
 function line(s = ""): void {
   process.stdout.write(s + "\n");
@@ -46,8 +49,9 @@ async function main(): Promise<void> {
   line(`   ${ledger.read().length} rows for ${agent}`);
   line();
 
-  // 2. The agent issues a signed behavior claim.
-  const summary = summarize(ledger, agent);
+  // 2. The agent issues a signed behavior claim. includeEvidence attaches the
+  //    txHashes so the seller can re-check them on-chain in step 6 (v2).
+  const summary = summarize(ledger, agent, { includeEvidence: true });
   line("=== 2. Behavior summary derived from the ledger (counts, not raw rows) ===");
   line(JSON.stringify(summary, null, 2));
   line();
@@ -82,6 +86,36 @@ async function main(): Promise<void> {
   line("=== 5. A tampered claim (payments inflated to 9999) ===");
   line(bad.valid ? "   BUG: forgery accepted" : `   REJECTED: ${bad.reason}`);
   if (bad.valid) process.exitCode = 1;
+  line();
+
+  // 5. v2: the seller re-checks the payment evidence on-chain. A real seller
+  //    passes a viem public client (or just `network: "base-sepolia"`); here an
+  //    injected fake RPC returns receipts so the demo needs no network. Each
+  //    receipt carries a USDC Transfer whose `from` is the agent — exactly what
+  //    a settled x402 payment leaves on-chain.
+  const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
+  const padTopic = (a: string) => "0x" + "0".repeat(24) + a.slice(2).toLowerCase();
+  const fakeRpc: TxReader = {
+    async getTransactionReceipt({ hash }) {
+      // The agent really paid in every one of its evidence txs.
+      const seller = "0x00000000000000000000000000000000000000ca";
+      return { status: "success", logs: [{ address: usdc, topics: [ERC20_TRANSFER_TOPIC, padTopic(agent), padTopic(seller)], data: "0x3e8" }] };
+    },
+  };
+  line("=== 6. Seller re-checks the payment evidence on-chain (v2) ===");
+  const chain = await verifyAttestationOnChain(attestation, { client: fakeRpc, network: "base-sepolia" });
+  line(`   ${chain.verified}/${chain.checked} evidence txs confirmed: each settled and moved USDC from ${agent.slice(0, 10)}...`);
+  line("   These payments no longer rest on the Wallie brand — the chain says so.");
+  if (chain.verified !== chain.checked) process.exitCode = 1;
+
+  // A fabricated hash cannot pass: the fake here has no such receipt.
+  const liar: SignedAttestation = {
+    ...attestation,
+    summary: { ...attestation.summary, verifiableTxHashes: ["0xf0f0"] },
+  };
+  const missReader: TxReader = { async getTransactionReceipt() { return null; } };
+  const miss = await verifyAttestationOnChain(liar, { client: missReader, network: "base-sepolia" });
+  line(`   A made-up txHash: ${miss.verified}/${miss.checked} verified (${miss.failures[0]?.reason ?? ""}).`);
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

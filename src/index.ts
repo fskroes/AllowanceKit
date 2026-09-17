@@ -216,6 +216,15 @@ export type {
   AttestedHandler,
   VerifiedAttestation,
 } from "./attestation-gate.ts";
+// v2: re-check the txHash evidence on-chain (docs/attestation.md).
+export { verifyAttestationOnChain, enforceOnChain, ERC20_TRANSFER_TOPIC } from "./attestation-chain.ts";
+export type {
+  TxReader,
+  OnChainVerifyOptions,
+  OnChainVerifyResult,
+  OnChainFailure,
+  OnChainPolicy,
+} from "./attestation-chain.ts";
 export { ApprovalStore, DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 export type { ApprovalRequest, DecideOptions } from "./approvals.ts";
 export { ReservationStore } from "./reservations.ts";

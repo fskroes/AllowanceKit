@@ -3,6 +3,7 @@ import type { DecodedPayment } from "./types.ts";
 import { payerOf } from "./types.ts";
 import type { BehaviorSummary, SignedAttestation } from "./attestation.ts";
 import { verifyAttestation } from "./attestation.ts";
+import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts";
 
 /**
  * Seller-side reputation gate (PoC, v1). A buyer presents a signed
@@ -52,6 +53,13 @@ export interface AttestationPolicy {
   agents?: string[];
   /** Require the request's `X-PAYMENT` payer to equal the attestation agent (anti-replay). */
   bindToPayer?: boolean;
+  /**
+   * Re-check the txHash evidence on-chain (v2). The buyer must have attested with
+   * `includeEvidence`. Adds an RPC round-trip per evidence tx, so prefer gating
+   * before pricing and caching per agent. Names the network (or a `client`/
+   * `rpcUrl`) and how many must verify (`minVerified`/`requireAll`).
+   */
+  onChain?: OnChainPolicy;
   /** Last-word predicate; return false (or throw) to reject after all built-in checks pass. */
   accept?: (summary: BehaviorSummary, signer: string) => boolean | Promise<boolean>;
   /** Override "now" (unix seconds), for tests. */
@@ -64,6 +72,8 @@ export interface AttestationPolicy {
 export interface VerifiedAttestation {
   signer: string;
   summary: BehaviorSummary;
+  /** The on-chain tally, present only when `policy.onChain` ran. */
+  onChain?: OnChainVerifyResult;
 }
 
 /** Read the verified attestation a `requireAttestation` gate attached to a served request. */
@@ -106,6 +116,9 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
     if (!att) return deny("malformed attestation header", req, res);
 
     const now = policy.now;
+    // Signature/window/digest only here. The on-chain re-check is the expensive
+    // step (an RPC per evidence tx), so it runs last, after the cheap floors have
+    // rejected any request that would fail anyway.
     const result = await verifyAttestation(att, now === undefined ? {} : { now });
     if (!result.valid) return deny(result.reason, req, res);
 
@@ -155,7 +168,21 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
       if (!ok) return deny("rejected by the seller's policy predicate", req, res);
     }
 
-    (req as { attestation?: VerifiedAttestation }).attestation = { signer, summary };
+    let onChain: OnChainVerifyResult | undefined;
+    if (policy.onChain) {
+      // Lazy import: a gate without an onChain policy never pulls an RPC client in.
+      const { enforceOnChain } = await import("./attestation-chain.ts");
+      let chain: Awaited<ReturnType<typeof enforceOnChain>>;
+      try {
+        chain = await enforceOnChain(att, policy.onChain);
+      } catch (e) {
+        return deny(`on-chain verification error: ${e instanceof Error ? e.message : String(e)}`, req, res);
+      }
+      if (!chain.ok) return deny(chain.reason, req, res);
+      onChain = chain.result;
+    }
+
+    (req as { attestation?: VerifiedAttestation }).attestation = { signer, summary, onChain };
     await handler(req, res, meter);
   };
 }

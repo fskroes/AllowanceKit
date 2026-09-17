@@ -1,7 +1,8 @@
 # Behavior-derived attestation (PoC)
 
-Status: proof of concept. `src/attestation.ts`, exported from the package root.
-Run the end-to-end demo with `node demo/attestation.ts`.
+Status: proof of concept. `src/attestation.ts` (issue + verify), `src/attestation-gate.ts`
+(seller gate), `src/attestation-chain.ts` (v2 on-chain re-check), all exported from
+the package root. Run the end-to-end demo with `node demo/attestation.ts`.
 
 ## What it is
 
@@ -23,10 +24,16 @@ from a track record the agent earned by behaving.
   the chain. A seller verifies the signature recovers to the claimed address and
   trusts the contents on the Wallie brand, the way it trusts a signed receipt from
   a known runtime. `verifiableTxCount` names how much of the claim is
-  on-chain-checkable, so v2 can raise the bar with no wire change.
-- **v2 (not built): chain-anchored, registry-resolvable.** A verifier re-checks
-  each `txHash` on-chain, and the agent identity anchors in an ERC-8004 Identity
-  Registry so the reputation resolves across sellers without trusting any brand.
+  on-chain-checkable.
+- **v2, on-chain re-check (built, `src/attestation-chain.ts`): chain-anchored.**
+  The agent opts in to exposing the txHashes behind `verifiableTxCount`
+  (`includeEvidence`); a verifier reads each receipt and confirms the agent moved
+  USDC from its own key. The payments claim then stops depending on the brand — a
+  fabricated or borrowed txHash fails. See "On-chain verification" below.
+- **v2, registry-resolvable (not built): ERC-8004 Identity Registry.** The agent
+  identity anchors in an on-chain registry so the reputation resolves across
+  sellers without any brand tag at all. This half needs a deployed registry
+  contract and is left for later.
 
 ## What the summary exposes
 
@@ -42,6 +49,7 @@ never leaves the agent. The summary is a reputation signal, not a data dump.
 | `payments` | settled payment rows |
 | `spendTotalMicro` | total actually spent, micro-dollars, decimal string |
 | `verifiableTxCount` | payments with a non-empty `txHash` (the chain-checkable subset) |
+| `verifiableTxHashes` | the actual hashes behind `verifiableTxCount`; present only with `includeEvidence` (v2 evidence) |
 | `blocks` | attempts the rails refused (self-reported; no third party can confirm) |
 | `distinctHosts` | how many counterparties the agent paid or was blocked against |
 | `approvalsRequested` / `approvalsApproved` | human-in-the-loop signal |
@@ -139,6 +147,75 @@ copied attestation from an address that did not pay is refused.
 ledger never pulls a signing library in — the same optional-peer pattern as
 `src/live.ts`.
 
+## On-chain verification (v2)
+
+v1 proves the key signed the numbers, then trusts them on the brand. v2 removes
+the brand from the loop for the one claim that is checkable: the payments. It has
+two moving parts.
+
+**The agent opts in to evidence.** By default the summary is counts-only and the
+txHashes stay private. `includeEvidence: true` attaches them:
+
+```ts
+const attestation = await runtime.attest({ includeEvidence: true });
+// or standalone: summarize(ledger, agent, { includeEvidence: true })
+```
+
+This is a deliberate privacy trade. A txHash is public, so exposing it lets
+anyone resolve the counterparty on-chain. The agent gives up that privacy only
+when the extra trust is worth it; without `includeEvidence`, v2 has nothing to
+check and the claim stays v1.
+
+**The seller re-checks each hash.** `verifyAttestationOnChain` reads each
+receipt and confirms the transaction settled and emitted a USDC `Transfer` whose
+`from` is the agent:
+
+```ts
+import { verifyAttestationOnChain } from "allowance-kit";
+
+const r = await verifyAttestationOnChain(attestation, { network: "base-sepolia" });
+// r.verified / r.checked / r.claimed, r.weak, r.failures[]
+```
+
+Pass `network` (bare or CAIP-2) to resolve the USDC token and a default RPC, or
+`rpcUrl` for your own endpoint, or a ready `client` (a viem public client, or a
+fake in tests). With no token known the check falls back to any ERC-20 `Transfer`
+from the agent and sets `weak: true`.
+
+x402 settles USDC with EIP-3009 `transferWithAuthorization`, relayed by a
+facilitator, so the transaction **sender** is the facilitator, not the agent. The
+check reads the `Transfer` **log** (`from` = the agent), never `tx.from`, which is
+why it works for relayed settlement.
+
+**What a pass proves:** the agent really moved USDC on-chain from its own key in
+each evidence tx. **What it does not:** which seller was paid (the host never
+leaves the agent) or the exact amount (the evidence is hashes only). It raises
+the floor from "the agent says it paid N times" to "the agent provably paid N
+times", not to a full audit.
+
+**One-call and gate integration.** `verifyAttestation` takes an `onChain` option
+that folds the re-check in, and the seller gate takes `policy.onChain`:
+
+```ts
+// One call: signature + on-chain in one result.
+const res = await verifyAttestation(attestation, {
+  onChain: { network: "base-sepolia", minVerified: 2 },
+});
+if (res.valid) res.onChain; // the tally
+
+// Gate: the on-chain check runs LAST, after the cheap floors, so a request that
+// fails minPayments never spends an RPC round-trip.
+const gated = requireAttestation({
+  minPayments: 5,
+  bindToPayer: true,
+  onChain: { network: "base-sepolia", requireAll: true },
+}, handler);
+```
+
+`minVerified` sets how many evidence txs must clear; `requireAll` demands every
+claimed one. Because the check costs an RPC per hash, gate before pricing and
+cache per agent. The handler reads the tally with `attestationOf(req).onChain`.
+
 ## Verification checks, in order
 
 1. summary matches the signed `digest` (contents not tampered);
@@ -147,14 +224,20 @@ ledger never pulls a signing library in — the same optional-peer pattern as
 4. the EIP-712 signature recovers to the claimed agent.
 
 A `true` result means "this address controls the key and signed exactly these
-numbers." It does not mean the numbers were checked on-chain — that is v2.
+numbers." By default it does not mean the numbers were checked on-chain. Add
+`opts.onChain` (or `policy.onChain` on the gate) for step 5: re-check the txHash
+evidence on-chain (needs `includeEvidence` on the attestation) and fail
+verification, or attach `result.onChain`, per the "On-chain verification"
+section.
 
 ## Honest limits of v1
 
 - **Self-asserted.** A local ledger the agent writes about itself is only worth
   trusting because payments carry a `txHash` that settled on-chain. v1 does not
-  re-check those; it trusts the Wallie brand. `blocks` and `policyChanges` are
-  self-reported and unfalsifiable by a third party — weigh them accordingly.
+  re-check those; it trusts the Wallie brand. v2 (`includeEvidence` +
+  `verifyAttestationOnChain`) closes this for payments — it proves them on-chain.
+  It does nothing for `blocks` and `policyChanges`, which are self-reported and
+  unfalsifiable by a third party; weigh those accordingly.
 - **Cold start.** Behavior reputation needs history. A brand-new agent has no
   behavior and so no reputation, which is exactly when a seller most wants a
   signal. A stake bootstraps trust on day one; behavior sustains it. The two
