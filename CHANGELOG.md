@@ -10,6 +10,8 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-17
+
 Behavior-derived attestation turns the agent's private audit ledger into a
 signed, portable reputation claim, and takes the trust model all the way to
 chain-anchored: a seller can verify **what the agent did** (payments, on-chain)
@@ -361,7 +363,8 @@ The release that makes real money work, and makes a "yes" stop meaning "yes, for
   rails (budget, per-call cap, velocity circuit breaker, host allowlist, kill switch),
   the append-only audit ledger, and practice-money settlement on a local mock chain.
 
-[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/fskroes/AllowanceKit/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fskroes/AllowanceKit/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fskroes/AllowanceKit/compare/v0.4.0...v0.5.0

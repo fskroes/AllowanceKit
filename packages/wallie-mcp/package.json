@@ -1,6 +1,6 @@
 {
   "name": "wallie-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Wallie MCP server — give your MCP client a spending allowance. Pay any x402 API (Base or Solana, exact or upto) inside hard policy rails, over five stdio tools.",
   "type": "module",
   "license": "MIT",
@@ -43,7 +43,7 @@
     "@solana-program/token": "^0.9.0",
     "@solana/kit": "^5.5.1",
     "@x402/svm": "2.25.0",
-    "allowance-kit": "^0.6.0",
+    "allowance-kit": "^0.7.0",
     "viem": "^2.55.19"
   }
 }
