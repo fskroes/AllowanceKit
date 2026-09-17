@@ -2,6 +2,7 @@ import type { LedgerEvent } from "./ledger.ts";
 import { Ledger } from "./ledger.ts";
 import { runtimeVersion } from "./version.ts";
 import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts";
+import type { IdentityPolicy, IdentityVerifyResult } from "./attestation-identity.ts";
 
 /**
  * Behavior-derived attestation (PoC, v1 — brand-anchored self-attestation).
@@ -24,12 +25,16 @@ import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts"
  *   - v1 (here): the signature proves the agent's key produced the claim. It
  *     does NOT prove the numbers against the chain. `verifiableTxCount` names
  *     how much of the claim is on-chain-checkable.
- *   - v2 (built, `src/attestation-chain.ts`): a verifier re-checks each `txHash`
- *     on-chain. The agent opts in to exposing the hashes (`includeEvidence`),
- *     the seller reads each receipt and confirms the agent moved USDC from its
- *     own key, and the payments claim stops depending on the Wallie brand. The
- *     remaining v2 half — anchoring the agent identity in an ERC-8004 Identity
- *     Registry so reputation resolves across sellers — is not built.
+ *   - v2, payments (built, `src/attestation-chain.ts`): a verifier re-checks each
+ *     `txHash` on-chain. The agent opts in to exposing the hashes
+ *     (`includeEvidence`), the seller reads each receipt and confirms the agent
+ *     moved USDC from its own key, and the payments claim stops depending on the
+ *     Wallie brand.
+ *   - v2, identity (built, `src/attestation-identity.ts`): the agent states its
+ *     ERC-8004 `registryAgentId`, and the seller resolves it in the on-chain
+ *     Identity Registry, confirming the attesting address is that agent's
+ *     registered wallet or owner. The identity then resolves across sellers with
+ *     no brand tag at all.
  *
  * `summarize` is dependency-free (pure ledger math). Only `attest` and
  * `verifyAttestation` touch viem, and they import it lazily, so importing this
@@ -85,6 +90,15 @@ export interface BehaviorSummary {
    * present, `verifiableTxHashes.length === verifiableTxCount`.
    */
   verifiableTxHashes?: string[];
+  /**
+   * The agent's ERC-8004 Identity Registry id (the NFT tokenId), a decimal
+   * string. Present only when the agent opts in (`registryAgentId` at attest
+   * time). A seller resolves it on-chain (`src/attestation-identity.ts`) to
+   * confirm the attesting address is this agent's registered wallet or owner, so
+   * the identity resolves without the Wallie brand tag. Omitted by default, which
+   * keeps the digest identical to a v1 claim.
+   */
+  registryAgentId?: string;
   /** Attempts the policy rails refused. Self-reported: no third party can confirm a block. */
   blocks: number;
   /** How many distinct hosts the agent paid or was blocked against — breadth of counterparties. */
@@ -133,6 +147,14 @@ export interface AttestOptions {
    * used by `summarize` and `attestFromLedger`.
    */
   includeEvidence?: boolean;
+  /**
+   * Stamp the agent's ERC-8004 Identity Registry id into the summary
+   * (`summary.registryAgentId`) so a seller can resolve the identity on-chain
+   * (v2, `src/attestation-identity.ts`). A decimal tokenId string. The agentId
+   * is not in the ledger; it comes from the agent's registration, so it is
+   * supplied here. Ignored by `attest`; used by `summarize` and `attestFromLedger`.
+   */
+  registryAgentId?: string;
 }
 
 const DEFAULT_TTL_SECS = 30 * 24 * 60 * 60;
@@ -151,7 +173,7 @@ const DEFAULT_TTL_SECS = 30 * 24 * 60 * 60;
 export function summarize(
   ledger: Ledger,
   agent: string,
-  opts: { ledgerKey?: string; includeEvidence?: boolean } = {},
+  opts: { ledgerKey?: string; includeEvidence?: boolean; registryAgentId?: string } = {},
 ): BehaviorSummary {
   const ledgerKey = opts.ledgerKey ?? agent;
   let periodStart: string | null = null;
@@ -214,6 +236,10 @@ export function summarize(
   // Only attach the evidence when asked, so the default wire stays counts-only
   // and its digest is unchanged from v1.
   if (opts.includeEvidence) summary.verifiableTxHashes = txHashes;
+  // Same for the registry id: attached only when the agent opts in, so a claim
+  // without it keeps the v1 digest.
+  if (opts.registryAgentId !== undefined && opts.registryAgentId !== "")
+    summary.registryAgentId = opts.registryAgentId;
   return summary;
 }
 
@@ -301,13 +327,17 @@ export async function attestFromLedger(
 ): Promise<SignedAttestation> {
   return attest(
     signer,
-    summarize(ledger, agent, { ledgerKey: opts.ledgerKey, includeEvidence: opts.includeEvidence }),
+    summarize(ledger, agent, {
+      ledgerKey: opts.ledgerKey,
+      includeEvidence: opts.includeEvidence,
+      registryAgentId: opts.registryAgentId,
+    }),
     opts,
   );
 }
 
 export type VerifyAttestationResult =
-  | { valid: true; signer: string; summary: BehaviorSummary; onChain?: OnChainVerifyResult }
+  | { valid: true; signer: string; summary: BehaviorSummary; onChain?: OnChainVerifyResult; identity?: IdentityVerifyResult }
   | { valid: false; reason: string };
 
 /**
@@ -326,10 +356,16 @@ export type VerifyAttestationResult =
  * `includeEvidence`, adds RPC latency, and folds the on-chain tally into the
  * result (`result.onChain`) or fails verification when the evidence does not
  * clear the policy.
+ *
+ * Pass `opts.identity` to add step 6: resolve the agent's `registryAgentId` in
+ * the ERC-8004 Identity Registry (v2, `src/attestation-identity.ts`) and confirm
+ * the attesting address is that agent's registered wallet or owner. It requires
+ * the agent to have attested with `registryAgentId` and folds the resolution into
+ * `result.identity` (or fails verification when the agent does not resolve).
  */
 export async function verifyAttestation(
   att: SignedAttestation,
-  opts: { now?: number; onChain?: OnChainPolicy } = {},
+  opts: { now?: number; onChain?: OnChainPolicy; identity?: IdentityPolicy } = {},
 ): Promise<VerifyAttestationResult> {
   if (att.version !== 1) return { valid: false, reason: `unknown attestation version ${att.version}` };
 
@@ -365,14 +401,24 @@ export async function verifyAttestation(
   }
   if (!ok) return { valid: false, reason: "signature does not recover to the claimed agent" };
 
+  let onChain: OnChainVerifyResult | undefined;
   if (opts.onChain) {
     // Lazy so a seller that never asks for on-chain verification never imports
     // an RPC client (same optional-peer pattern as the signing path).
     const { enforceOnChain } = await import("./attestation-chain.ts");
     const chain = await enforceOnChain(att, opts.onChain);
     if (!chain.ok) return { valid: false, reason: chain.reason };
-    return { valid: true, signer: att.agent, summary: att.summary, onChain: chain.result };
+    onChain = chain.result;
   }
 
-  return { valid: true, signer: att.agent, summary: att.summary };
+  let identity: IdentityVerifyResult | undefined;
+  if (opts.identity) {
+    // Lazy for the same reason: registry resolution pulls viem in only on demand.
+    const { enforceIdentity } = await import("./attestation-identity.ts");
+    const id = await enforceIdentity(att, opts.identity);
+    if (!id.ok) return { valid: false, reason: id.reason };
+    identity = id.result;
+  }
+
+  return { valid: true, signer: att.agent, summary: att.summary, onChain, identity };
 }

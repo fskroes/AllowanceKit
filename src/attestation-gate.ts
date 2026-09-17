@@ -4,6 +4,7 @@ import { payerOf } from "./types.ts";
 import type { BehaviorSummary, SignedAttestation } from "./attestation.ts";
 import { verifyAttestation } from "./attestation.ts";
 import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts";
+import type { IdentityPolicy, IdentityVerifyResult } from "./attestation-identity.ts";
 
 /**
  * Seller-side reputation gate (PoC, v1). A buyer presents a signed
@@ -60,6 +61,15 @@ export interface AttestationPolicy {
    * `rpcUrl`) and how many must verify (`minVerified`/`requireAll`).
    */
   onChain?: OnChainPolicy;
+  /**
+   * Resolve the buyer's ERC-8004 `registryAgentId` in the on-chain Identity
+   * Registry (v2) and require the attesting address to be that agent's
+   * registered wallet or owner. The buyer must have attested with
+   * `registryAgentId`. One RPC round-trip (two reads), so it runs after the cheap
+   * floors and before the per-hash `onChain` check. Names the network (or a
+   * `reader`/`rpcUrl`/`registry`).
+   */
+  identity?: IdentityPolicy;
   /** Last-word predicate; return false (or throw) to reject after all built-in checks pass. */
   accept?: (summary: BehaviorSummary, signer: string) => boolean | Promise<boolean>;
   /** Override "now" (unix seconds), for tests. */
@@ -74,6 +84,8 @@ export interface VerifiedAttestation {
   summary: BehaviorSummary;
   /** The on-chain tally, present only when `policy.onChain` ran. */
   onChain?: OnChainVerifyResult;
+  /** The registry resolution, present only when `policy.identity` ran. */
+  identity?: IdentityVerifyResult;
 }
 
 /** Read the verified attestation a `requireAttestation` gate attached to a served request. */
@@ -168,6 +180,23 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
       if (!ok) return deny("rejected by the seller's policy predicate", req, res);
     }
 
+    // Registry identity is one RPC round-trip (two reads); the on-chain payment
+    // re-check is one RPC per evidence tx. Resolve identity first so an
+    // unregistered agent fails before the more expensive per-hash loop runs.
+    let identity: IdentityVerifyResult | undefined;
+    if (policy.identity) {
+      // Lazy import: a gate without an identity policy never pulls an RPC client in.
+      const { enforceIdentity } = await import("./attestation-identity.ts");
+      let id: Awaited<ReturnType<typeof enforceIdentity>>;
+      try {
+        id = await enforceIdentity(att, policy.identity);
+      } catch (e) {
+        return deny(`registry identity error: ${e instanceof Error ? e.message : String(e)}`, req, res);
+      }
+      if (!id.ok) return deny(id.reason, req, res);
+      identity = id.result;
+    }
+
     let onChain: OnChainVerifyResult | undefined;
     if (policy.onChain) {
       // Lazy import: a gate without an onChain policy never pulls an RPC client in.
@@ -182,7 +211,7 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
       onChain = chain.result;
     }
 
-    (req as { attestation?: VerifiedAttestation }).attestation = { signer, summary, onChain };
+    (req as { attestation?: VerifiedAttestation }).attestation = { signer, summary, onChain, identity };
     await handler(req, res, meter);
   };
 }

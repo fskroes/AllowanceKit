@@ -1,7 +1,8 @@
 # Behavior-derived attestation (PoC)
 
 Status: proof of concept. `src/attestation.ts` (issue + verify), `src/attestation-gate.ts`
-(seller gate), `src/attestation-chain.ts` (v2 on-chain re-check), all exported from
+(seller gate), `src/attestation-chain.ts` (v2 on-chain payment re-check),
+`src/attestation-identity.ts` (v2 ERC-8004 registry resolution), all exported from
 the package root. Run the end-to-end demo with `node demo/attestation.ts`.
 
 ## What it is
@@ -30,10 +31,13 @@ from a track record the agent earned by behaving.
   (`includeEvidence`); a verifier reads each receipt and confirms the agent moved
   USDC from its own key. The payments claim then stops depending on the brand — a
   fabricated or borrowed txHash fails. See "On-chain verification" below.
-- **v2, registry-resolvable (not built): ERC-8004 Identity Registry.** The agent
-  identity anchors in an on-chain registry so the reputation resolves across
-  sellers without any brand tag at all. This half needs a deployed registry
-  contract and is left for later.
+- **v2, registry-resolvable (built, `src/attestation-identity.ts`): ERC-8004
+  Identity Registry.** The agent states its registry id (`registryAgentId`), and a
+  verifier resolves it in the on-chain ERC-8004 Identity Registry, confirming the
+  attesting address is that agent's registered wallet or owner. The identity then
+  resolves across sellers with no brand tag at all — a seller that never heard of
+  Wallie still gets a chain-anchored answer to "who is this agent". See "Identity
+  registry" below.
 
 ## What the summary exposes
 
@@ -50,6 +54,7 @@ never leaves the agent. The summary is a reputation signal, not a data dump.
 | `spendTotalMicro` | total actually spent, micro-dollars, decimal string |
 | `verifiableTxCount` | payments with a non-empty `txHash` (the chain-checkable subset) |
 | `verifiableTxHashes` | the actual hashes behind `verifiableTxCount`; present only with `includeEvidence` (v2 evidence) |
+| `registryAgentId` | the agent's ERC-8004 Identity Registry id (NFT tokenId), decimal string; present only when the agent opts in (v2 identity) |
 | `blocks` | attempts the rails refused (self-reported; no third party can confirm) |
 | `distinctHosts` | how many counterparties the agent paid or was blocked against |
 | `approvalsRequested` / `approvalsApproved` | human-in-the-loop signal |
@@ -216,28 +221,106 @@ const gated = requireAttestation({
 claimed one. Because the check costs an RPC per hash, gate before pricing and
 cache per agent. The handler reads the tally with `attestationOf(req).onChain`.
 
+## Identity registry (v2)
+
+On-chain re-check (above) proves the *behavior* — the agent really paid. This
+proves the *identity* — who the agent is — without the Wallie brand. v1 keys
+identity on `summary.issuer === "wallie"`, a tag a seller has to already trust.
+This anchors the agent in the ERC-8004 Identity Registry
+(github.com/erc-8004/erc-8004-contracts), a canonical contract where agents
+register as ERC-721 NFTs, so any seller resolves the identity the same way.
+
+ERC-8004 v2 is agentId-centric: registration mints a tokenId (`== agentId`), and
+there is no on-chain reverse index from address to id. So the agent states its
+`registryAgentId` in the signed summary, and the seller confirms the registry
+maps that id back to the attesting address:
+
+```ts
+import { verifyAttestationIdentity } from "allowance-kit";
+
+const r = await verifyAttestationIdentity(attestation, { network: "base-sepolia" });
+// r.registered, r.matchedBy ("wallet" | "owner"), r.wallet, r.owner, r.agentId
+```
+
+Two registry reads settle it, and the attesting address must equal one:
+
+- `getAgentWallet(agentId)` — the agent's operational wallet, the key it pays and
+  signs with (what an x402 agent uses); or
+- `ownerOf(agentId)` — the NFT owner, for an agent that pays from the owner key
+  and never set a separate wallet.
+
+The `registryAgentId` rides inside the summary, so the EIP-712 digest binds it: an
+agent cannot borrow another's registration without breaking the signature. The
+agent opts in the same way it opts in to evidence — `attest({ registryAgentId })`
+or `summarize(ledger, agent, { registryAgentId })`; omitted, the digest is a v1
+digest.
+
+**Deployed registries** ship as defaults (`ERC8004_IDENTITY_REGISTRY`): Base
+Sepolia `0x8004A818BFB912233c491871b3d84c89A494BD9e`, Base mainnet
+`0x8004A169FB4a3325136EB29fA0ceB6D2e539a432`. Pass `registry` to point at another
+deployment, `network`/`rpcUrl` to pick the endpoint, or `reader` (a fake) in tests.
+
+**What a pass proves:** the attesting key is the registered identity of a real
+ERC-8004 agent, resolvable by anyone from the chain. **What it does not:** the
+agent's behavior (that is v1 + the on-chain payment re-check) or that the
+registration itself is honest — a registry entry is only as good as the agent
+card behind its `tokenURI`.
+
+**One-call and gate integration.** `verifyAttestation` takes an `identity` option,
+and the seller gate takes `policy.identity`. In the gate the registry read (one
+RPC round-trip) runs after the cheap floors and *before* the per-hash on-chain
+check, so an unregistered agent fails before the more expensive loop:
+
+```ts
+// One call: signature + registry identity in one result.
+const res = await verifyAttestation(attestation, {
+  identity: { network: "base-sepolia" },
+});
+if (res.valid) res.identity; // the resolution
+
+// Gate: registry identity + on-chain payments + payer binding, fully trustless.
+const gated = requireAttestation({
+  minPayments: 5,
+  bindToPayer: true,                                  // paying address == attestation agent
+  identity: { network: "base-sepolia" },              // == the registered agent
+  onChain: { network: "base-sepolia", requireAll: true }, // provably paid on-chain
+}, handler);
+```
+
+With all three, the seller needs no brand: the paying address equals the
+attestation agent, that agent is the registered ERC-8004 identity, and every
+claimed payment is confirmed on-chain. The handler reads the resolution with
+`attestationOf(req).identity`. Set `requireRegistered: false` to attach the
+resolution without failing a claim that has no `registryAgentId`.
+
 ## Verification checks, in order
 
 1. summary matches the signed `digest` (contents not tampered);
 2. `summary.agent` matches the attestation `agent`;
 3. the claim is inside its `[issuedAt, expiresAt)` window;
-4. the EIP-712 signature recovers to the claimed agent.
+4. the EIP-712 signature recovers to the claimed agent;
+5. (optional, `onChain`) the txHash evidence re-checks on-chain;
+6. (optional, `identity`) the `registryAgentId` resolves to the attesting address
+   in the ERC-8004 registry.
 
 A `true` result means "this address controls the key and signed exactly these
-numbers." By default it does not mean the numbers were checked on-chain. Add
-`opts.onChain` (or `policy.onChain` on the gate) for step 5: re-check the txHash
-evidence on-chain (needs `includeEvidence` on the attestation) and fail
-verification, or attach `result.onChain`, per the "On-chain verification"
-section.
+numbers." By default it does not mean the numbers were checked on-chain or the
+identity resolved in a registry. Add `opts.onChain` (or `policy.onChain` on the
+gate) for step 5 and `opts.identity` (or `policy.identity`) for step 6; each
+needs the matching opt-in on the attestation (`includeEvidence`,
+`registryAgentId`), folds its result into `result.onChain` / `result.identity`,
+and fails verification when its policy is not met.
 
-## Honest limits of v1
+## Honest limits
 
 - **Self-asserted.** A local ledger the agent writes about itself is only worth
   trusting because payments carry a `txHash` that settled on-chain. v1 does not
   re-check those; it trusts the Wallie brand. v2 (`includeEvidence` +
-  `verifyAttestationOnChain`) closes this for payments — it proves them on-chain.
-  It does nothing for `blocks` and `policyChanges`, which are self-reported and
-  unfalsifiable by a third party; weigh those accordingly.
+  `verifyAttestationOnChain`) closes this for payments — it proves them on-chain,
+  and the registry resolution (`registryAgentId` + `verifyAttestationIdentity`)
+  closes it for identity. Both still do nothing for `blocks` and `policyChanges`,
+  which are self-reported and unfalsifiable by a third party; weigh those
+  accordingly.
 - **Cold start.** Behavior reputation needs history. A brand-new agent has no
   behavior and so no reputation, which is exactly when a seller most wants a
   signal. A stake bootstraps trust on day one; behavior sustains it. The two

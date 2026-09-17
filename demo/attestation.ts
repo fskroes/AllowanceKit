@@ -12,7 +12,9 @@
  *      claim, the way it would gate access on it;
  *   4. a tampered claim is shown being rejected;
  *   5. the seller re-checks the payment evidence on-chain (v2) — here against an
- *      injected fake RPC so the demo stays offline.
+ *      injected fake RPC so the demo stays offline;
+ *   6. the seller resolves the agent's ERC-8004 registry id (v2) — again against
+ *      an injected fake registry, so identity resolves with no brand tag.
  *
  * Needs viem (a dev/optional peer dep, already installed): npm i viem
  */
@@ -22,6 +24,7 @@ import path from "node:path";
 import { Ledger } from "../src/ledger.ts";
 import { summarize, attest, verifyAttestation, type SignedAttestation } from "../src/attestation.ts";
 import { verifyAttestationOnChain, ERC20_TRANSFER_TOPIC, type TxReader } from "../src/attestation-chain.ts";
+import { verifyAttestationIdentity, type RegistryReader } from "../src/attestation-identity.ts";
 
 function line(s = ""): void {
   process.stdout.write(s + "\n");
@@ -51,7 +54,7 @@ async function main(): Promise<void> {
 
   // 2. The agent issues a signed behavior claim. includeEvidence attaches the
   //    txHashes so the seller can re-check them on-chain in step 6 (v2).
-  const summary = summarize(ledger, agent, { includeEvidence: true });
+  const summary = summarize(ledger, agent, { includeEvidence: true, registryAgentId: "42" });
   line("=== 2. Behavior summary derived from the ledger (counts, not raw rows) ===");
   line(JSON.stringify(summary, null, 2));
   line();
@@ -116,6 +119,42 @@ async function main(): Promise<void> {
   const missReader: TxReader = { async getTransactionReceipt() { return null; } };
   const miss = await verifyAttestationOnChain(liar, { client: missReader, network: "base-sepolia" });
   line(`   A made-up txHash: ${miss.verified}/${miss.checked} verified (${miss.failures[0]?.reason ?? ""}).`);
+  line();
+
+  // 6. v2 identity: the seller resolves the agent in the ERC-8004 Identity
+  //    Registry. On a real chain it reads registry 0x8004... on base-sepolia;
+  //    here an injected fake maps agentId 42 to the agent's own wallet, exactly
+  //    what a real registration would return from getAgentWallet(42).
+  const fakeRegistry: RegistryReader = {
+    async getAgentWallet(id) {
+      return id === 42n ? agent : null; // agentId 42 is this agent's registration
+    },
+    async ownerOf(id) {
+      return id === 42n ? agent : null;
+    },
+  };
+  line("=== 7. Seller resolves the agent in the ERC-8004 Identity Registry (v2) ===");
+  const ident = await verifyAttestationIdentity(attestation, { reader: fakeRegistry, network: "base-sepolia" });
+  if (ident.registered) {
+    line(`   REGISTERED — agentId ${ident.agentId} resolves to ${agent.slice(0, 10)}... (matched by ${ident.matchedBy}).`);
+    line("   The identity no longer rests on the Wallie brand — any seller reads it from the registry.");
+  } else {
+    line(`   NOT REGISTERED: ${ident.reason}`);
+    process.exitCode = 1;
+  }
+
+  // A borrowed agentId cannot pass: the fake registry maps 43 to a stranger.
+  const strangerRegistry: RegistryReader = {
+    async getAgentWallet() { return "0x00000000000000000000000000000000000000ff"; },
+    async ownerOf() { return "0x00000000000000000000000000000000000000ff"; },
+  };
+  const borrowed: SignedAttestation = {
+    ...attestation,
+    summary: { ...attestation.summary, registryAgentId: "43" },
+  };
+  const borrowedResult = await verifyAttestationIdentity(borrowed, { reader: strangerRegistry, network: "base-sepolia" });
+  line(`   A borrowed agentId 43: registered=${borrowedResult.registered} (${borrowedResult.reason ?? ""}).`);
+  line("   (Note: this borrowed claim also fails the signature check, since the id is inside the digest.)");
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

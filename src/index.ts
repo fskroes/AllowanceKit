@@ -225,6 +225,18 @@ export type {
   OnChainFailure,
   OnChainPolicy,
 } from "./attestation-chain.ts";
+// v2: resolve the agent's identity in the ERC-8004 registry (docs/attestation.md).
+export {
+  verifyAttestationIdentity,
+  enforceIdentity,
+  ERC8004_IDENTITY_REGISTRY,
+} from "./attestation-identity.ts";
+export type {
+  RegistryReader,
+  IdentityVerifyOptions,
+  IdentityVerifyResult,
+  IdentityPolicy,
+} from "./attestation-identity.ts";
 export { ApprovalStore, DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 export type { ApprovalRequest, DecideOptions } from "./approvals.ts";
 export { ReservationStore } from "./reservations.ts";
