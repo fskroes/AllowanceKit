@@ -10,6 +10,11 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+Re-publish of 0.7.0. `allowance-kit@0.7.0` registered on npm but never became
+installable, so `wallie@0.7.0` and `wallie-mcp@0.7.0` could not resolve their
+`allowance-kit` dependency. 0.7.1 ships the same code across all three packages;
+there are no source changes from 0.7.0.
+
 ## [0.7.0] - 2026-09-17
 
 Behavior-derived attestation turns the agent's private audit ledger into a
