@@ -190,6 +190,53 @@ export type {
 
 export { Ledger } from "./ledger.ts";
 export type { LedgerEvent, LedgerTotals } from "./ledger.ts";
+
+// Behavior-derived attestation (PoC): compress the ledger into a signed,
+// portable reputation claim the agent signs with its own payer key, and a
+// seller verifies. See docs/attestation.md.
+export {
+  summarize,
+  attest,
+  attestFromLedger,
+  verifyAttestation,
+  canonicalJson,
+  ATTESTATION_DOMAIN,
+  ATTESTATION_TYPES,
+} from "./attestation.ts";
+export type {
+  BehaviorSummary,
+  SignedAttestation,
+  AttestationSigner,
+  AttestOptions,
+  VerifyAttestationResult,
+} from "./attestation.ts";
+export { requireAttestation, attestationOf } from "./attestation-gate.ts";
+export type {
+  AttestationPolicy,
+  AttestedHandler,
+  VerifiedAttestation,
+} from "./attestation-gate.ts";
+// v2: re-check the txHash evidence on-chain (docs/attestation.md).
+export { verifyAttestationOnChain, enforceOnChain, ERC20_TRANSFER_TOPIC } from "./attestation-chain.ts";
+export type {
+  TxReader,
+  OnChainVerifyOptions,
+  OnChainVerifyResult,
+  OnChainFailure,
+  OnChainPolicy,
+} from "./attestation-chain.ts";
+// v2: resolve the agent's identity in the ERC-8004 registry (docs/attestation.md).
+export {
+  verifyAttestationIdentity,
+  enforceIdentity,
+  ERC8004_IDENTITY_REGISTRY,
+} from "./attestation-identity.ts";
+export type {
+  RegistryReader,
+  IdentityVerifyOptions,
+  IdentityVerifyResult,
+  IdentityPolicy,
+} from "./attestation-identity.ts";
 export { ApprovalStore, DEFAULT_GRANT_TTL_MS } from "./approvals.ts";
 export type { ApprovalRequest, DecideOptions } from "./approvals.ts";
 export { ReservationStore } from "./reservations.ts";

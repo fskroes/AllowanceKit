@@ -25,6 +25,7 @@ import {
 import { ChannelStore, reconcileAndNotify, solanaAccountRpc } from "./channels.ts";
 import { withLock } from "./lock.ts";
 import { usd } from "./money.ts";
+import { attestFromLedger, type AttestOptions, type AttestationSigner, type SignedAttestation } from "./attestation.ts";
 
 /**
  * Live-network agent runtime: same policy rails, approvals and audit ledger
@@ -256,6 +257,13 @@ export interface LiveAgentRuntime extends AllowanceRuntime {
   rpcUrl: string;
   /** The wallet's real USDC balance right now, straight from the chain. */
   walletBalanceMicro(): Promise<bigint>;
+  /**
+   * Sign a behavior-derived attestation from this agent's own ledger, keyed to
+   * its wallet address (docs/attestation.md). The signing key is the payer key,
+   * so the address that pays is the address that attests. EVM-only in v1;
+   * rejects on a Solana runtime.
+   */
+  attest(opts?: AttestOptions): Promise<SignedAttestation>;
 }
 
 export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgentRuntime> {
@@ -277,6 +285,10 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
   let readBalance: () => Promise<bigint>;
   let encode: (unsigned: UnsignedPayment) => Promise<string>;
   let rpcUrl: string;
+  // The EIP-712 signer for behavior attestations — the same viem account that
+  // signs payments. Set only on an EVM rail; a Solana runtime leaves it
+  // undefined and `attest()` rejects, since v1 attestation is EVM-only.
+  let attestSigner: AttestationSigner | undefined;
   // Solana `upto` buyer hooks — built only on a Solana network (§4.3). A Base
   // agent leaves this undefined, so `payingFetch` never takes the upto path.
   let upto: UptoBuyer | undefined;
@@ -388,6 +400,7 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
       throw new Error("viem is installed but does not export privateKeyToAccount from viem/accounts — check the viem version");
     const account = privateKeyToAccount(normalizePk(opts.privateKey));
     address = account.address;
+    attestSigner = account;
     readBalance = () => usdcBalanceMicro(rpcUrl, info.usdc, account.address);
     encode = (unsigned) => encodePaymentEvm(account, unsigned);
   }
@@ -492,6 +505,15 @@ export async function createLiveAgent(opts: LiveAgentOptions): Promise<LiveAgent
     policy: () => policyStore.load(),
     escrowedMicro,
     stopHeartbeat,
+    attest: async (attestOpts: AttestOptions = {}) => {
+      if (!attestSigner)
+        throw new Error(
+          `behavior attestation needs an EVM signer; this agent is on "${network}". EIP-712 attestation is EVM-only in v1.`,
+        );
+      // The ledger keys its rows by agentName; the attestation identity is the
+      // wallet address the seller verifies the signature against.
+      return attestFromLedger(attestSigner, ledger, address, { ...attestOpts, ledgerKey: agentName });
+    },
   };
 }
 
