@@ -10,6 +10,8 @@ Money-path changes (`chain`, `seller`, `payer`, `live`, `wallet`, `reservations`
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-17
+
 Re-publish of 0.7.0. `allowance-kit@0.7.0` registered on npm but never became
 installable, so `wallie@0.7.0` and `wallie-mcp@0.7.0` could not resolve their
 `allowance-kit` dependency. 0.7.1 ships the same code across all three packages;
@@ -368,7 +370,8 @@ The release that makes real money work, and makes a "yes" stop meaning "yes, for
   rails (budget, per-call cap, velocity circuit breaker, host allowlist, kill switch),
   the append-only audit ledger, and practice-money settlement on a local mock chain.
 
-[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/fskroes/AllowanceKit/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/fskroes/AllowanceKit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/fskroes/AllowanceKit/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fskroes/AllowanceKit/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/fskroes/AllowanceKit/compare/v0.5.0...v0.5.1
