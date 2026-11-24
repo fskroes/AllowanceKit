@@ -15,10 +15,8 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-live-"));
 }
 
-/** A well-known throwaway key. Nothing here ever broadcasts a transaction. */
 const KEY = "0x" + "11".repeat(32);
 
-/** A stand-in JSON-RPC node: records what was asked, answers what it was told to. */
 async function rpc(answer: string | { error: string } | { status: number }): Promise<{
   url: string;
   calls: { method: string; params: unknown[] }[];
@@ -75,7 +73,6 @@ test("a directory a live agent claimed never reports itself as practice money", 
   assert.equal(marker.network, "base-sepolia");
   assert.equal(marker.address, live.address);
 
-  // The CLI and the dashboard both go through createAgent.
   const managed = createAgent(dir);
   assert.equal(managed.mode, "live", "the management runtime inherits the rail");
   assert.equal(managed.address, live.address, "and shows the real payer, not a simulated one");
@@ -209,7 +206,6 @@ test("the allowance still speaks before the wallet does", () => {
 
 test("a live agent's rails consult the chain before authorizing", async () => {
   const dir = tmpDir();
-  // 0x0f4240 = 1_000_000 micro = $1.00 in the wallet.
   const node = await rpc("0x00000000000000000000000000000000000000000000000000000000000f4240");
   try {
     const live = await createLiveAgent({ stateDir: dir, privateKey: KEY, rpcUrl: node.url });

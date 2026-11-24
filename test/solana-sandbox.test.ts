@@ -27,28 +27,11 @@ import {
 } from "../src/channels.ts";
 import { Ledger, type LedgerEvent } from "../src/ledger.ts";
 
-/**
- * The Solana `upto` buyer against a real self-facilitated seller on the
- * 402.surfnet.dev sandbox (a mainnet fork with the program and mainnet USDC) —
- * docs/SOLANA-ARCHITECTURE.md §2.7, §7, SOL-05. Gated by `SOLANA_SANDBOX`: it
- * needs the faucet and broadcasts real transactions, so it never runs in CI.
- * The hermetic proof of the same buyer logic is `test/solana-upto-buyer.test.ts`.
- *
- *   SOLANA_SANDBOX=1 node --test test/solana-sandbox.test.ts
- *
- * The two proofs the ticket names:
- *   1. ceiling $0.10, actual $0.03 → on-chain `settled == 30000`, the wallet
- *      lost exactly $0.03, ledger `amountMicro 30000 / depositMicro 100000 /
- *      refundMicro 70000`.
- *   2. the orphan path with `withdrawDelay: 5` reclaims the deposit.
- */
-
 const SANDBOX_URL = process.env.SOLANA_SANDBOX_URL ?? "https://402.surfnet.dev:8899";
-// The sandbox shares mainnet genesis, so it is the mainnet network and mint.
 const NETWORK = "solana";
 const MAINNET_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const PER_ROW_MICRO = 1000n; // $0.001 per row
-const CEILING_MICRO = 100000n; // $0.10
+const PER_ROW_MICRO = 1000n;
+const CEILING_MICRO = 100000n;
 const gate = { skip: process.env.SOLANA_SANDBOX ? false : "set SOLANA_SANDBOX=1 to run against 402.surfnet.dev" };
 
 function tmpDir(): string {
@@ -83,13 +66,11 @@ async function rpc(method: string, params: unknown[]): Promise<unknown> {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Fund `owner` with lamports (SOL) via the sandbox faucet. */
 async function airdropSol(owner: string, sol: number): Promise<void> {
   await rpc("requestAirdrop", [owner, Math.round(sol * 1e9)]);
   await sleep(1500);
 }
 
-/** Set `owner`'s USDC balance directly via the surfnet faucet extension. */
 async function setUsdc(owner: string, micro: bigint): Promise<void> {
   await rpc("surfnet_setTokenAccount", [owner, MAINNET_MINT, { amount: micro.toString() }]);
   await sleep(1000);
@@ -107,7 +88,7 @@ async function startSeller(operator: UptoOperator, withdrawDelay?: number): Prom
       {
         priceMicro: PER_ROW_MICRO,
         description: "Metered rows",
-        payTo: keypair().address, // 100% of the distribution goes here
+        payTo: keypair().address,
         network: NETWORK,
         facilitator: new MockChain(),
         upto: { ceilingMicro: CEILING_MICRO, operator, withdrawDelay },
@@ -122,8 +103,8 @@ async function startSeller(operator: UptoOperator, withdrawDelay?: number): Prom
 
 async function fundedBuyer(dir: string): Promise<{ live: import("../src/live.ts").LiveAgentRuntime; kp: Keypair }> {
   const kp = keypair();
-  await setUsdc(kp.address, 1_000_000n); // $1 USDC on-chain
-  await airdropSol(kp.address, 0.05); // dust SOL for the reclaim escape path (§2.5)
+  await setUsdc(kp.address, 1_000_000n);
+  await airdropSol(kp.address, 0.05);
   const live = await createLiveAgent({
     stateDir: dir,
     privateKey: kp.json,
@@ -143,7 +124,7 @@ test("sandbox: a metered upto buy settles the actual on-chain and refunds the re
   const dir = tmpDir();
   const feePayer = keypair();
   const authorizer = keypair();
-  await airdropSol(feePayer.address, 0.5); // fees + rent for open/settle/distribute
+  await airdropSol(feePayer.address, 0.5);
 
   const operator = await createSolanaUptoOperator({
     network: NETWORK,
@@ -159,13 +140,12 @@ test("sandbox: a metered upto buy settles the actual on-chain and refunds the re
   try {
     const before = await usdcBalanceMicroSolana(SANDBOX_URL, MAINNET_MINT, kp.address);
 
-    const res = await payingFetch(live.ctx, seller.url(30)); // 30 rows × $0.001 = $0.03
+    const res = await payingFetch(live.ctx, seller.url(30));
     assert.equal(res.ok, true, res.error ?? "expected a 200");
     assert.equal(res.costMicro, 30000n);
     assert.equal(res.refundMicro, 70000n);
     assert.ok(res.channelId);
 
-    // On-chain: the channel sealed at exactly the metered amount.
     await sleep(3000);
     const data = await solanaAccountRpc(SANDBOX_URL).getAccountData(res.channelId!);
     if (data) {
@@ -173,11 +153,9 @@ test("sandbox: a metered upto buy settles the actual on-chain and refunds the re
       assert.equal(chain.settledMicro, 30000n, "on-chain settled watermark equals the actual");
     }
 
-    // The wallet lost exactly $0.03 (deposit out, 70% refunded).
     const after = await usdcBalanceMicroSolana(SANDBOX_URL, MAINNET_MINT, kp.address);
     assert.equal(before - after, 30000n, "the wallet lost exactly the metered amount");
 
-    // The ledger row carries the escrow annotations.
     const rows = paymentRows(dir);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].amountMicro, "30000");
@@ -197,8 +175,6 @@ test("sandbox: an unsettled deposit orphans, then the payer reclaims it (withdra
   const authorizer = keypair();
   await airdropSol(feePayer.address, 0.5);
 
-  // A seller that opens the deposit on-chain but never settles — the orphan
-  // case the buyer must be able to reclaim from independently (§2.5, §4.3).
   const real = await createSolanaUptoOperator({
     network: NETWORK,
     feePayerSecret: feePayer.secret,
@@ -227,16 +203,13 @@ test("sandbox: an unsettled deposit orphans, then the payer reclaims it (withdra
     assert.ok(res.channelId);
     assert.equal(store.get(res.channelId!)?.status, "unknown");
 
-    // The deposit really left the wallet.
     const escrowed = await usdcBalanceMicroSolana(SANDBOX_URL, MAINNET_MINT, kp.address);
     assert.equal(before - escrowed, CEILING_MICRO, "the whole ceiling is escrowed on-chain");
 
-    // Reconcile reads the OPEN PDA and orphans the row; the reclaim clock starts.
     await sleep(3000);
     const changes = await reconcileChannels(solanaAccountRpc(SANDBOX_URL), store, { agent: live.agentName });
     assert.ok(changes.some((c) => c.channelId === res.channelId && c.to === "orphaned"), "the open deposit orphaned");
 
-    // Wait past the 5 s grace, then take the deposit back.
     await sleep(6000);
     const record = store.get(res.channelId!)!;
     const result = await reclaimChannel(record, solanaSigner(kp.secret), { rpcUrl: SANDBOX_URL });

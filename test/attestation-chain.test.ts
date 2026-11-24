@@ -14,8 +14,6 @@ import {
   type TxReader,
 } from "../src/attestation-chain.ts";
 
-// Base Sepolia USDC — what networkInfo("base-sepolia").usdc resolves to, so an
-// injected client needs no network calls but the token match is still exercised.
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 
 function tmpDir(): string {
@@ -27,7 +25,6 @@ async function testAccount(seedByte = "77") {
   return privateKeyToAccount(`0x${seedByte.repeat(32)}` as `0x${string}`);
 }
 
-/** Two settled payments (txHash 0xaa, 0xbb) and one without a hash, one host. */
 function seed(ledger: Ledger, agent: string): void {
   ledger.append({ t: "topup", at: "2026-09-01T00:00:00.000Z", agent, amountMicro: "5000000", source: "manual", balanceAfterMicro: "5000000" });
   ledger.append({ t: "payment", at: "2026-09-02T00:00:00.000Z", agent, url: "https://a.com/x", host: "a.com", amountMicro: "1000", txHash: "0xaa", balanceAfterMicro: "4999000" });
@@ -35,7 +32,6 @@ function seed(ledger: Ledger, agent: string): void {
   ledger.append({ t: "payment", at: "2026-09-04T00:00:00.000Z", agent, url: "https://a.com/z", host: "a.com", amountMicro: "3000", txHash: "", balanceAfterMicro: "4994000" });
 }
 
-/** A signed attestation with the txHash evidence attached. */
 async function evidenceAttFor(seedByte: string): Promise<{ att: SignedAttestation; agent: string }> {
   const account = await testAccount(seedByte);
   const ledger = new Ledger(tmpDir());
@@ -44,7 +40,6 @@ async function evidenceAttFor(seedByte: string): Promise<{ att: SignedAttestatio
   return { att, agent: account.address };
 }
 
-/** A 32-byte topic that left-pads a 20-byte address. */
 function padTopic(addr: string): string {
   return "0x" + "0".repeat(24) + addr.slice(2).toLowerCase();
 }
@@ -59,11 +54,6 @@ function transferLog(from: string, to: string, valueMicro: number, token = USDC)
 
 type Receipt = { status: "success" | "reverted"; logs: ReturnType<typeof transferLog>[] };
 
-/**
- * A reader over a fixed map. A present key returns its receipt (or null); a
- * missing key throws, as viem's getTransactionReceipt does for an unknown hash.
- * `calls` records every lookup so a test can assert the client was not reached.
- */
 function reader(map: Record<string, Receipt | null>): TxReader & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -75,8 +65,6 @@ function reader(map: Record<string, Receipt | null>): TxReader & { calls: string
     },
   };
 }
-
-// --- summarize evidence -----------------------------------------------------
 
 test("summarize attaches txHash evidence only when asked (privacy default)", () => {
   const ledger = new Ledger(tmpDir());
@@ -101,8 +89,6 @@ test("the evidence rides inside the signed digest, so it cannot be swapped after
   assert.equal(res.valid, false, "changing the evidence breaks the digest");
 });
 
-// --- verifyAttestationOnChain ----------------------------------------------
-
 test("on-chain check passes when each evidence tx settled and moved USDC from the agent", async () => {
   const { att, agent } = await evidenceAttFor("71");
   const client = reader({
@@ -122,7 +108,6 @@ test("a reverted tx and a missing tx both fail on-chain", async () => {
   const { att, agent } = await evidenceAttFor("72");
   const client = reader({
     "0xaa": { status: "reverted", logs: [transferLog(agent, "0x00000000000000000000000000000000000000ff", 1000)] },
-    // 0xbb absent -> lookup throws -> "not found"
   });
   const r = await verifyAttestationOnChain(att, { client, network: "base-sepolia" });
   assert.equal(r.verified, 0);
@@ -153,7 +138,6 @@ test("a non-USDC token fails a strict check but passes a weak one", async () => 
   assert.equal(strict.verified, 0, "wrong token, strict USDC match rejects");
   assert.equal(strict.weak, false);
 
-  // No network and no usdc -> any ERC-20 Transfer from the agent counts, flagged weak.
   const weak = await verifyAttestationOnChain(att, { client: reader(map) });
   assert.equal(weak.verified, 2);
   assert.equal(weak.weak, true);
@@ -163,18 +147,15 @@ test("an attestation with no evidence is unsupported for on-chain checking", asy
   const account = await testAccount("75");
   const ledger = new Ledger(tmpDir());
   seed(ledger, account.address);
-  const att = await attestFromLedger(account as never, ledger, account.address); // no includeEvidence
+  const att = await attestFromLedger(account as never, ledger, account.address);
   const r = await verifyAttestationOnChain(att, { client: reader({}), network: "base-sepolia" });
   assert.equal(r.supported, false);
   assert.match(r.reason!, /includeEvidence/);
   assert.equal(r.claimed, 2, "it still reports how many the summary claimed");
 });
 
-// --- enforceOnChain ---------------------------------------------------------
-
 test("enforceOnChain applies minVerified and requireAll", async () => {
   const { att, agent } = await evidenceAttFor("76");
-  // Only one of the two evidence txs verifies.
   const client = reader({
     "0xaa": { status: "success", logs: [transferLog(agent, "0x00000000000000000000000000000000000000bb", 1000)] },
     "0xbb": { status: "reverted", logs: [] },
@@ -191,8 +172,6 @@ test("enforceOnChain applies minVerified and requireAll", async () => {
   const all = await enforceOnChain(att, { ...opts, requireAll: true });
   assert.equal(all.ok, false, "requireAll needs every claimed tx");
 });
-
-// --- verifyAttestation onChain opt -----------------------------------------
 
 test("verifyAttestation folds the on-chain tally into a valid result", async () => {
   const { att, agent } = await evidenceAttFor("78");
@@ -218,8 +197,6 @@ test("verifyAttestation fails when the on-chain evidence does not clear the poli
   assert.equal(res.valid, false);
   if (!res.valid) assert.match(res.reason, /on-chain check failed/);
 });
-
-// --- seller gate policy.onChain --------------------------------------------
 
 function res() {
   const r = {
@@ -281,7 +258,7 @@ test("the gate refuses when the on-chain evidence is short", async () => {
 
 test("the gate rejects on a cheap floor before ever touching the chain", async () => {
   const { att } = await evidenceAttFor("7c");
-  const client = reader({}); // any lookup throws; it must never be called
+  const client = reader({});
   const { state, r } = await run({ minPayments: 99, onChain: { client, network: "base-sepolia" } }, att);
   assert.equal(state.served, false);
   assert.equal(r.statusCode, 403);

@@ -26,13 +26,11 @@ async function testAccount(seedByte = "55") {
   return privateKeyToAccount(`0x${seedByte.repeat(32)}` as `0x${string}`);
 }
 
-/** A minimal ledger so the summary has real numbers behind the identity claim. */
 function seed(ledger: Ledger, agent: string): void {
   ledger.append({ t: "topup", at: "2026-09-01T00:00:00.000Z", agent, amountMicro: "5000000", source: "manual", balanceAfterMicro: "5000000" });
   ledger.append({ t: "payment", at: "2026-09-02T00:00:00.000Z", agent, url: "https://a.com/x", host: "a.com", amountMicro: "1000", txHash: "0xaa", balanceAfterMicro: "4999000" });
 }
 
-/** A signed attestation carrying an ERC-8004 registryAgentId. */
 async function idAttFor(seedByte: string, agentId = "42"): Promise<{ att: SignedAttestation; agent: string }> {
   const account = await testAccount(seedByte);
   const ledger = new Ledger(tmpDir());
@@ -41,12 +39,6 @@ async function idAttFor(seedByte: string, agentId = "42"): Promise<{ att: Signed
   return { att, agent: account.address };
 }
 
-/**
- * A fake registry over a fixed map of agentId -> { wallet, owner }. A missing
- * field reads as null, exactly as the viem reader maps an unset wallet (zero) or
- * a nonexistent tokenId (revert) to null. `calls` records every read so a test
- * can assert the registry was never touched.
- */
 function registry(entries: Record<string, { wallet?: string; owner?: string }>): RegistryReader & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -62,7 +54,6 @@ function registry(entries: Record<string, { wallet?: string; owner?: string }>):
   };
 }
 
-/** A reader whose reads throw, standing in for an RPC transport failure. */
 const downReader: RegistryReader = {
   async getAgentWallet() {
     throw new Error("RPC down");
@@ -72,13 +63,6 @@ const downReader: RegistryReader = {
   },
 };
 
-/**
- * Build an error shaped like viem's readContract failure: an outer
- * ContractFunctionExecutionError wrapping a cause chain, with a `walk(fn)` that
- * returns the first matching error in the chain (viem's BaseError.walk). Crucial
- * to the test: the OUTER name is the same for a revert and a transport error, so
- * only the chain contents can tell them apart.
- */
 function viemReadError(chain: { name: string }[]): unknown {
   const nodes = [{ name: "ContractFunctionExecutionError" }, ...chain];
   return {
@@ -91,16 +75,12 @@ function viemReadError(chain: { name: string }[]): unknown {
   };
 }
 
-// --- isContractRevert (the revert-vs-transport classifier) ------------------
-
 test("isContractRevert treats a genuine revert or empty-data response as 'absent'", () => {
   assert.equal(isContractRevert(viemReadError([{ name: "ContractFunctionRevertedError" }])), true, "nonexistent tokenId reverts -> not registered");
   assert.equal(isContractRevert(viemReadError([{ name: "ContractFunctionZeroDataError" }])), true, "empty return -> not registered");
 });
 
 test("isContractRevert does NOT swallow a transport error wrapped in the same outer type", () => {
-  // An RPC outage: viem still wraps it in ContractFunctionExecutionError, but the
-  // cause chain has no revert node. This must propagate, not read as unregistered.
   const transport = viemReadError([{ name: "CallExecutionError" }, { name: "HttpRequestError" }]);
   assert.equal(isContractRevert(transport), false, "network failure is an error, not an 'unregistered' answer");
 });
@@ -111,11 +91,9 @@ test("isContractRevert falls back to the plain .cause chain when there is no wal
   const timeout = { name: "SomeError", cause: { name: "TimeoutError" } };
   assert.equal(isContractRevert(timeout), false);
   const cyclic: { name: string; cause?: unknown } = { name: "A" };
-  cyclic.cause = cyclic; // must not loop forever
+  cyclic.cause = cyclic;
   assert.equal(isContractRevert(cyclic), false);
 });
-
-// --- summarize stamps the id ------------------------------------------------
 
 test("summarize stamps registryAgentId only when asked (v1 digest by default)", async () => {
   const ledger = new Ledger(tmpDir());
@@ -138,8 +116,6 @@ test("the registry id rides inside the signed digest, so it cannot be swapped af
   assert.equal(res.valid, false, "changing the id breaks the digest");
 });
 
-// --- verifyAttestationIdentity ----------------------------------------------
-
 test("registered when the agentId's wallet is the attesting address", async () => {
   const { att, agent } = await idAttFor("51");
   const reader = registry({ "42": { wallet: agent } });
@@ -152,7 +128,6 @@ test("registered when the agentId's wallet is the attesting address", async () =
 
 test("registered by owner when the operational wallet is unset", async () => {
   const { att, agent } = await idAttFor("52");
-  // Wallet reads as zero (unset); the owner key is the one that pays and signs.
   const reader = registry({ "42": { wallet: ZERO, owner: agent } });
   const r = await verifyAttestationIdentity(att, { reader, network: "base-sepolia" });
   assert.equal(r.registered, true);
@@ -170,7 +145,7 @@ test("the operational wallet takes precedence over the owner", async () => {
 
 test("not registered when the agentId is absent from the registry", async () => {
   const { att } = await idAttFor("54");
-  const reader = registry({}); // agentId 42 has no wallet and no owner
+  const reader = registry({});
   const r = await verifyAttestationIdentity(att, { reader, network: "base-sepolia" });
   assert.equal(r.supported, true);
   assert.equal(r.registered, false);
@@ -193,7 +168,7 @@ test("an attestation with no registryAgentId is unsupported for identity resolut
   const account = await testAccount("57");
   const ledger = new Ledger(tmpDir());
   seed(ledger, account.address);
-  const att = await attestFromLedger(account as never, ledger, account.address); // no registryAgentId
+  const att = await attestFromLedger(account as never, ledger, account.address);
   const reader = registry({});
   const r = await verifyAttestationIdentity(att, { reader, network: "base-sepolia" });
   assert.equal(r.supported, false);
@@ -216,8 +191,6 @@ test("known ERC-8004 registry addresses are wired for base and base-sepolia", ()
   assert.match(ERC8004_IDENTITY_REGISTRY["base"], /^0x8004/);
 });
 
-// --- enforceIdentity --------------------------------------------------------
-
 test("enforceIdentity fails a claim that does not resolve, passes one that does", async () => {
   const { att, agent } = await idAttFor("59");
   const good = registry({ "42": { wallet: agent } });
@@ -239,8 +212,6 @@ test("requireRegistered:false attaches the resolution without failing an unresol
   assert.equal(r.result.registered, false, "but the resolution is still reported");
 });
 
-// --- verifyAttestation identity opt -----------------------------------------
-
 test("verifyAttestation folds the identity resolution into a valid result", async () => {
   const { att, agent } = await idAttFor("5b");
   const reader = registry({ "42": { wallet: agent } });
@@ -259,8 +230,6 @@ test("verifyAttestation fails when the agent does not resolve in the registry", 
   assert.equal(res.valid, false);
   if (!res.valid) assert.match(res.reason, /not registered/);
 });
-
-// --- seller gate policy.identity --------------------------------------------
 
 function res() {
   const r = {
@@ -322,7 +291,7 @@ test("the gate surfaces an RPC transport error as a rejection, not a crash", asy
 
 test("the gate rejects on a cheap floor before ever touching the registry", async () => {
   const { att } = await idAttFor("60");
-  const reader = registry({}); // any read would fail the resolve; it must never run
+  const reader = registry({});
   const { state, r } = await run({ minPayments: 99, identity: { reader, network: "base-sepolia" } }, att);
   assert.equal(state.served, false);
   assert.equal(r.statusCode, 403);
@@ -332,8 +301,7 @@ test("the gate rejects on a cheap floor before ever touching the registry", asyn
 
 test("identity resolves before the per-hash on-chain check, so an unregistered agent skips it", async () => {
   const { att } = await idAttFor("61");
-  const reader = registry({}); // not registered -> identity fails first
-  // An onChain client that throws on any lookup: it must never be reached.
+  const reader = registry({});
   const onChainClient = {
     async getTransactionReceipt(): Promise<never> {
       throw new Error("on-chain must not be reached when identity already failed");

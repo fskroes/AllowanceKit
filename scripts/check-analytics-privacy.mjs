@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Browser-level privacy regression for the marketing and Cloud analytics loaders.
-// All browser requests are intercepted. The official Vercel script is fetched
-// into memory, and its event endpoint is mocked locally.
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
@@ -23,9 +20,6 @@ const playwright = await import(playwrightArg ? pathToFileURL(path.resolve(playw
 const { chromium } = playwright;
 assert(chromium, 'Playwright Chromium is required');
 
-// No `referrer` option exists in @vercel/analytics 2.0.1's public inject types.
-// Its hosted script adds document.referrer after beforeSend, so beforeSend alone
-// cannot redact it. Fetch the official script without saving it to the repo.
 const sdkUrl = 'https://va.vercel-scripts.com/v1/script.js';
 const sdkResponse = await fetch(sdkUrl, { signal: AbortSignal.timeout(15_000) });
 assert(sdkResponse.ok, `Could not fetch official Vercel script: HTTP ${sdkResponse.status}`);
@@ -65,8 +59,6 @@ async function serveAppAsset(route, app, pathname) {
 async function scenario(app, mode) {
   const context = await browser.newContext();
   await context.addInitScript((privacyMode) => {
-    // Vercel's production script skips webdriver/headless browsers. Hide those
-    // test-only markers so this exercises the production event transport.
     const nativeUserAgent = Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get.call(navigator);
     Object.defineProperty(navigator, 'webdriver', { configurable: true, get: () => false });
     Object.defineProperty(navigator, 'userAgent', {
@@ -115,7 +107,6 @@ async function scenario(app, mode) {
       await serveAppAsset(route, app, url.pathname);
       return;
     }
-    // Do not allow any request to leave the test, including fonts or other CDNs.
     await route.abort();
   });
 

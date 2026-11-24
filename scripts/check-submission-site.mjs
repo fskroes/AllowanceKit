@@ -1,4 +1,3 @@
-/** Browser QA for the complete static submission artifact, including video playback. */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { serveStaticSite } from './static-site-server.mjs';
@@ -56,7 +55,6 @@ try {
       assert.equal(await details.getAttribute('open'), '');
       await details.locator('summary').click();
     }
-    // Verify the fallback without writing to the user's clipboard.
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('permission denied'); } } }));
     await page.locator('[data-copy]').click();
     assert.match(await page.locator('[role="status"]').innerText(), /copy them manually/);

@@ -2,39 +2,10 @@ import crypto from "node:crypto";
 import type { Facilitator, FacilitatorKind } from "./chain.ts";
 import type { AcceptsEntry, DecodedPayment, SettleResult, VerifyResult } from "./types.ts";
 
-/**
- * Facilitator backed by the Coinbase Developer Platform (CDP) x402 API — the
- * facilitator used by most live x402 sellers on Base.
- *
- *   verify → POST {baseUrl}/platform/v2/x402/verify
- *   settle → POST {baseUrl}/platform/v2/x402/settle
- *
- * Auth is a short-lived ES256 JWT signed with the EC private key of a CDP
- * API key (portal.cdp.coinbase.com → Keys). Credentials come from options or
- * the CDP_API_KEY_ID / CDP_API_KEY_SECRET environment variables. The secret
- * is the full EC private key in PEM ("-----BEGIN EC PRIVATE KEY-----").
- *
- * The facilitator `/verify` and `/settle` bodies are the same three keys in
- * both protocol versions — { x402Version, paymentPayload, paymentRequirements }
- * (v1 contract; x402 v2 spec §7.1) — and this class posts the decoded payment
- * and advertised requirements through opaquely. So it is v2-capable by
- * construction: `x402Version` selects the envelope version and the caller
- * supplies the matching payload/requirements shapes. It defaults to 1 so a v1
- * seller (our `paymentGate`) keeps working; a v2 seller constructs it with
- * `x402Version: 2` and hands it the v2 nested paymentPayload (x402-compat.md
- * §5, §6.5). Responses are { isValid?, invalidReason? } and
- * { success, txHash?/transaction?, network?, error? } in both versions.
- *
- * Honesty caveat (x402-compat.md §1): the v2 body shape here follows the spec
- * and matches what live sellers advertise, but has not been round-tripped
- * against a real CDP `/verify` or `/settle` (that needs CDP credentials and a
- * signed EIP-3009 payload, out of scope for this ticket).
- */
 export interface CdpFacilitatorOptions {
   apiKeyId?: string;
   apiKeySecret?: string;
   baseUrl?: string;
-  /** x402 protocol version posted to the facilitator (default 1; pass 2 for v2 sellers). */
   x402Version?: number;
 }
 
@@ -48,8 +19,6 @@ interface CdpSettleResponse {
   success: boolean;
   errorReason?: string;
   error?: string;
-  /** CDP returns the settled tx hash as "transaction"; older/other
-   *  facilitators use "txHash". Accept both so the audit trail is never lost. */
   transaction?: string;
   txHash?: string;
   network?: string;
@@ -74,16 +43,6 @@ export class CdpFacilitator implements Facilitator {
     this.x402Version = opts.x402Version ?? 1;
   }
 
-  /**
-   * `GET /platform/v2/x402/supported` — the (scheme, network) pairs CDP settles.
-   * A Solana `exact` kind carries `extra.feePayer`, the account CDP co-signs and
-   * pays rent/fees for. The seller copies that into its Solana offer so the buyer
-   * builds a two-signature transaction with the fee-payer slot left unsigned.
-   *
-   * Honesty caveat (x402-compat.md §1): the response shape follows the v2 spec
-   * and matches what live facilitators advertise, but has not been round-tripped
-   * against a real CDP `/supported` (needs CDP credentials — out of scope here).
-   */
   async supported(): Promise<FacilitatorKind[]> {
     const path = "/platform/v2/x402/supported";
     const token = this.jwt("GET", path);
@@ -126,7 +85,6 @@ export class CdpFacilitator implements Facilitator {
     return await res.json() as CdpVerifyResponse & CdpSettleResponse;
   }
 
-  /** Short-lived ES256 JWT per Coinbase CDP request-signing spec. */
   jwt(method: string, urlPath: string, now = Math.floor(Date.now() / 1000)): string {
     const header = b64url(JSON.stringify({ alg: "ES256", typ: "JWT", kid: this.apiKeyId, nonce: crypto.randomUUID() }));
     const claims = b64url(JSON.stringify({
@@ -144,7 +102,6 @@ export class CdpFacilitator implements Facilitator {
 function normalizePem(secret: string): string {
   const trimmed = secret.trim();
   if (trimmed.includes("-----BEGIN")) return trimmed.replace(/\\n/g, "\n");
-  // Raw base64 body without armor — wrap it as PKCS#8 EC key.
   const lines = trimmed.match(/.{1,64}/g)?.join("\n") ?? trimmed;
   return `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----`;
 }
@@ -153,7 +110,6 @@ function b64url(input: string | Buffer): string {
   return Buffer.from(input).toString("base64url");
 }
 
-/** Convert ASN.1 DER ECDSA sig to the raw r||s (64 bytes) form JWTs require. */
 export function derToRawEs256(der: Buffer): Buffer {
   if (der[0] !== 0x30) throw new Error("bad DER sequence");
   let i = 2;
@@ -172,7 +128,6 @@ export function derToRawEs256(der: Buffer): Buffer {
 }
 
 function stripLeadingZero(b: Buffer): Buffer {
-  // DER may prepend 0x00 when the positive integer's high bit is set.
   return b.length > 1 && b[0] === 0x00 ? b.subarray(1) : b;
 }
 

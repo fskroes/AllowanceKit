@@ -10,7 +10,6 @@ const DEVNET_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const FEE_PAYER = "FeePayer1111111111111111111111111111111111";
 const SELLER = "SellerOwner11111111111111111111111111111111";
 
-/** A facilitator that advertises a Solana `exact` kind and settles anything. */
 class FakeSolanaFacilitator implements Facilitator {
   calls = { supported: 0, verify: 0, settle: 0 };
   lastVerified?: { payment: DecodedPayment; requirements: AcceptsEntry };
@@ -29,7 +28,6 @@ class FakeSolanaFacilitator implements Facilitator {
   }
 }
 
-/** Minimal ServerResponse stand-in that records the last write. */
 function fakeRes() {
   const rec: { status: number; headers: Record<string, string>; body?: string } = { status: 0, headers: {} };
   return {
@@ -73,8 +71,6 @@ test("Solana gate skips the local flat check and settles a mocked facilitator re
     () => { handled = true; },
   );
 
-  // A v2 Solana payment: amount and payee live inside the signed transaction,
-  // so nothing is readable from the JSON — the gate must not reject it locally.
   const payload = { x402Version: 2, accepted: { scheme: "exact", network: DEVNET_CAIP2 }, payload: { transaction: "AQABase64Tx" } };
   const header = Buffer.from(JSON.stringify(payload)).toString("base64");
 
@@ -94,7 +90,6 @@ test("Solana gate skips the local flat check and settles a mocked facilitator re
 });
 
 test("v1 Base path is byte-identical and never reads /supported", async () => {
-  // The exact 402 body the EVM gate emitted before SOL-02, pinned byte-for-byte.
   const info = NETWORKS["base-sepolia"];
   const expected = JSON.stringify(
     {

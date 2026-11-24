@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/** Build narrated, reproducible submission videos without a hosted media API. */
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
@@ -166,29 +165,21 @@ async function firstExisting(candidates: string[]): Promise<string | null> {
       await fs.access(file);
       return file;
     } catch {
-      /* keep looking */
     }
   }
   return null;
 }
 
-// Mastering chain applied to a human recording before loudness normalization.
-// Order matters: strip rumble and boxiness, then even out the dynamics with a
-// gentle compressor so the loudness stage never has to slam loud syllables. The
-// first cut sent raw phone audio (crest factor ~12) straight into a single-pass
-// dynamic loudnorm, which pumped and clipped the loud words and lifted the room
-// tone into a hollow sound.
 const RECORDED_PRE_FILTER = [
-  "highpass=f=90",                    // remove sub-bass rumble and handling noise
-  "equalizer=f=300:t=q:w=1.4:g=-3",   // cut boxy low-mid so the voice is less hollow
-  "equalizer=f=4200:t=q:w=2:g=2.5",   // gentle presence lift for intelligibility
+  "highpass=f=90",
+  "equalizer=f=300:t=q:w=1.4:g=-3",
+  "equalizer=f=4200:t=q:w=2:g=2.5",
   "acompressor=threshold=-21dB:ratio=3:attack=6:release=140:makeup=3:knee=6",
 ].join(",");
 const LOUDNORM_TARGET = "I=-16:TP=-2.0:LRA=11";
 
 const TARGET_LUFS = -16;
 
-/** Measure the filtered source integrated loudness (LUFS) with ffmpeg loudnorm pass one. */
 async function measureLoudness(recorded: string): Promise<number> {
   const { stderr } = await execFile("ffmpeg", [
     "-y", "-hide_banner", "-i", recorded, "-ac", "1", "-ar", "48000",
@@ -200,19 +191,6 @@ async function measureLoudness(recorded: string): Promise<number> {
   return Number(match[1]);
 }
 
-/**
- * Produce one scene's narration aiff. A human recording named `<base>.<ext>` in
- * voiceDir wins; otherwise fall back to local macOS `say`. A recording is
- * mastered in place with ffmpeg (mono 48 kHz, high-pass, de-box EQ, compression,
- * a single static gain to the target loudness, then a look-ahead true-peak
- * limiter). The pipeline stays fully local and never touches a hosted speech API.
- *
- * The first cut used a single-pass dynamic loudnorm, whose time-varying gain
- * pumped and clipped the loud words and lifted the room tone into a hollow sound.
- * The compressor now evens the dynamics, one measured static gain sets the
- * loudness (no time-varying gain, so no pumping), and the limiter alone holds the
- * -2 dBTP ceiling, catching only the few isolated peaks (<1.8 dB here).
- */
 async function narrate(args: { voiceDir: string; base: string; narration: string; voice: string; out: string }): Promise<"recorded" | "say"> {
   const { voiceDir, base, narration, voice, out } = args;
   const recorded = await firstExisting(RECORDED_EXTENSIONS.map((ext) => path.join(voiceDir, base + ext)));
@@ -271,8 +249,6 @@ async function renderSet(args: {
     speechDurations.push(rawSpeechDuration / tempo);
 
     const videoFilter = `[0:v]zoompan=z='min(zoom+0.000018,1.018)':d=${FPS * SCENE_SECONDS}:s=${WIDTH}x${HEIGHT}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':fps=${FPS},format=yuv420p,setpts=PTS-STARTPTS[v]`;
-    // Leave a tiny silent AAC tail so its packet rounding cannot extend the MP4
-    // beyond the exact 30 second video track at each scene boundary.
     const audioFilter = `[1:a]atempo=${tempo.toFixed(5)},apad=whole_dur=${SCENE_SECONDS},atrim=duration=${SCENE_SECONDS - 0.06},asetpts=PTS-STARTPTS[a]`;
     await run("ffmpeg", [
       "-y", "-hide_banner", "-loglevel", "error", "-loop", "1", "-framerate", String(FPS), "-i", frame, "-i", audio,

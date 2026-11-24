@@ -157,8 +157,6 @@ let killOn = false;
 let lastRemaining = "$–";
 let ledgerSignature = "";
 let decisionNote = "";
-// Which agent the human is looking at. Null until the first state arrives, then
-// pinned to their choice from the switcher.
 let selected = null;
 let agentOptions = "";
 
@@ -212,7 +210,6 @@ function pathOf(url) {
 }
 
 function renderApprovals(pending) {
-  // Never rebuild while someone is tabbed into a decision button.
   if ($("approvals").contains(document.activeElement)) return;
   const host = $("approvals");
   host.textContent = "";
@@ -283,9 +280,6 @@ function eventRow(e) {
 }
 
 function syncAgents(agents, active) {
-  // Rebuild the <select> only when the roster actually changes, so it does not
-  // clobber the open dropdown on every poll. Agent names are user-set strings —
-  // set them with textContent/value, never as markup.
   $("switcher").dataset.single = agents.length > 1 ? "" : "1";
   const signature = agents.join(" ");
   if (signature !== agentOptions) {
@@ -312,8 +306,6 @@ function ago(iso) {
   return Math.round(s / 86400) + "d";
 }
 
-// The escrow card and the channel table only appear when there is a channel to
-// show — a Base agent never opens one, so it never sees an empty Solana panel.
 function renderChannels(s) {
   const channels = s.channels || [];
   const escrow = BigInt(s.escrowedMicro || "0");
@@ -368,8 +360,6 @@ async function refresh() {
   document.body.dataset.stale = "";
 
   const agents = envelope.agents || [];
-  // Keep the human's pick if it still exists; otherwise fall back to the agent
-  // the dashboard was started for.
   if (selected === null || !agents.includes(selected)) selected = envelope.selected;
   syncAgents(agents, selected);
 
@@ -407,12 +397,10 @@ async function refresh() {
   $("p-agent").textContent = s.agent;
   $("p-addr").textContent = s.address.slice(0, 12) + "…" + s.address.slice(-6);
   $("p-net").textContent = s.network;
-  // Practice money is amber; real money is not something to render as a caveat.
   $("p-net").className = s.mode === "live" ? "live" : "practice";
   $("p-budget").textContent = "$" + Number(s.totalBudgetUsd).toFixed(2);
   $("p-window").textContent = "$" + Number(s.windowLimitUsd).toFixed(2) + " / " + s.windowSeconds + "s";
   $("p-approve").textContent = "$" + Number(s.requireApprovalAboveUsd).toFixed(2);
-  // Where a heads-up would go if this ran overnight and nobody was watching.
   $("p-alerts").textContent = s.alerts && s.alerts.length
     ? s.alerts.join(" and ")
     : "nobody is told — set up with " + (s.cli || "npx allowance-kit") + " notify";

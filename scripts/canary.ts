@@ -1,27 +1,3 @@
-/**
- * Canary: proves AllowanceKit works against the real CDP facilitator.
- *
- * Phase 1 (always): JWT auth → CDP verify endpoint. Proves ES256 signing
- *                    and CDP API key are valid.
- * Phase 2 (if --full): end-to-end: local seller + CDP facilitator + payingFetch
- *                      against a real CDP-settled payment on Base Sepolia.
- * Phase 3 (if --full): the same payment through the real buyer runtime —
- *                      `createLiveAgent`, so the allowance, the on-chain balance
- *                      check, the approval gate and the audit ledger are all in
- *                      the path. Phase 2 proves the wire works; phase 3 proves
- *                      the product does.
- *
- * Requirements:
- *   CDP_API_KEY_ID     — CDP portal API key (ECDSA/P-256)
- *   CDP_API_KEY_SECRET — PEM private key (from portal download)
- *   AGENT_PRIVATE_KEY  — hex private key for a Base Sepolia wallet (phases 2-3)
- *
- * Run:
- *   node --env-file=.env scripts/canary.ts            # auth check only
- *   node --env-file=.env scripts/canary.ts --full     # auth + both settlement phases
- *   node --env-file=.env scripts/canary.ts --buyer    # auth + the buyer runtime only
- *   node --env-file=.env scripts/canary.ts --buyer --network base   # MAINNET, real money
- */
 import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
@@ -49,10 +25,6 @@ const FULL = process.argv.includes("--full");
 const BUYER_ONLY = process.argv.includes("--buyer");
 const PHASE1_ONLY = !FULL && !BUYER_ONLY;
 
-/**
- * Which chain phase 3 settles on. Base Sepolia by default — reaching mainnet
- * has to be typed out, because on mainnet this spends money that is real.
- */
 const NETWORK = (() => {
   const i = process.argv.indexOf("--network");
   const value = i >= 0 ? process.argv[i + 1] : process.argv.find((a) => a.startsWith("--network="))?.split("=")[1];
@@ -62,11 +34,9 @@ const NETWORK = (() => {
 async function phase1Verify(): Promise<CdpFacilitator> {
   console.log(`\n${BOLD}Phase 1${RST} — JWT auth → CDP verify endpoint\n`);
 
-  const fac = new CdpFacilitator(); // reads CDP_API_KEY_ID / CDP_API_KEY_SECRET from env
+  const fac = new CdpFacilitator();
   ok(`Facilitator created · keyId=${fac.apiKeyId.slice(0, 8)}…`);
 
-  // Fake x402 v1 payload — signer doesn't matter; CDP will reject it
-  // but a valid HTTP response proves our JWT authenticated successfully.
   const fakePayload = {
     x402Version: 1,
     scheme: "exact",
@@ -109,7 +79,6 @@ async function phase1Verify(): Promise<CdpFacilitator> {
     if (msg.includes("401") || msg.includes("403") || msg.includes("CDP_API_KEY")) {
       fail(`CDP rejected our auth: ${msg}\n  → Check CDP_API_KEY_ID / CDP_API_KEY_SECRET (must be ECDSA/P-256)`);
     }
-    // Network errors or 4xx from payload rejection = auth still worked
     if (msg.includes("400") || msg.includes("422")) {
       ok(`CDP responded (HTTP ${msg.includes("400") ? "400" : "422"}) — JWT auth succeeded · payload rejected (expected for random sig)`);
       return fac;
@@ -137,7 +106,6 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   const account = privateKeyToAccount(pk);
   ok(`Agent wallet ${account.address}`);
 
-  // Check USDC balance on Base Sepolia via public RPC (no viem dependency)
   const balanceCheck = await fetch("https://sepolia.base.org", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -151,7 +119,7 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   });
   const balResp = await balanceCheck.json() as { result?: string };
   const balance = balResp.result ? BigInt(balResp.result) : 0n;
-  if (balance < 10000n) { // < $0.01 USDC
+  if (balance < 10000n) {
     fail(
       `Agent wallet has ${balance} USDC atomic units (< $0.01) on Base Sepolia.\n` +
       `  → Fund it with USDC: https://faucet.circle.com (pick "Base Sepolia", no login, 20 USDC)\n` +
@@ -160,11 +128,7 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   }
   info(`  USDC balance: ${balance} atomic units ($${(Number(balance) / 1e6).toFixed(4)})`);
 
-  // Spin up a local x402-gated server settled through CDP
-  const priceMicro = 10000n; // $0.01
-  // The facilitator rejects self-sends ("self_send_not_allowed"), so the seller
-  // is a second wallet deterministically derived from the agent key — the payment
-  // is a real transfer, and the funds stay under the same operator's control.
+  const priceMicro = 10000n;
   const sellerAccount = privateKeyToAccount(keccak256(pk as `0x${string}`));
   const payTo = sellerAccount.address;
   ok(`Seller wallet ${payTo} ${DIM}(derived from agent key)${RST}`);
@@ -180,7 +144,6 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   const url = `http://127.0.0.1:${port}/data`;
   ok(`Local x402 seller running → ${url} · price $0.01 USDC`);
 
-  // Build a live agent (same viem signer, same wallet)
   const rails = {
     agentName: "canary-agent",
     address: account.address,
@@ -208,13 +171,6 @@ async function phase2E2E(fac: CdpFacilitator): Promise<void> {
   }
 }
 
-/**
- * The buyer runtime, end to end. Everything phase 2 stubs out is real here: the
- * allowance ledger, the on-chain balance check, the host allowlist, the approval
- * gate and the audit trail. A payment that settles in phase 2 but is refused
- * here means the rails are wrong, which is the failure this project exists to
- * prevent.
- */
 async function phase3Buyer(fac: CdpFacilitator): Promise<void> {
   console.log(`\n${BOLD}Phase 3${RST} — the same payment through the real buyer runtime\n`);
 
@@ -248,8 +204,6 @@ async function phase3Buyer(fac: CdpFacilitator): Promise<void> {
           : `  → Fund it: https://faucet.circle.com (pick "Base Sepolia", no login, 20 USDC)`),
     );
 
-  // A $0.20 allowance, a $0.05 per-call cap, one host. Deliberately tight: the
-  // point is that a real payment fits inside real limits.
   topUp(agent, 0.2, "human::canary");
   agent.policyStore.save({
     totalBudgetUsd: 0.2,
@@ -278,7 +232,6 @@ async function phase3Buyer(fac: CdpFacilitator): Promise<void> {
   info("  payingFetch through the rails — allowance, balance check, ledger…");
   const paid = await payingFetch(agent.ctx, url);
 
-  // And the rail that matters most: a price over the cap must not settle.
   let overCap: Awaited<ReturnType<typeof payingFetch>> | undefined;
   if (paid.ok) {
     agent.policyStore.save({ perCallMaxUsd: 0.005 });

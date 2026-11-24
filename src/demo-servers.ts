@@ -95,16 +95,6 @@ export function describeServers(catalog: PaidApiCatalog): string {
   return catalog.servers.map((s) => `  :${s.port}  ${s.name.padEnd(22)} ${fmtUsdExact(s.priceMicro)}/call`).join("\n");
 }
 
-/**
- * A Solana seller that advertises BOTH `exact` and `upto`, so the demo story has
- * a metered call (docs/SOLANA-ARCHITECTURE.md §8). It runs offline: the `upto`
- * side uses an {@link InMemoryUptoOperator} (no chain, no keys), and the metered
- * handler bills per token of a `?rows=` query so the buyer sees an actual charge
- * below the ceiling and a refund of the rest.
- *
- * The seller is a Solana `solana-devnet` gate; a real deployment swaps the
- * in-memory operator for `solanaOperator` env-var keys.
- */
 export interface UptoDemoServer {
   port: number;
   name: string;
@@ -123,7 +113,7 @@ export async function startUptoDemoServer(port = 4030, perRowUsd = 0.001, ceilin
 
   const handler = (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, meter?: Meter): void => {
     const rows = Math.max(0, Number(new URL(req.url ?? "/", "http://x").searchParams.get("rows") ?? "1") || 0);
-    meter?.charge(perRowMicro * BigInt(rows)); // clamped to the ceiling by the gate
+    meter?.charge(perRowMicro * BigInt(rows));
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ rows: Array.from({ length: Math.min(rows, 3) }, (_, i) => ({ id: i, value: Math.random().toFixed(4) })) }));
   };

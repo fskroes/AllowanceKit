@@ -1,4 +1,3 @@
-/** Exercise the actual npm tarballs in a fresh consumer, including MCP over stdio. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,7 +35,6 @@ const tarballs = [`allowance-kit-${manifest.version}.tgz`, `wallie-${manifest.ve
 run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--cache", cache,
   ...tarballs.map((name) => path.join(output, name))], consumer);
 
-// Run the consumer's installed code, rather than resolving any source-tree dependency.
 fs.writeFileSync(path.join(consumer, "check.mjs"), `
 import assert from 'node:assert/strict';
 import path from 'node:path';

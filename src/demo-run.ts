@@ -38,11 +38,6 @@ function paid(result: PaidResult, label: string, extra = ""): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * The full story in one command: happy path → runaway loop → attack →
- * approval gate → kill switch. Runs entirely on the mock ledger in its own
- * state dir, so it never touches a funded allowance.
- */
 export async function runDemo(stateDir: string): Promise<void> {
   const dir = path.resolve(stateDir);
   console.log(c.bold("\n  AllowanceKit — an agent that pays its own way, inside rails the human controls"));

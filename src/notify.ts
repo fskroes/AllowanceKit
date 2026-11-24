@@ -4,67 +4,19 @@ import { fmtUsdSmart } from "./money.ts";
 import { RULE_LABELS, defaultPolicy, slug } from "./policy.ts";
 import type { ChannelRecord } from "./types.ts";
 
-/**
- * Notifications: the difference between a dashboard someone has to watch and a
- * guardrail that works while they sleep.
- *
- * Every channel here is an HTTP POST made with the platform's own `fetch`, so
- * the package keeps its promise of zero runtime dependencies. Email, SMS and
- * push all go through a provider's REST API rather than SMTP or a vendor SDK
- * for the same reason.
- *
- * Three rules hold everywhere in this file:
- *
- *   1. A notification must never fail a payment. Every delivery is wrapped, all
- *      errors are swallowed into a warning, and nothing here is awaited inside
- *      the ledger lock.
- *   2. Secrets are never written to disk. The address and the provider live in
- *      `notifications.json`; the API key is read from the environment at send
- *      time, so a config file is safe to read, copy or paste into an issue.
- *   3. A delivery that fails is retried and then written down. Alerts are still
- *      best-effort — but "best effort" now means three attempts and a record,
- *      not one attempt and silence.
- */
-
 export type NotifyEvent = "threshold" | "blocked" | "approval";
 
-/**
- * Wallie Cloud — the hosted control plane at api.onewallie.com. It is one more
- * channel, but a different kind: instead of alerting a human when a threshold is
- * crossed, it receives *every* decision the runtime makes (paid, blocked,
- * queued) plus a liveness heartbeat, so something off this machine can tell you
- * when this machine goes quiet. It never sees a key, a signature, or the power
- * to authorize a payment.
- */
 export const CLOUD_ENV = "WALLIE_CLOUD_KEY";
 export const CLOUD_DEFAULT_URL = "https://api.onewallie.com";
 
 export interface CloudConfig {
   enabled: boolean;
-  /** Base URL of the control plane. */
   url: string;
-  /**
-   * Name of the environment variable holding the workspace key — the key itself
-   * is read at send time and never written to disk, exactly like the email and
-   * SMS provider keys.
-   */
   keyEnv: string;
 }
 
-/**
- * The kinds the cloud feed carries. Unlike local alerts it wants every payment,
- * not just threshold crossings. `threshold` was added in 0.5.1 (C-10): the cloud
- * wants the 50/80/100 % rows too, and its "budget 100 %" SMS depends on them. A
- * 0.5.0 client simply never sends it, which the server tolerates.
- *
- * `channel` was added by SOL-08 for Solana `upto` escrow: one row per channel
- * phase (`data.phase` ∈ opened|settled|refunded|orphaned|reclaimed), so the
- * cloud can show locked value and raise the escrow watchdog. An older client
- * never sends it; the server tolerates a kind it does not know.
- */
 export type CloudEventKind = "payment" | "blocked" | "approval" | "threshold" | "channel";
 
-/** The phase of a Solana `upto` channel a `channel` cloud event reports (SOL-08, §6). */
 export type ChannelPhase = "opened" | "settled" | "refunded" | "orphaned" | "reclaimed";
 
 export interface CloudEvent {
@@ -74,40 +26,24 @@ export interface CloudEvent {
   mode?: "practice" | "live";
   subject: string;
   body: string;
-  /** Structured detail. Any URL field is stripped of its query string before it leaves the machine (plan D-6). */
   data: Record<string, unknown>;
   at: string;
 }
 
 export interface NotifyConfig {
-  /** Any URL that accepts a JSON POST: Slack, Discord, Zapier, your own server. */
   webhookUrl?: string;
-  /** Where threshold, block and approval mail is sent. */
   email?: string;
   emailProvider?: "resend" | "postmark";
-  /** Verified sender. Providers reject mail from a domain you do not own. */
   emailFrom?: string;
-  /** Destination phone number in E.164 form, delivered over Twilio. */
   sms?: string;
-  /** The Twilio number or messaging-service SID alerts are sent from. */
   smsFrom?: string;
-  /** An ntfy topic (or a full ntfy-compatible URL) for phone push. */
   pushTopic?: string;
-  /**
-   * A dead-man's-switch URL pinged while the agent is alive. An outside monitor
-   * — healthchecks.io, Cronitor, your own cron — is what turns silence into an
-   * alarm when this machine is asleep.
-   */
   heartbeatUrl?: string;
-  /** How often to ping it. Defaults to every 60 seconds. */
   heartbeatSeconds?: number;
-  /** Wallie Cloud: an outbound feed of every decision + a liveness heartbeat. Off unless set. */
   cloud?: CloudConfig;
-  /** Percentages of the allowance that trigger a heads-up. */
   thresholds: number[];
   onBlock: boolean;
   onApproval: boolean;
-  /** Highest threshold already announced, so a heads-up fires once, not per call. */
   highWater: number;
 }
 
@@ -124,10 +60,8 @@ const PROVIDERS = {
   postmark: { env: "POSTMARK_API_TOKEN", url: "https://api.postmarkapp.com/email" },
 } as const;
 
-/** Twilio needs three values; all three stay in the environment. */
 export const TWILIO_ENV = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM"] as const;
 
-/** The env var that holds the key for a provider, for help text and errors. */
 export function providerEnvVar(provider: "resend" | "postmark"): string {
   return PROVIDERS[provider].env;
 }
@@ -136,7 +70,6 @@ export interface DeliveryResult {
   channel: string;
   ok: boolean;
   detail: string;
-  /** How many attempts it took, or how many it burned before giving up. */
   attempts: number;
 }
 
@@ -154,7 +87,6 @@ export class NotifyStore {
   private file: string;
   private failureFile: string;
 
-  /** Alert settings are per agent; the first agent in a directory keeps the unsuffixed file. */
   constructor(stateDir: string, agentName?: string) {
     fs.mkdirSync(stateDir, { recursive: true });
     this.file = path.join(stateDir, notifyFileName(agentName));
@@ -167,7 +99,6 @@ export class NotifyStore {
       const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as Partial<NotifyConfig>;
       return { ...defaultNotifyConfig, ...raw };
     } catch {
-      // A hand-edited file that no longer parses must not take the agent down.
       return { ...defaultNotifyConfig };
     }
   }
@@ -178,16 +109,11 @@ export class NotifyStore {
     return next;
   }
 
-  /** True when at least one channel is configured. */
   configured(): boolean {
     const c = this.load();
     return Boolean(c.webhookUrl || c.email || c.sms || c.pushTopic);
   }
 
-  /**
-   * Records alerts that never arrived. The ledger stays the record of what the
-   * agent *did*; this is the record of what you were not told about it.
-   */
   recordFailures(failures: DeliveryFailure[]): void {
     if (!failures.length) return;
     fs.appendFileSync(this.failureFile, failures.map((f) => JSON.stringify(f)).join("\n") + "\n");
@@ -220,30 +146,20 @@ export function notifyFileName(agentName?: string): string {
 
 export interface Message {
   event: NotifyEvent;
-  /** One line, suitable for a phone's lock screen. */
   subject: string;
-  /** A few lines of plain text. No markup: it has to survive every channel. */
   body: string;
-  /** Structured detail for a webhook consumer that wants to act on it. */
   data: Record<string, unknown>;
 }
 
-/** One attempt at one channel. `retryable` separates "the network blinked" from "your key is wrong". */
 type Attempt = {
   ok: boolean;
   detail: string;
   retryable: boolean;
-  /** A server-requested wait before the next try (from a 429 `Retry-After`), in ms. Cloud only, 0.5.1+. */
   retryAfterMs?: number;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Retries only what retrying can fix: timeouts, dropped connections, 429s and
- * 5xx. A 401 is retried zero times, because three identical rejections help
- * nobody and delay the record that the key is wrong.
- */
 async function withRetry(channel: string, attempt: () => Promise<Attempt>, attempts = 3): Promise<DeliveryResult> {
   let last: Attempt = { ok: false, detail: "not attempted", retryable: false };
   for (let i = 1; i <= attempts; i++) {
@@ -251,9 +167,6 @@ async function withRetry(channel: string, attempt: () => Promise<Attempt>, attem
     if (last.ok) return { channel, ok: true, detail: last.detail, attempts: i };
     if (!last.retryable) return { channel, ok: false, detail: last.detail, attempts: i };
     if (i < attempts) {
-      // A server that asked us to wait (429 Retry-After, cloud only) is honoured,
-      // bounded to 60 s so a hostile or broken header can't park a payment's alert
-      // for minutes. Otherwise fall back to the exponential 500 ms · 2^n backoff.
       const backoff = 500 * 2 ** (i - 1);
       await sleep(Math.min(60_000, last.retryAfterMs ?? backoff));
     }
@@ -261,11 +174,6 @@ async function withRetry(channel: string, attempt: () => Promise<Attempt>, attem
   return { channel, ok: false, detail: `${last.detail} (after ${attempts} attempts)`, attempts };
 }
 
-/**
- * Parses a `Retry-After` header — an integer number of seconds, or an HTTP-date —
- * into a millisecond delay bounded to [0, 60 s]. Returns undefined if absent or
- * unparseable, so the caller falls back to its own backoff.
- */
 export function parseRetryAfter(header: string | null, now = Date.now()): number | undefined {
   if (!header) return undefined;
   const secs = Number(header.trim());
@@ -275,18 +183,10 @@ export function parseRetryAfter(header: string | null, now = Date.now()): number
   return Math.max(0, Math.min(60_000, when - now));
 }
 
-/** HTTP status codes worth trying again. */
 function retryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
-/**
- * Sends a message on every configured channel.
- *
- * Resolves once all channels have settled, and never rejects. Callers that do
- * not want to wait can ignore the promise; callers that do — `notify test` —
- * get the per-channel outcome back.
- */
 export async function deliver(
   cfg: NotifyConfig,
   msg: Message,
@@ -305,7 +205,6 @@ async function postWebhook(url: string, msg: Message): Promise<Attempt> {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // `text` is what Slack and Discord render; the rest is for everyone else.
       body: JSON.stringify({
         text: `${msg.subject}\n${msg.body}`,
         content: `${msg.subject}\n${msg.body}`,
@@ -359,11 +258,6 @@ async function sendEmail(cfg: NotifyConfig, msg: Message, env: NodeJS.ProcessEnv
   }
 }
 
-/**
- * SMS over Twilio's REST API. Twilio is the one channel that costs money per
- * message, so the body is trimmed to the subject plus the single most useful
- * line rather than the full text.
- */
 async function sendSms(cfg: NotifyConfig, msg: Message, env: NodeJS.ProcessEnv): Promise<Attempt> {
   const sid = env.TWILIO_ACCOUNT_SID;
   const token = env.TWILIO_AUTH_TOKEN;
@@ -399,11 +293,6 @@ async function sendSms(cfg: NotifyConfig, msg: Message, env: NodeJS.ProcessEnv):
   }
 }
 
-/**
- * Push over ntfy. Chosen because it needs no account and no key: a topic name
- * is the whole setup, which is the only push channel a zero-dependency tool can
- * honestly promise works in one command.
- */
 async function sendPush(topic: string, msg: Message): Promise<Attempt> {
   const url = /^https?:\/\//.test(topic) ? topic : `https://ntfy.sh/${encodeURIComponent(topic)}`;
   try {
@@ -434,14 +323,6 @@ function hostOf(url: string): string {
   }
 }
 
-/**
- * Pings a dead-man's-switch URL while this process lives.
- *
- * This is the honest answer to "who tells me when my laptop is shut?" — nothing
- * running on that laptop can. An outside monitor watching for the ping to stop
- * can. Returns a stop function; the timer is unref'd so it never keeps a
- * process alive on its own.
- */
 export function startHeartbeat(
   cfg: NotifyConfig,
   agentName: string,
@@ -464,11 +345,6 @@ async function pingHeartbeat(url: string): Promise<void> {
   await fetch(url, { method: "POST", signal: AbortSignal.timeout(8000) }).catch(() => undefined);
 }
 
-/**
- * Strips the query string from a URL so a value that may be personal — `?city=lisbon`,
- * `?token=…` — never leaves the machine on its way to the cloud (plan D-6). Falls
- * back to a plain split for anything that is not a parseable URL.
- */
 export function stripQuery(value: string): string {
   try {
     const u = new URL(value);
@@ -484,7 +360,6 @@ function cloudUrl(base: string, route: string): string {
   return base.replace(/\/+$/, "") + route;
 }
 
-/** POSTs one decision to the cloud's event feed. The key is read from the environment at send time. */
 async function postCloudEvent(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.ProcessEnv): Promise<Attempt> {
   const key = env[cloud.keyEnv];
   if (!key) return { ok: false, detail: `${cloud.keyEnv} is not set, so nothing reached the cloud`, retryable: false };
@@ -500,7 +375,6 @@ async function postCloudEvent(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.P
       ok: false,
       detail: `HTTP ${res.status} from ${hostOf(cloud.url)}`,
       retryable: retryableStatus(res.status),
-      // Honour a 429's Retry-After (0.5.1, C-10); ignored for every other status.
       retryAfterMs: res.status === 429 ? parseRetryAfter(res.headers.get("retry-after")) : undefined,
     };
   } catch (e) {
@@ -508,32 +382,18 @@ async function postCloudEvent(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.P
   }
 }
 
-/** Sends one cloud event with the same retry policy as every other channel. Exported for `notify test`. */
 export function deliverCloud(cloud: CloudConfig, evt: CloudEvent, env: NodeJS.ProcessEnv = process.env): Promise<DeliveryResult> {
   return withRetry("cloud", () => postCloudEvent(cloud, evt, env));
 }
 
-/** What a heartbeat tells the cloud about the agent that is still alive. */
 export interface CloudHeartbeat {
   agent: string;
   network?: string;
   mode?: "practice" | "live";
   version?: string;
-  /**
-   * Micro-dollars locked in open Solana `upto` channels, as a decimal string
-   * (SOL-08, §6). Lets the cloud overview show locked value without waiting for
-   * a `channel` event. Absent on an EVM agent and on an older client, which the
-   * server tolerates.
-   */
   escrowedMicro?: string;
 }
 
-/**
- * Beats to the cloud's `/v1/heartbeat` while this process lives, so the watchdog
- * on the other end can raise the alarm this machine cannot raise about itself.
- * The timer is unref'd — it never keeps a process alive on its own — and returns
- * a stop function. A no-op when the cloud channel is off.
- */
 export function startCloudHeartbeat(
   cloud: CloudConfig | undefined,
   meta: CloudHeartbeat,
@@ -541,13 +401,6 @@ export function startCloudHeartbeat(
     env?: NodeJS.ProcessEnv;
     everyMs?: number;
     send?: (cloud: CloudConfig, meta: CloudHeartbeat, env: NodeJS.ProcessEnv) => Promise<unknown>;
-    /**
-     * Runs once per beat before the ping. Its return is merged into the body, so
-     * a Solana agent can attach a live `escrowedMicro`; it is also where the
-     * escrow watchdog reconciles the chain and emits `channel/orphaned` (SOL-08,
-     * §6). Errors are swallowed — a chain read must never stop the liveness beat —
-     * and a slow beat never overlaps itself.
-     */
     beat?: () => Partial<CloudHeartbeat> | void | Promise<Partial<CloudHeartbeat> | void>;
   } = {},
 ): () => void {
@@ -557,14 +410,14 @@ export function startCloudHeartbeat(
   const everyMs = Math.max(250, opts.everyMs ?? 60_000);
   let running = false;
   const tick = async () => {
-    if (running) return; // never let a slow reconcile pile beats on top of each other
+    if (running) return;
     running = true;
     try {
       let extra: Partial<CloudHeartbeat> | void;
       try {
         extra = opts.beat ? await opts.beat() : undefined;
       } catch {
-        extra = undefined; // the beat hook (chain read) must not stop the ping
+        extra = undefined;
       }
       const body = extra ? { ...meta, ...extra } : meta;
       if (cloud?.enabled) await Promise.resolve(send(cloud, body, env)).catch(() => undefined);
@@ -589,10 +442,6 @@ async function postCloudHeartbeat(cloud: CloudConfig, meta: CloudHeartbeat, env:
   }).catch(() => undefined);
 }
 
-/**
- * Asks the cloud who this key belongs to (`GET /v1/me`), so `notify` and `status`
- * can say "connected as <workspace>" rather than just "a key is set".
- */
 export async function cloudWhoami(
   cloud: CloudConfig,
   env: NodeJS.ProcessEnv = process.env,
@@ -612,7 +461,6 @@ export async function cloudWhoami(
   }
 }
 
-/** Plain-English subject and body for each Solana `upto` channel phase (SOL-08). */
 function channelMessage(
   agent: string,
   phase: ChannelPhase,
@@ -662,22 +510,11 @@ function channelMessage(
   }
 }
 
-/**
- * Decides what is worth telling a human about, and remembers what it already
- * said.
- *
- * The threshold rule is a high-water mark rather than a per-call comparison:
- * crossing 80% announces itself once, not on every payment after it. Topping up
- * the allowance moves the mark back down, so the next 80% is announced too.
- */
 export class Notifier {
   private store: NotifyStore;
   private agentName: string;
-  /** Overridable so tests can assert without reaching the network. */
   private send: (cfg: NotifyConfig, msg: Message) => Promise<unknown>;
-  /** The cloud transport, overridable for tests, separate from the human channels. */
   private sendCloud: (cloud: CloudConfig, evt: CloudEvent) => Promise<DeliveryResult>;
-  /** Tagged onto every cloud event so the feed knows which rail this agent runs on. */
   private network?: string;
   private mode?: "practice" | "live";
 
@@ -699,12 +536,6 @@ export class Notifier {
     this.mode = opts.mode;
   }
 
-  /**
-   * Sends one decision to the cloud feed, if the channel is on. Independent of
-   * the human channels and of the threshold logic: the cloud wants every paid,
-   * blocked and queued row, not only the ones worth waking a human for. Never
-   * awaited, never able to fail a payment; a failure is warned and written down.
-   */
   private emitCloud(
     cfg: NotifyConfig,
     kind: CloudEventKind,
@@ -747,10 +578,6 @@ export class Notifier {
       });
   }
 
-  /**
-   * Call after a payment settles. The cloud feed records every paid row (the
-   * local channels do not — they only speak up at a threshold). Cloud-only.
-   */
   paid(url: string, host: string, amountMicro: bigint, txHash?: string): void {
     const cfg = this.store.load();
     if (!cfg.cloud?.enabled) return;
@@ -763,12 +590,6 @@ export class Notifier {
     );
   }
 
-  /**
-   * Call after a Solana `upto` channel changes phase (SOL-08, §6). Cloud-only,
-   * like `paid`: escrow is a third money state the feed tracks in its own right,
-   * so the cloud can show locked value and the watchdog can flag a deposit the
-   * seller never settled. The `data` fields are exactly §6's list.
-   */
   channel(phase: ChannelPhase, rec: ChannelRecord): void {
     const cfg = this.store.load();
     if (!cfg.cloud?.enabled) return;
@@ -791,8 +612,6 @@ export class Notifier {
   }
 
   private dispatch(cfg: NotifyConfig, msg: Message): void {
-    // Deliberately not awaited: a slow webhook must not slow down a payment,
-    // and a broken one must not fail it. What it can do is leave a trace.
     void Promise.resolve(this.send(cfg, msg))
       .then((results) => {
         if (!Array.isArray(results)) return;
@@ -816,12 +635,10 @@ export class Notifier {
       });
   }
 
-  /** Call after a payment settles. Announces 50/80/100% of the allowance once each. */
   spendChanged(spentMicro: bigint, budgetMicro: bigint): void {
     const cfg = this.store.load();
     if (budgetMicro <= 0n) return;
     const cloudOn = !!cfg.cloud?.enabled;
-    // Nothing to do if neither a human channel nor the cloud is listening.
     if (!this.store.configured() && !cloudOn) return;
 
     const pct = Number((spentMicro * 10000n) / budgetMicro) / 100;
@@ -832,7 +649,6 @@ export class Notifier {
     if (highest === cfg.highWater) return;
     const goingUp = highest > cfg.highWater;
     this.store.save({ highWater: highest });
-    // Falling below a mark (a top-up raised the budget) just rearms it quietly.
     if (!goingUp || highest === 0) return;
 
     const left = budgetMicro - spentMicro;
@@ -853,19 +669,14 @@ export class Notifier {
       remainingMicro: left.toString(),
     };
 
-    // The cloud feed gets every crossing (C-10), independent of the human alert
-    // preferences — the same rule the payment/blocked/approval kinds follow.
     this.emitCloud(cfg, "threshold", subject, body, data);
 
     if (!this.store.configured()) return;
     this.dispatch(cfg, { event: "threshold", subject, body, data });
   }
 
-  /** Call whenever a rail refuses a payment. */
   blocked(host: string, rule: string, detail: string, attemptedMicro: bigint): void {
     const cfg = this.store.load();
-    // An approval block already sends its own, more actionable message — on both
-    // the human channels and the cloud — so this one stays quiet for it.
     if (rule === "human_approval_required") return;
 
     const label = RULE_LABELS[rule as keyof typeof RULE_LABELS] ?? rule;
@@ -875,13 +686,11 @@ export class Notifier {
       `${detail}\n\nNothing moved. No action is needed unless you want to raise a limit.`;
     const data = { agent: this.agentName, host, rule, detail, attemptedMicro: attemptedMicro.toString() };
 
-    // The cloud feed gets every block, regardless of the human alert preferences.
     this.emitCloud(cfg, "blocked", subject, body, data);
     if (!cfg.onBlock || !this.store.configured()) return;
     this.dispatch(cfg, { event: "blocked", subject, body, data });
   }
 
-  /** Call when a payment is parked for a human decision. */
   approvalQueued(id: string, host: string, amountMicro: bigint, cli: string): void {
     const cfg = this.store.load();
     const subject = `${this.agentName} is waiting on you: ${fmtUsdSmart(amountMicro)} to ${host}`;
@@ -891,7 +700,6 @@ export class Notifier {
       `Approve:  ${cli} approve ${id}\nDeny:     ${cli} deny ${id}\nOr use the dashboard: ${cli} dashboard`;
     const data = { agent: this.agentName, requestId: id, host, amountMicro: amountMicro.toString() };
 
-    // The cloud feed gets every queued payment, regardless of the human alert preferences.
     this.emitCloud(cfg, "approval", subject, body, data);
     if (!cfg.onApproval || !this.store.configured()) return;
     this.dispatch(cfg, { event: "approval", subject, body, data });

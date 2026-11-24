@@ -1,5 +1,3 @@
-// Local-only HTTP server shared by browser QA commands. Mirrors static Vercel
-// redirects, clean URLs and branded 404s without mounting production API handlers.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';

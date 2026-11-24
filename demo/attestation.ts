@@ -1,23 +1,3 @@
-/**
- * Behavior-derived attestation demo (PoC).
- *
- *   node demo/attestation.ts
- *
- * Shows the whole first-demo loop with no network and no real money:
- *   1. an agent runs, leaving a normal audit ledger (payments, a block, an
- *      approval, a policy change);
- *   2. the agent compresses that ledger and signs it with its own payer key —
- *      a portable, non-custodial reputation claim;
- *   3. a seller verifies the signature recovers to the agent and reads the
- *      claim, the way it would gate access on it;
- *   4. a tampered claim is shown being rejected;
- *   5. the seller re-checks the payment evidence on-chain (v2) — here against an
- *      injected fake RPC so the demo stays offline;
- *   6. the seller resolves the agent's ERC-8004 registry id (v2) — again against
- *      an injected fake registry, so identity resolves with no brand tag.
- *
- * Needs viem (a dev/optional peer dep, already installed): npm i viem
- */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,14 +12,12 @@ function line(s = ""): void {
 
 async function main(): Promise<void> {
   const { privateKeyToAccount } = await import("viem/accounts");
-  // A throwaway key: in a real agent this is the same key createLiveAgent pays with.
   const account = privateKeyToAccount(`0x${"a7".repeat(32)}`);
   const agent = account.address;
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wallie-attest-demo-"));
   const ledger = new Ledger(dir);
 
-  // 1. A day in the life of the agent — the rows it would write on its own.
   ledger.append({ t: "topup", at: "2026-09-01T09:00:00.000Z", agent, amountMicro: "5000000", source: "manual", balanceAfterMicro: "5000000" });
   ledger.append({ t: "payment", at: "2026-09-02T10:00:00.000Z", agent, url: "https://weather.example/api", host: "weather.example", amountMicro: "1500", txHash: "0x11aa", balanceAfterMicro: "4998500" });
   ledger.append({ t: "payment", at: "2026-09-03T11:00:00.000Z", agent, url: "https://search.example/api", host: "search.example", amountMicro: "3000", txHash: "0x22bb", balanceAfterMicro: "4995500" });
@@ -52,8 +30,6 @@ async function main(): Promise<void> {
   line(`   ${ledger.read().length} rows for ${agent}`);
   line();
 
-  // 2. The agent issues a signed behavior claim. includeEvidence attaches the
-  //    txHashes so the seller can re-check them on-chain in step 6 (v2).
   const summary = summarize(ledger, agent, { includeEvidence: true, registryAgentId: "42" });
   line("=== 2. Behavior summary derived from the ledger (counts, not raw rows) ===");
   line(JSON.stringify(summary, null, 2));
@@ -68,7 +44,6 @@ async function main(): Promise<void> {
   line(`   signature  ${attestation.signature.slice(0, 34)}...`);
   line();
 
-  // 3. The seller verifies it.
   const ok = await verifyAttestation(attestation);
   line("=== 4. Seller verifies ===");
   if (ok.valid) {
@@ -83,7 +58,6 @@ async function main(): Promise<void> {
   }
   line();
 
-  // 4. A forged claim is rejected.
   const forged: SignedAttestation = { ...attestation, summary: { ...attestation.summary, payments: 9999, blocks: 0 } };
   const bad = await verifyAttestation(forged);
   line("=== 5. A tampered claim (payments inflated to 9999) ===");
@@ -91,16 +65,10 @@ async function main(): Promise<void> {
   if (bad.valid) process.exitCode = 1;
   line();
 
-  // 5. v2: the seller re-checks the payment evidence on-chain. A real seller
-  //    passes a viem public client (or just `network: "base-sepolia"`); here an
-  //    injected fake RPC returns receipts so the demo needs no network. Each
-  //    receipt carries a USDC Transfer whose `from` is the agent — exactly what
-  //    a settled x402 payment leaves on-chain.
-  const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
+  const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
   const padTopic = (a: string) => "0x" + "0".repeat(24) + a.slice(2).toLowerCase();
   const fakeRpc: TxReader = {
     async getTransactionReceipt({ hash }) {
-      // The agent really paid in every one of its evidence txs.
       const seller = "0x00000000000000000000000000000000000000ca";
       return { status: "success", logs: [{ address: usdc, topics: [ERC20_TRANSFER_TOPIC, padTopic(agent), padTopic(seller)], data: "0x3e8" }] };
     },
@@ -111,7 +79,6 @@ async function main(): Promise<void> {
   line("   These payments no longer rest on the Wallie brand — the chain says so.");
   if (chain.verified !== chain.checked) process.exitCode = 1;
 
-  // A fabricated hash cannot pass: the fake here has no such receipt.
   const liar: SignedAttestation = {
     ...attestation,
     summary: { ...attestation.summary, verifiableTxHashes: ["0xf0f0"] },
@@ -121,13 +88,9 @@ async function main(): Promise<void> {
   line(`   A made-up txHash: ${miss.verified}/${miss.checked} verified (${miss.failures[0]?.reason ?? ""}).`);
   line();
 
-  // 6. v2 identity: the seller resolves the agent in the ERC-8004 Identity
-  //    Registry. On a real chain it reads registry 0x8004... on base-sepolia;
-  //    here an injected fake maps agentId 42 to the agent's own wallet, exactly
-  //    what a real registration would return from getAgentWallet(42).
   const fakeRegistry: RegistryReader = {
     async getAgentWallet(id) {
-      return id === 42n ? agent : null; // agentId 42 is this agent's registration
+      return id === 42n ? agent : null;
     },
     async ownerOf(id) {
       return id === 42n ? agent : null;
@@ -143,7 +106,6 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
 
-  // A borrowed agentId cannot pass: the fake registry maps 43 to a stranger.
   const strangerRegistry: RegistryReader = {
     async getAgentWallet() { return "0x00000000000000000000000000000000000000ff"; },
     async ownerOf() { return "0x00000000000000000000000000000000000000ff"; },

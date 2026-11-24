@@ -26,15 +26,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-/**
- * The MCP server surface (docs/SOLANA-ARCHITECTURE.md §8, SOL-07). The five
- * tools are exercised over the real MCP protocol: `tools/list` against the
- * spawned `wallie-mcp` bin over stdio (the done-when clause), and `tools/call`
- * against a linked in-memory client/server for the money paths — a mock `exact`
- * buy, a ceiling block whose reason is the human `RULE_LABELS` text, and a fully
- * offline Solana `upto` buy that settles below the ceiling and refunds the rest.
- */
-
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_NAMES = ["decide_approval", "get_budget", "list_channels", "pay_fetch", "reclaim_channel"];
 
@@ -46,7 +37,6 @@ function randomAddr(): string {
   return getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32)));
 }
 
-/** A throwaway 64-byte Solana secret, JSON-array form (`solana-keygen`'s shape). */
 function keyJson(): string {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }) as Buffer;
@@ -56,7 +46,6 @@ function keyJson(): string {
   return JSON.stringify(Array.from(Buffer.concat([seed, pub])));
 }
 
-/** A linked MCP client speaking to a server that governs `binding`. */
 async function connectClient(binding: McpBinding): Promise<{ client: Client; close(): Promise<void> }> {
   const server = await createMcpServer(binding);
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
@@ -83,8 +72,6 @@ function paymentRows(dir: string): Extract<LedgerEvent, { t: "payment" }>[] {
   return new Ledger(dir).read().filter((e): e is Extract<LedgerEvent, { t: "payment" }> => e.t === "payment");
 }
 
-// A mock `exact` seller on localhost, sharing the buyer's MockChain file so its
-// facilitator knows the payer key. Priced in micro-USDC.
 async function startMockSeller(
   accountsPath: string,
   priceMicro: bigint,
@@ -104,8 +91,6 @@ async function startMockSeller(
   return { url: `http://localhost:${port}/data`, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
-// A Solana `upto` seller whose advertised `extra` pins a blockhash and slot, so
-// the buyer's open build is zero-RPC and the whole loop runs offline.
 function pinnedOperator(): { operator: UptoOperator; base: InMemoryUptoOperator } {
   const base = new InMemoryUptoOperator({ feePayer: randomAddr(), receiverAuthorizer: randomAddr() });
   const blockhash = randomAddr();
@@ -146,8 +131,6 @@ async function startUptoSeller(operator: UptoOperator, perRowMicro: bigint, ceil
   return { url: (rows: number) => `http://localhost:${port}/rows?rows=${rows}`, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
-// ---------------------------------------------------------------------------
-
 test("the wallie-mcp bin answers tools/list with the five tools over real stdio", async () => {
   const dir = tmpDir();
   const client = new Client({ name: "probe", version: "0" });
@@ -162,7 +145,6 @@ test("the wallie-mcp bin answers tools/list with the five tools over real stdio"
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, TOOL_NAMES, "exactly the five tools");
     for (const t of tools) assert.ok(t.description && t.description.length > 0, `${t.name} has a description`);
-    // Every tool advertises a JSON-Schema object input.
     for (const t of tools) assert.equal((t.inputSchema as { type?: string }).type, "object");
   } finally {
     await client.close();
@@ -177,7 +159,7 @@ test("pay_fetch settles a mock exact buy and get_budget reflects the spend", asy
   const dir = tmpDir();
   const buyer = createAgent(dir);
   topUp(buyer, 5);
-  const seller = await startMockSeller(path.join(dir, "accounts.json"), 1000n); // $0.001
+  const seller = await startMockSeller(path.join(dir, "accounts.json"), 1000n);
   const { client, close } = await connectClient({ runtime: buyer });
   try {
     const res = await client.callTool({ name: "pay_fetch", arguments: { url: seller.url } });
@@ -192,7 +174,6 @@ test("pay_fetch settles a mock exact buy and get_budget reflects the spend", asy
     assert.equal((budget.funded as { micro: string }).micro, "5000000");
     assert.equal((budget.remaining as { micro: string }).micro, "4999000");
     assert.equal((budget.window as { seconds: number }).seconds, buyer.policy().windowSeconds);
-    // The §5 identity holds: funded − spent − reserved − escrowed == remaining.
     const m = (k: string) => BigInt((budget[k] as { micro: string }).micro);
     assert.equal(m("funded") - m("spent") - m("reserved") - m("escrowed"), m("remaining"));
   } finally {
@@ -205,7 +186,7 @@ test("pay_fetch over the per-call cap is blocked and surfaces the RULE_LABELS te
   const dir = tmpDir();
   const buyer = createAgent(dir);
   topUp(buyer, 5);
-  new PolicyStore(dir, buyer.agentName).save({ perCallMaxUsd: 0.0005 }); // below the $0.001 price
+  new PolicyStore(dir, buyer.agentName).save({ perCallMaxUsd: 0.0005 });
   const seller = await startMockSeller(path.join(dir, "accounts.json"), 1000n);
   const { client, close } = await connectClient({ runtime: buyer });
   try {
@@ -227,7 +208,7 @@ test("decide_approval approves a queued charge so the retry goes through", async
   const dir = tmpDir();
   const buyer = createAgent(dir);
   topUp(buyer, 5);
-  new PolicyStore(dir, buyer.agentName).save({ requireApprovalAboveUsd: 0.0005 }); // $0.001 needs approval
+  new PolicyStore(dir, buyer.agentName).save({ requireApprovalAboveUsd: 0.0005 });
   const seller = await startMockSeller(path.join(dir, "accounts.json"), 1000n);
   const { client, close } = await connectClient({ runtime: buyer });
   try {
@@ -243,7 +224,6 @@ test("decide_approval approves a queued charge so the retry goes through", async
     assert.equal(paid.ok, true, "the grant lets the retry settle");
     assert.equal((paid.cost as { micro: string }).micro, "1000");
 
-    // A bad id is a soft failure listing what is pending, not a throw.
     const miss = structured(await client.callTool({ name: "decide_approval", arguments: { id: "nope", approve: true } }));
     assert.equal(miss.ok, false);
   } finally {
@@ -255,19 +235,19 @@ test("decide_approval approves a queued charge so the retry goes through", async
 test("pay_fetch on a Solana upto seller settles below the ceiling, refunds the rest, and lists the channel", async () => {
   const dir = tmpDir();
   const { operator, base } = pinnedOperator();
-  const seller = await startUptoSeller(operator, 1000n, 100000n); // $0.001/row, $0.10 ceiling
+  const seller = await startUptoSeller(operator, 1000n, 100000n);
   const buyer = await createLiveAgent({
     stateDir: dir,
     privateKey: keyJson(),
     network: "solana-devnet",
-    rpcUrl: "http://127.0.0.1:1", // never reached — the encode is zero-RPC
+    rpcUrl: "http://127.0.0.1:1",
     checkOnChainBalance: false,
     preferScheme: "upto",
   });
   topUp(buyer, 1);
   const { client, close } = await connectClient({ runtime: buyer, network: buyer.network, rpcUrl: buyer.rpcUrl });
   try {
-    const res = structured(await client.callTool({ name: "pay_fetch", arguments: { url: seller.url(30) } })); // 30 × $0.001
+    const res = structured(await client.callTool({ name: "pay_fetch", arguments: { url: seller.url(30) } }));
     assert.equal(res.ok, true);
     assert.equal((res.cost as { micro: string }).micro, "30000", "charged the metered actual");
     assert.equal((res.quoted as { micro: string }).micro, "100000", "quoted the ceiling");
@@ -308,19 +288,16 @@ test("reclaim_channel refuses a non-Solana channel and one it cannot sign for", 
   const buyer = createAgent(dir);
   const store = new ChannelStore(dir);
 
-  // A channel on an EVM network — no reclaim exists for that rail.
   store.add({ channelId: "EvmChan", agent: buyer.agentName, url: "http://x/y", host: "x", network: "base-sepolia", depositMicro: 1000n, withdrawDelay: 900 });
   const evm = await handleToolCall({ runtime: buyer }, "reclaim_channel", { id: "EvmChan" });
   assert.equal(evm.isError, true);
   assert.match(summaryText(evm), /Solana `upto` only/);
 
-  // A Solana channel, but the binding has no key/rpc to sign the reclaim.
   store.add({ channelId: "SolChan", agent: buyer.agentName, url: "http://x/y", host: "x", network: "solana-devnet", depositMicro: 1000n, withdrawDelay: 900 });
   const noKey = await handleToolCall({ runtime: buyer }, "reclaim_channel", { id: "SolChan" });
   assert.equal(noKey.isError, true);
   assert.match(summaryText(noKey), /needs a Solana live agent with its key/);
 
-  // Another agent's channel in the same directory is not reclaimable by this one.
   store.add({ channelId: "OtherChan", agent: "someone-else", url: "http://x/y", host: "x", network: "solana-devnet", depositMicro: 1000n, withdrawDelay: 900 });
   const other = await handleToolCall({ runtime: buyer }, "reclaim_channel", { id: "OtherChan" });
   assert.equal(other.isError, true);
@@ -332,9 +309,9 @@ test("tool handlers reject bad input without throwing", async () => {
   const buyer = createAgent(dir);
   const b = { runtime: buyer };
   assert.equal((await handleToolCall(b, "pay_fetch", {})).isError, true);
-  assert.equal((await handleToolCall(b, "decide_approval", { id: "x" })).isError, true); // no `approve`
-  assert.equal((await handleToolCall(b, "decide_approval", { approve: true })).isError, true); // no `id`
-  assert.equal((await handleToolCall(b, "reclaim_channel", {})).isError, true); // no `id`
+  assert.equal((await handleToolCall(b, "decide_approval", { id: "x" })).isError, true);
+  assert.equal((await handleToolCall(b, "decide_approval", { approve: true })).isError, true);
+  assert.equal((await handleToolCall(b, "reclaim_channel", {})).isError, true);
   assert.equal((await handleToolCall(b, "no_such_tool", {})).isError, true);
 });
 
@@ -342,7 +319,6 @@ test("pay_fetch forwards method and body to the seller", async () => {
   const dir = tmpDir();
   const buyer = createAgent(dir);
   topUp(buyer, 5);
-  // A free (unpriced) echo server: no 402, just report what it received.
   const seen: { method?: string; body?: string }[] = [];
   const server = http.createServer((req, res) => {
     let body = "";

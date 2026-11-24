@@ -17,7 +17,6 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-rails-"));
 }
 
-/** A seller on the agent's own mock chain, so payments actually settle. */
 async function seller(
   rt: AgentRuntime,
   priceMicro: bigint,
@@ -49,7 +48,7 @@ test("totalBudgetUsd is enforced even when the wallet is funded well above it", 
     { totalBudgetUsd: 1, perCallMaxUsd: 1, windowLimitUsd: 100, windowSeconds: 60, requireApprovalAboveUsd: 99 },
     10,
   );
-  const s = await seller(rt, 200_000n); // $0.20
+  const s = await seller(rt, 200_000n);
 
   let paid = 0;
   let lastRule = "";
@@ -87,7 +86,7 @@ test("parallel calls cannot fan out past the velocity breaker", async () => {
     { totalBudgetUsd: 100, windowLimitUsd: 1, windowSeconds: 60, perCallMaxUsd: 1, requireApprovalAboveUsd: 99 },
     100,
   );
-  const s = await seller(rt, 50_000n); // $0.05 → ceiling of exactly 20 calls
+  const s = await seller(rt, 50_000n);
 
   const results = await Promise.all(Array.from({ length: 40 }, () => payingFetch(rt.ctx, s.url)));
   await s.close();
@@ -100,7 +99,6 @@ test("parallel calls cannot fan out past the velocity breaker", async () => {
 
 test("a seller-rejected payment reports an error, logs it, and spends nothing", async () => {
   const rt = agentWith({ perCallMaxUsd: 1, requireApprovalAboveUsd: 99 }, 5);
-  // A facilitator on a different chain does not know this payer.
   const foreign = new MockChain();
   const s = await seller(rt, 10_000n, foreign);
 
@@ -121,7 +119,7 @@ test("a seller-rejected payment reports an error, logs it, and spends nothing", 
 
 test("a block carries what an agent needs to correct itself", async () => {
   const rt = agentWith({ perCallMaxUsd: 0.01, requireApprovalAboveUsd: 0.005, windowLimitUsd: 10 }, 5);
-  const s = await seller(rt, 370_000n); // $0.37 against a $0.01 cap
+  const s = await seller(rt, 370_000n);
   const res = await payingFetch(rt.ctx, s.url);
   await s.close();
 
@@ -193,14 +191,6 @@ test("the pre-flight check never queues a $0.00 approval, even at a zero thresho
   assert.equal(queued[0].amountMicro, "10000");
 });
 
-// ---------------------------------------------------------------------------
-// SOL-06: the Solana `upto` policy mapping (docs/SOLANA-ARCHITECTURE.md §5).
-// One test per row of the table: the ceiling is what every rail checks, escrow
-// is a third leg of the budget, and grants are drawn by the ceiling but only
-// consume the actual.
-// ---------------------------------------------------------------------------
-
-/** A full runtime policy with sane rails, overridden per test. */
 function pol(patch: Partial<RuntimePolicy> = {}): RuntimePolicy {
   return { ...defaultPolicy, killSwitch: false, ...patch };
 }
@@ -225,8 +215,6 @@ test("§5 per-call cap: the ceiling is what is measured, not the eventual charge
     topupsMicro: usd(100),
     windowSpendMicro: 0n,
   };
-  // A $0.10 ceiling against a $0.05 cap is refused even though the seller may
-  // charge far less — the buyer authorizes the whole ceiling.
   const over = evaluatePolicy(pol({ perCallMaxUsd: 0.05, windowLimitUsd: 100 }), {
     ...base,
     amountMicro: usd(0.1),
@@ -235,7 +223,6 @@ test("§5 per-call cap: the ceiling is what is measured, not the eventual charge
   assert.equal(over.allowed === false && over.rule, "per_call_cap");
   assert.match(over.allowed === false ? over.detail : "", /ceiling/, "an `upto` block says ceiling, not price");
 
-  // A ceiling at exactly the cap is allowed.
   const atCap = evaluatePolicy(pol({ perCallMaxUsd: 0.05, windowLimitUsd: 100 }), {
     ...base,
     amountMicro: usd(0.05),
@@ -245,7 +232,6 @@ test("§5 per-call cap: the ceiling is what is measured, not the eventual charge
 });
 
 test("§5 velocity: the window sum plus this ceiling trips the breaker (counts opens)", () => {
-  // windowSpendMicro carries prior opens' ceilings; this ceiling pushes over.
   const decision = evaluatePolicy(pol({ windowSeconds: 30, windowLimitUsd: 1, perCallMaxUsd: 1 }), {
     host: "localhost",
     amountMicro: usd(0.2),
@@ -267,7 +253,6 @@ test("§5 budget: escrow is subtracted alongside spend and reservations", () => 
     windowSpendMicro: 0n,
     scheme: "upto" as const,
   };
-  // $0.70 escrowed leaves $0.30 of a $1 budget — a $0.50 ceiling will not fit.
   const over = evaluatePolicy(pol({ totalBudgetUsd: 1, perCallMaxUsd: 1, windowLimitUsd: 100 }), {
     ...base,
     escrowedMicro: usd(0.7),
@@ -275,7 +260,6 @@ test("§5 budget: escrow is subtracted alongside spend and reservations", () => 
   assert.equal(over.allowed === false && over.rule, "budget_exhausted");
   assert.match(over.allowed === false ? over.detail : "", /locked in open channels/);
 
-  // The same ceiling fits when nothing is escrowed.
   const ok = evaluatePolicy(pol({ totalBudgetUsd: 1, perCallMaxUsd: 1, windowLimitUsd: 100 }), {
     ...base,
     escrowedMicro: 0n,
@@ -318,11 +302,9 @@ test("§5 grant: drawn down by the ceiling, refunded by the unspent remainder", 
   const grant = store.decide(req.id, true, { budgetMicro: usd(1) })!;
   const reread = () => store.list().find((r) => r.id === grant.id)!;
 
-  // Authorize commits the whole $0.10 ceiling against a $1.00 grant.
   store.commit(grant.id, usd(0.1));
   assert.equal(store.remainingMicro(reread()), usd(0.9), "the ceiling is committed at authorize");
 
-  // The seller charged $0.03; the $0.07 refund returns to the grant.
   store.settleCommitment(grant.id, usd(0.1), usd(0.03));
   assert.equal(store.remainingMicro(reread()), usd(0.97), "only the $0.03 actual stays committed");
 });
@@ -346,9 +328,6 @@ test("§5 authorize on the live runtime subtracts open-channel escrow from the b
 
 test("§5 an in-flight upto open is counted once, not as both a reservation and its escrow", () => {
   const rt = agentWith({ totalBudgetUsd: 1, perCallMaxUsd: 1, windowLimitUsd: 100 }, 1);
-  // Mid-flight: `authorize` opened a reservation for the $0.50 ceiling, then
-  // `upto.open` wrote the escrow row for the same channel, referencing it. The
-  // same $0.50 must be subtracted once, not twice.
   const res = rt.reservations.open(rt.agentName, "http://h/x", "h", usd(0.5));
   const channels = new ChannelStore(rt.stateDir);
   channels.add({
@@ -363,8 +342,6 @@ test("§5 an in-flight upto open is counted once, not as both a reservation and 
   });
   assert.equal(allowanceRemaining(rt), usd(0.5), "reserved and escrow of one channel do not double-count");
 
-  // Once the reservation closes (the send failed → orphan), the escrow row now
-  // carries the money: still $0.50 total committed, still counted exactly once.
   rt.reservations.close(res.id);
   assert.equal(rt.escrowedMicro?.(), usd(0.5), "the deposit is now escrow");
   assert.equal(allowanceRemaining(rt), usd(0.5), "the same $0.50, now counted as escrow");
@@ -373,7 +350,6 @@ test("§5 an in-flight upto open is counted once, not as both a reservation and 
 test("§5 done: allowanceRemaining is budget − spent − reserved − escrowed with one open channel", () => {
   const rt = agentWith({ totalBudgetUsd: 10, perCallMaxUsd: 5, windowLimitUsd: 100 }, 10);
 
-  // spent: a settled payment row.
   rt.ledger.append({
     t: "payment",
     at: new Date().toISOString(),
@@ -384,9 +360,7 @@ test("§5 done: allowanceRemaining is budget − spent − reserved − escrowed
     txHash: "t",
     balanceAfterMicro: "0",
   });
-  // reserved: an in-flight exact payment.
   rt.reservations.open(rt.agentName, "http://h/b", "h", usd(1));
-  // escrowed: one open Solana `upto` channel.
   new ChannelStore(rt.stateDir).add({
     channelId: "chan-1",
     agent: rt.agentName,

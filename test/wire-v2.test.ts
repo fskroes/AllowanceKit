@@ -8,10 +8,6 @@ import { payingFetch, type PayContext } from "../src/payer.ts";
 import { createLiveAgent, NETWORKS } from "../src/live.ts";
 import type { AcceptsEntry } from "../src/types.ts";
 
-// x402 v2 wire compatibility (ticket L-02), proving the six changes in
-// docs/x402-compat.md §6. v1 lives in test/wire.test.ts and stays green; this
-// file only exercises the v2 branches added alongside it.
-
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-v2-"));
 }
@@ -19,10 +15,6 @@ function tmpDir(): string {
 const KEY = "0x" + "11".repeat(32);
 const WALLET = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 
-// Verbatim challenge from x402-compat.md §4c (x402uselessfacts.vercel.app): a
-// reference-SDK v2 seller whose 402 BODY is literally `{}` — the whole thing
-// lives in the base64 PAYMENT-REQUIRED header. network is CAIP-2 Base mainnet,
-// price is in `amount` (not `maxAmountRequired`).
 const USELESS_FACT_CHALLENGE = {
   x402Version: 2,
   accepts: [
@@ -41,18 +33,10 @@ const USELESS_FACT_CHALLENGE = {
 interface V2Seller {
   url: string;
   close(): Promise<void>;
-  /** The decoded PAYMENT-SIGNATURE payload the buyer last sent, if any. */
   lastPayment(): Record<string, unknown> | undefined;
-  /** The raw header name the buyer used to carry the payment (proves it wasn't X-PAYMENT). */
   lastPaymentHeaderName(): string | undefined;
 }
 
-/**
- * A minimal real-shape v2 seller: 402 with an EMPTY body and the challenge in
- * the base64 PAYMENT-REQUIRED header; on a PAYMENT-SIGNATURE it "settles" and
- * returns the receipt in the PAYMENT-RESPONSE header (a v2 SettlementResponse
- * that names the hash `transaction` and omits amountMicro).
- */
 async function listenV2(challenge: object, opts: { emptyBody?: boolean } = {}): Promise<V2Seller> {
   let lastPayment: Record<string, unknown> | undefined;
   let lastHeaderName: string | undefined;
@@ -70,10 +54,9 @@ async function listenV2(challenge: object, opts: { emptyBody?: boolean } = {}): 
       res.end(JSON.stringify({ fact: "honey never spoils" }));
       return;
     }
-    if (typeof legacy === "string" && legacy) lastHeaderName = "x-payment"; // should never happen for a v2 seller
+    if (typeof legacy === "string" && legacy) lastHeaderName = "x-payment";
     res.setHeader("PAYMENT-REQUIRED", Buffer.from(JSON.stringify(challenge)).toString("base64"));
     res.writeHead(402, { "Content-Type": "application/json" });
-    // The case that most clearly broke the v1-only buyer: an empty JSON body.
     res.end(opts.emptyBody === false ? JSON.stringify(challenge) : "{}");
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -90,7 +73,6 @@ async function listenV2(challenge: object, opts: { emptyBody?: boolean } = {}): 
   };
 }
 
-/** A mock buyer context: no real signer, records what it authorized and settled. */
 function captureCtx(): { ctx: PayContext; authorized: bigint[]; settled: { micro: bigint; txHash: string }[] } {
   const authorized: bigint[] = [];
   const settled: { micro: bigint; txHash: string }[] = [];
@@ -111,19 +93,15 @@ function captureCtx(): { ctx: PayContext; authorized: bigint[]; settled: { micro
 }
 
 test("buyer parses a v2 402 with an empty body — challenge in the PAYMENT-REQUIRED header (§4c)", async () => {
-  const seller = await listenV2(USELESS_FACT_CHALLENGE); // body is literally "{}"
+  const seller = await listenV2(USELESS_FACT_CHALLENGE);
   const { ctx, authorized } = captureCtx();
 
   const paid = await payingFetch(ctx, `${seller.url}/api/useless-fact`);
 
-  // The v1-only buyer read `{}` from the body and returned this string; the v2
-  // buyer must NOT — it reads the header instead.
   assert.notEqual(paid.error, "seller returned 402 with no acceptable payment methods");
-  // It read `amount` (v2 price field), not the absent `maxAmountRequired`.
   assert.deepEqual(authorized, [1000n], "buyer authorized against the v2 `amount` field");
   assert.equal(paid.quotedMicro, 1000n);
 
-  // And it read the CAIP-2 network straight through into the payload it sent.
   const sent = seller.lastPayment();
   assert.equal((sent?.accepted as AcceptsEntry).network, "eip155:8453", "buyer echoed the CAIP-2 network");
   await seller.close();
@@ -135,10 +113,8 @@ test("buyer answers a v2 seller with x402Version:2, PAYMENT-SIGNATURE, nested {a
 
   const paid = await payingFetch(ctx, `${seller.url}/api/useless-fact`);
 
-  // The payment went up in the v2 header, not X-PAYMENT.
   assert.equal(seller.lastPaymentHeaderName(), "payment-signature");
 
-  // The payload is the v2 nested shape (spec §5.2.2), not the v1 flat shape.
   const sent = seller.lastPayment()!;
   assert.equal(sent.x402Version, 2);
   assert.ok(sent.accepted && typeof sent.accepted === "object", "carries the chosen requirements under `accepted`");
@@ -146,8 +122,6 @@ test("buyer answers a v2 seller with x402Version:2, PAYMENT-SIGNATURE, nested {a
   assert.equal((sent.payload as { signature?: string }).signature, "0xmocksig");
   assert.equal(sent.scheme, undefined, "v2 puts scheme inside `accepted`, not at the top level");
 
-  // The receipt was read from PAYMENT-RESPONSE, tx hash from `transaction`,
-  // amount fell back to the quoted amount (the v2 receipt omitted amountMicro).
   assert.equal(paid.ok, true, `payment failed: ${paid.error ?? ""}`);
   assert.equal(paid.txHash, "0xv2feed");
   assert.equal(paid.costMicro, 1000n);
@@ -156,12 +130,6 @@ test("buyer answers a v2 seller with x402Version:2, PAYMENT-SIGNATURE, nested {a
 });
 
 test("buyer echoes the seller's chosen offer verbatim under `accepted` (no v1 normalization on the wire)", async () => {
-  // A real facilitator (QuickNode, L-02) matches `payload.accepted` against the
-  // offer it advertised and throws on fields it never sent. So the wire must
-  // carry the seller's offer byte-for-byte — not our internal normalized copy
-  // that adds `maxAmountRequired` and a synthesized `resource` — and no
-  // top-level `resource` string (v2's is a ResourceInfo object; ours would be
-  // the wrong type).
   const seller = await listenV2(USELESS_FACT_CHALLENGE);
   const { ctx } = captureCtx();
   await payingFetch(ctx, `${seller.url}/api/useless-fact`);
@@ -188,7 +156,7 @@ test("a live agent configured for base-sepolia signs for a seller quoting eip155
 
   const requirements: AcceptsEntry = {
     scheme: "exact",
-    network: "eip155:84532", // CAIP-2 form of base-sepolia — the same chain
+    network: "eip155:84532",
     amount: "1000",
     resource: "https://api.example.com/x",
     payTo: WALLET,

@@ -1,4 +1,3 @@
-/** Browser regression checks for the marketing and Cloud sites. No live mutations. */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';

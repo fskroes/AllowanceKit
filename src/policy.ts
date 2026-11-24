@@ -2,11 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fmtUsd, usd } from "./money.ts";
 
-/**
- * The complete vocabulary of reasons a payment can be refused. Exported so
- * consumers can `switch` exhaustively instead of hand-copying strings out of
- * the README.
- */
 export type PolicyRule =
   | "kill_switch"
   | "host_not_allowlisted"
@@ -18,7 +13,6 @@ export type PolicyRule =
   | "human_approval_required"
   | "settlement_rejected";
 
-/** Plain-English names for the rules, for anything a non-developer reads. */
 export const RULE_LABELS: Record<PolicyRule, string> = {
   kill_switch: "Spending paused by you",
   host_not_allowlisted: "Site not on your approved list",
@@ -33,7 +27,6 @@ export const RULE_LABELS: Record<PolicyRule, string> = {
 
 export interface PolicyConfig {
   agentName: string;
-  /** Hard ceiling on lifetime spend. Enforced alongside the funded amount: the agent can spend min(this, topups). */
   totalBudgetUsd: number;
   perCallMaxUsd: number;
   windowLimitUsd: number;
@@ -56,7 +49,6 @@ export const defaultPolicy: PolicyConfig = {
   requireApprovalAboveUsd: 0.3,
 };
 
-/** Every field `allowance policy <field> <value>` accepts, with its shape. */
 export const POLICY_FIELDS = {
   totalBudgetUsd: "usd",
   perCallMaxUsd: "usd",
@@ -71,12 +63,10 @@ export const POLICY_FIELDS = {
 
 export type PolicyField = keyof typeof POLICY_FIELDS;
 
-/** The default agent's limits live in `config.json`; every other agent gets its own file. */
 export function policyFileName(agentName?: string): string {
   return !agentName || agentName === defaultPolicy.agentName ? "config.json" : `config.${slug(agentName)}.json`;
 }
 
-/** Agent names reach the filesystem, so they are reduced to something that cannot escape it. */
 export function slug(agentName: string): string {
   const cleaned = agentName.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
   return cleaned || "agent";
@@ -94,11 +84,6 @@ function nearest(field: string): string | undefined {
 
 export class PolicyValidationError extends Error {}
 
-/**
- * Rejects unknown fields, wrong types and impossible values *before* they are
- * written. A silently-accepted typo on the command that sets a spending limit
- * is the worst failure mode this library has.
- */
 export function validatePolicyPatch(patch: Record<string, unknown>): void {
   for (const [field, value] of Object.entries(patch)) {
     if (!(field in POLICY_FIELDS)) {
@@ -125,10 +110,6 @@ export function validatePolicyPatch(patch: Record<string, unknown>): void {
   }
 }
 
-/**
- * Non-fatal configuration warnings: combinations where one rail silently
- * shadows another, so a rule the human thinks they armed can never fire.
- */
 export function policyWarnings(p: RuntimePolicy): string[] {
   const out: string[] = [];
   if (p.requireApprovalAboveUsd >= p.perCallMaxUsd)
@@ -150,11 +131,6 @@ export function policyWarnings(p: RuntimePolicy): string[] {
 export class PolicyStore {
   private file: string;
 
-  /**
-   * Limits are per agent, but the first agent in a directory keeps the
-   * unsuffixed `config.json` so a state dir written by an earlier version
-   * still reads back with the same limits.
-   */
   constructor(stateDir: string, agentName?: string) {
     fs.mkdirSync(stateDir, { recursive: true });
     this.file = path.join(stateDir, policyFileName(agentName));
@@ -180,53 +156,24 @@ export type PolicyDecision =
       allowed: false;
       rule: PolicyRule;
       detail: string;
-      /** True when retrying later, cheaper, or after a human decision can succeed. */
       recoverable: boolean;
       requestId?: string;
-      /** The price the seller quoted, so an agent can decide how far over it was. */
       quotedMicro?: bigint;
-      /** The limit that refused it, in the same units. */
       capMicro?: bigint;
-      /** For time-based rails: how long to wait before the same call could pass. */
       retryAfterMs?: number;
     };
 
 export interface PolicyContext {
   host: string;
-  /**
-   * The price to enforce against every rail. On `exact` this is the amount that
-   * will settle; on `upto` it is the *ceiling* the buyer authorizes and escrows
-   * (the seller may charge up to it), so every cap — per-call, velocity, budget,
-   * wallet balance, approval — is checked against the ceiling (§5).
-   */
   amountMicro: bigint;
   spendTotalMicro: bigint;
   topupsMicro: bigint;
   windowSpendMicro: bigint;
-  /**
-   * Live rails only: what the payer wallet actually holds on-chain, minus
-   * anything already authorized and not yet settled. Left undefined on
-   * practice money and whenever the chain could not be read, in which case the
-   * allowance ledger is the only ceiling.
-   */
   walletBalanceMicro?: bigint;
-  /**
-   * Micro-USDC that has left the wallet into open payment channels but is
-   * neither spent nor returned (Solana `upto`; from `ChannelStore.escrowedMicro`).
-   * The budget rail subtracts it alongside spend and reservations, so a locked
-   * deposit lowers the remaining allowance the moment the channel opens and
-   * returns to it the moment the receipt settles (§5). Defaults to zero.
-   */
   escrowedMicro?: bigint;
-  /**
-   * Which rail this call settles on. Only changes the wording of a refusal —
-   * "ceiling" instead of "price" — so the same block reads correctly for a
-   * metered channel. Defaults to `exact`.
-   */
   scheme?: "exact" | "upto";
 }
 
-/** The spendable ceiling: you can never exceed what you funded, nor the configured budget. */
 export function effectiveBudgetMicro(policy: RuntimePolicy, topupsMicro: bigint): bigint {
   const configured = usd(policy.totalBudgetUsd);
   return configured < topupsMicro ? configured : topupsMicro;
@@ -241,8 +188,6 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       recoverable: true,
     };
 
-  // `upto` authorizes a ceiling, not a settled amount; every refusal below is
-  // measured against `ctx.amountMicro` regardless, so only the wording changes.
   const isUpto = ctx.scheme === "upto";
   const priced = isUpto ? "ceiling" : "price";
 
@@ -288,9 +233,6 @@ export function evaluatePolicy(policy: RuntimePolicy, ctx: PolicyContext): Polic
       retryAfterMs: policy.windowSeconds * 1000,
     };
 
-  // Escrow is the third leg beside spend and reservations: a deposit locked in
-  // an open channel is money committed but not yet a `payment` row, so the
-  // budget must subtract it or a channel-heavy agent overspends (§5).
   const budget = effectiveBudgetMicro(policy, ctx.topupsMicro);
   const escrowed = ctx.escrowedMicro ?? 0n;
   const remaining = budget - ctx.spendTotalMicro - escrowed;

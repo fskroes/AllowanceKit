@@ -20,33 +20,17 @@ import { ChannelStore } from "../src/channels.ts";
 import { Ledger, type LedgerEvent } from "../src/ledger.ts";
 import { getBase58Decoder } from "@solana/kit";
 
-/**
- * The buyer `upto` flow end-to-end, fully offline (docs/SOLANA-ARCHITECTURE.md
- * §4.3, SOL-05). A real {@link createLiveAgent} on `solana-devnet` pays a real
- * {@link paymentGate} seller running an {@link InMemoryUptoOperator} (no chain,
- * no keys). The only thing that would touch the network — the buyer's `open`
- * transaction build — is made zero-RPC by pinning the blockhash and slot in the
- * seller's offer `extra`, so the whole loop runs in-process.
- *
- * SOL-05 done-when: ceiling $0.10, actual $0.03 → the ledger row reads
- * `amountMicro 30000, depositMicro 100000, refundMicro 70000`, and the channel
- * row settles. The on-chain "wallet lost exactly $0.03" and the reclaim path are
- * the gated sandbox test (`test/solana-sandbox.test.ts`).
- */
-
-const PER_ROW_MICRO = 1000n; // $0.001 per row
-const CEILING_MICRO = 100000n; // $0.10
+const PER_ROW_MICRO = 1000n;
+const CEILING_MICRO = 100000n;
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-upto-"));
 }
 
-/** A real 32-byte base58 address — the buyer's `open` build validates every one. */
 function randomAddr(): string {
   return getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32)));
 }
 
-/** A throwaway 64-byte Solana secret as the JSON-array form `solana-keygen` writes. */
 function keyJson(): string {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }) as Buffer;
@@ -56,11 +40,6 @@ function keyJson(): string {
   return JSON.stringify(Array.from(Buffer.concat([seed, pub])));
 }
 
-/**
- * Wrap an {@link InMemoryUptoOperator} so its advertised `extra` pins a
- * blockhash and slot — that is what lets the buyer build the `open` with zero
- * RPC. `overrides` lets a test force the claim to throw (the orphan path).
- */
 function operatorWithPinnedBlockhash(overrides: Partial<UptoOperator> = {}): {
   operator: UptoOperator;
   base: InMemoryUptoOperator;
@@ -86,7 +65,7 @@ async function startSeller(
 ): Promise<{ url: (rows: number) => string; close(): Promise<void> }> {
   const handler = (req: http.IncomingMessage, res: http.ServerResponse, meter?: import("../src/seller-upto.ts").Meter): void => {
     const rows = Math.max(0, Number(new URL(req.url ?? "/", "http://x").searchParams.get("rows") ?? "1") || 0);
-    meter?.charge(PER_ROW_MICRO * BigInt(rows)); // clamped to the ceiling by the gate
+    meter?.charge(PER_ROW_MICRO * BigInt(rows));
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ rows }));
   };
@@ -116,11 +95,11 @@ async function buyer(dir: string): Promise<import("../src/live.ts").LiveAgentRun
     stateDir: dir,
     privateKey: keyJson(),
     network: "solana-devnet",
-    rpcUrl: "http://127.0.0.1:1", // never reached — the encode is zero-RPC
+    rpcUrl: "http://127.0.0.1:1",
     checkOnChainBalance: false,
     preferScheme: "upto",
   });
-  topUp(live, 1); // $1 ceiling, well above one $0.10 channel
+  topUp(live, 1);
   return live;
 }
 
@@ -134,7 +113,7 @@ test("upto buyer: metered charge below the ceiling settles the channel and refun
   const seller = await startSeller(operator);
   const live = await buyer(dir);
   try {
-    const res = await payingFetch(live.ctx, seller.url(30)); // 30 rows × $0.001 = $0.03
+    const res = await payingFetch(live.ctx, seller.url(30));
 
     assert.equal(res.ok, true, res.error ?? "expected a 200");
     assert.equal(res.costMicro, 30000n, "actual charge is 30 rows");
@@ -142,13 +121,11 @@ test("upto buyer: metered charge below the ceiling settles the channel and refun
     assert.equal(res.refundMicro, 70000n, "the rest of the deposit refunds");
     assert.ok(res.channelId, "the channel id is reported");
 
-    // The seller opened and sealed exactly one channel at the metered amount.
     assert.equal(base.calls.deposit, 1);
     assert.equal(base.calls.claim, 1);
     const ch = base.channels.get(res.channelId!);
     assert.equal(ch?.settledMicro, 30000n, "on the seller side the channel settled at the actual");
 
-    // The buyer's ledger row: actual in `amountMicro`, escrow annotated.
     const rows = paymentRows(dir);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].amountMicro, "30000");
@@ -157,7 +134,6 @@ test("upto buyer: metered charge below the ceiling settles the channel and refun
     assert.equal(rows[0].refundMicro, "70000");
     assert.equal(rows[0].channelId, res.channelId);
 
-    // The buyer's channel store row resolved to `settled`, escrow back to zero.
     const store = new ChannelStore(dir);
     const rec = store.get(res.channelId!);
     assert.equal(rec?.status, "settled");
@@ -184,7 +160,6 @@ test("upto buyer: a seller that refuses (policy abort) refunds the whole deposit
     assert.equal(res.blockedBy?.rule, "settlement_rejected");
     assert.ok(res.channelId);
 
-    // The ledger shows the attempt as a zero payment with the full refund (§4.3).
     const rows = paymentRows(dir);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].amountMicro, "0");
@@ -201,8 +176,6 @@ test("upto buyer: a seller that refuses (policy abort) refunds the whole deposit
 
 test("upto buyer: a settle failure after the deposit leaves an orphan the buyer marks unknown", async () => {
   const dir = tmpDir();
-  // Deposit succeeds, then the seller's claim throws — the deposit is on-chain
-  // and unsettled, the orphan case reconcile resolves later (§4.3 row 3).
   const { operator } = operatorWithPinnedBlockhash({
     settleClaim: async () => {
       throw new Error("settle blew up");
@@ -218,8 +191,6 @@ test("upto buyer: a settle failure after the deposit leaves an orphan the buyer 
     assert.equal(res.blockedBy?.rule, "settlement_rejected");
     assert.ok(res.channelId);
 
-    // No payment row — nothing settled — but the escrow row stands as `unknown`,
-    // so its deposit is still counted and reconcile can resolve it.
     assert.equal(paymentRows(dir).length, 0);
     const store = new ChannelStore(dir);
     assert.equal(store.get(res.channelId!)?.status, "unknown");
@@ -231,10 +202,6 @@ test("upto buyer: a settle failure after the deposit leaves an orphan the buyer 
 });
 
 test("upto buyer: a seller over-reporting the actual is clamped to the deposit, not trusted (no crash, computed refund)", async () => {
-  // An adversarial/buggy seller returns amountMicro and refundMicro larger than
-  // the deposit it was handed. The buyer must clamp to the deposit (the program
-  // enforces cumulative <= deposit) and compute the refund itself, and must not
-  // throw out of payingFetch (which would skip the ledger and leave the hold).
   const dir = tmpDir();
   const store = new ChannelStore(dir);
   const CHANNEL = randomAddr();
@@ -253,7 +220,6 @@ test("upto buyer: a seller over-reporting the actual is clamped to the deposit, 
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: string, init?: { headers?: Record<string, string> }) => {
     if (init?.headers && "X-PAYMENT" in init.headers) {
-      // A lying receipt: 5× the deposit, plus a bogus refund figure.
       const lie = Buffer.from(
         JSON.stringify({ success: true, amountMicro: "500000", refundMicro: "500000", transaction: "sig", channelId: CHANNEL }),
       ).toString("base64");
@@ -290,7 +256,6 @@ test("upto buyer: a seller over-reporting the actual is clamped to the deposit, 
   };
 
   try {
-    // Must resolve, not reject.
     const res = await payingFetch(ctx as never, "http://localhost/x");
     assert.equal(res.costMicro, CEILING_MICRO, "the claim is clamped to the deposit");
     assert.equal(res.refundMicro, 0n, "clamped claim leaves nothing to refund");
@@ -305,9 +270,6 @@ test("upto buyer: a seller over-reporting the actual is clamped to the deposit, 
 });
 
 test("upto buyer: a transport error after the deposit is built marks the channel unknown and releases the hold (§4.3 row 1)", async () => {
-  // Focused on the payUpto branch: the 402 is answered, the open is built and
-  // the escrow row written, then the deposit send throws before the seller sees
-  // it. Hand-built context so the send can be made to fail deterministically.
   const dir = tmpDir();
   const store = new ChannelStore(dir);
   const CHANNEL = getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32)));
@@ -328,8 +290,7 @@ test("upto buyer: a transport error after the deposit is built marks the channel
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: string, init?: { headers?: Record<string, string> }) => {
     call++;
-    if (init?.headers && "X-PAYMENT" in init.headers) throw new Error("connection refused"); // the deposit send
-    // Everything else (preflight GET) is the 402 challenge carrying the offer.
+    if (init?.headers && "X-PAYMENT" in init.headers) throw new Error("connection refused");
     return new Response(JSON.stringify({ x402Version: 2, accepts: [uptoOffer] }), {
       status: 402,
       headers: { "content-type": "application/json" },
@@ -382,8 +343,6 @@ test("upto buyer: a transport error after the deposit is built marks the channel
     assert.deepEqual(blocked, [{ rule: "settlement_rejected" }]);
     assert.equal(call, 2, "the deposit send was attempted after the 402");
 
-    // The row is left `unknown` so a later reconcile drops it once it confirms
-    // no PDA landed — it is not silently deleted here.
     assert.equal(store.get(CHANNEL)?.status, "unknown");
   } finally {
     globalThis.fetch = realFetch;

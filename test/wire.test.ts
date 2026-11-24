@@ -34,7 +34,7 @@ async function listen(gate: (req: http.IncomingMessage, res: http.ServerResponse
   };
 }
 
-const PRICE = 25000n; // $0.025 — micro == USDC atomic units
+const PRICE = 25000n;
 
 function mockCtx(dir: string, chain?: MockChain): { ctx: PayContext; address: string } {
   const c = chain ?? new MockChain(path.join(dir, "accounts.json"));
@@ -55,7 +55,7 @@ function mockCtx(dir: string, chain?: MockChain): { ctx: PayContext; address: st
 
 test("mock facilitator settles the flat wire shape end-to-end via payingFetch", async () => {
   const dir = tmpDir();
-  const chain = new MockChain(path.join(dir, "accounts.json")); // shared by buyer accounting + seller settlement
+  const chain = new MockChain(path.join(dir, "accounts.json"));
   const { ctx } = mockCtx(dir, chain);
   const api = await listen(
     paymentGate({ priceMicro: PRICE, description: "t", payTo: "0xseller", facilitator: chain }, (_req, res) => {
@@ -64,13 +64,11 @@ test("mock facilitator settles the flat wire shape end-to-end via payingFetch", 
     }),
   );
 
-  // bare fetch sees the 402 challenge
   const bare = await fetch(`${api.url}/data`);
   assert.equal(bare.status, 402);
   const challenge = (await bare.json()) as { accepts?: unknown[] };
   assert.equal(challenge.accepts?.length, 1);
 
-  // payingFetch handles the whole protocol in one shot: challenge → policy → sign → settle
   const paid = await payingFetch(ctx, `${api.url}/data`);
   assert.equal(paid.ok, true, `payment failed: ${paid.blockedBy?.rule ?? ""} ${paid.error ?? ""}`);
   assert.equal(paid.costMicro, PRICE);
@@ -146,9 +144,6 @@ test("nested x402 v1 EVM shape passes the gate's sanity checks", async () => {
 });
 
 test("selectOffer picks the cheapest plain-USDC offer on the agent's own chain", () => {
-  // Shaped after QuickNode's real Base-Sepolia 402 (x402-compat / L-02): a $1
-  // credit-drawdown tier first, a $0.001 per-request tier, a $0.0001 Circle
-  // Gateway tier (different verifyingContract), then a mainnet tier.
   const USDC_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
   const USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
   const payTo = "0xF46394aDdDA95A3d5bCC1124605E3d15D204623C";
@@ -159,13 +154,9 @@ test("selectOffer picks the cheapest plain-USDC offer on the agent's own chain",
     { scheme: "exact", network: "eip155:8453", amount: "10000000", payTo, asset: USDC_MAINNET, extra: { name: "USD Coin", version: "2" } },
   ];
 
-  // A base-sepolia agent takes the $0.001 per-request tier — not the $1 tier,
-  // not the Gateway tier, not the mainnet tier.
   assert.equal(offerAmount(selectOffer(offers, "base-sepolia")!), "1000");
-  // A base (mainnet) agent takes the mainnet USDC offer.
   assert.equal(offerAmount(selectOffer(offers, "base")!), "10000000");
-  // Nothing fulfillable → undefined (buyer then reports "no acceptable methods").
-  assert.equal(selectOffer([offers[2]], "base-sepolia"), undefined); // Gateway-only
+  assert.equal(selectOffer([offers[2]], "base-sepolia"), undefined);
   assert.equal(selectOffer([], "base-sepolia"), undefined);
 });
 

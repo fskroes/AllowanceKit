@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-// Synthetic production transport check. This visits only public pages and
-// verifies the real Vercel pageview POST and response.
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,8 +13,6 @@ const urls = ['https://www.onewallie.com/', 'https://www.onewallie.com/stock-mon
 try {
   for (const url of urls) {
     const context = await browser.newContext();
-    // Vercel filters webdriver/headless browsers. These are synthetic-test-only
-    // overrides; DNT and GPC remain disabled so production transport is tested.
     await context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { configurable: true, get: () => false });
       const native = Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent').get.call(navigator);

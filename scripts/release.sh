@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-#
-# Release allowance-kit, its wallie alias, and wallie-mcp together.
-#
-#   scripts/release.sh 0.5.0              # do it
-#   scripts/release.sh --dry-run 0.5.0    # print every step, touch nothing
-#
-# What it does, in order: assert a clean tree on main, run the tests and build,
-# bump allowance-kit and the wallie alias to <version> (alias pinned to
-# allowance-kit@^<version>), promote the CHANGELOG's [Unreleased] section, commit
-# and tag v<version>, publish all three packages, then push main and the tag.
-#
-# Provenance (`--provenance`, so the registry shows which commit/CI run built the
-# tarball) requires publishing from GitHub Actions with an OIDC token — it is
-# added automatically when $GITHUB_ACTIONS is set, and omitted for a local
-# `npm login`-style publish, which still works but without the provenance badge.
-#
-# The npm token is read from the environment. See memory: do NOT `source .env`
-# (the multi-line PEM in it breaks the shell) — export just the one var.
 set -euo pipefail
 
 DRY=0
@@ -43,7 +25,6 @@ cd "$ROOT"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
-# Run a command, or just print it under --dry-run.
 step() {
   local cmd="$*"
   if [ "$DRY" = 1 ]; then
@@ -53,7 +34,6 @@ step() {
     eval "$cmd"
   fi
 }
-# A hard stop for a real run; a warning that lets a dry-run keep printing steps.
 stop() {
   if [ "$DRY" = 1 ]; then warn "$1 (ignored in --dry-run)"; else echo "  x $1" >&2; exit 1; fi
 }
@@ -88,7 +68,6 @@ step "npm test"
 say "Bump versions to $VERSION"
 step "npm version $VERSION --no-git-tag-version --allow-same-version"
 step "npm --prefix packages/wallie version $VERSION --no-git-tag-version --allow-same-version"
-# The alias pins allowance-kit to the matching minor so `npx wallie` is never a version behind.
 step "npm --prefix packages/wallie pkg set dependencies.allowance-kit=^$VERSION"
 step "npm --prefix packages/wallie-mcp version $VERSION --no-git-tag-version --allow-same-version"
 step "npm --prefix packages/wallie-mcp pkg set dependencies.allowance-kit=^$VERSION"
@@ -105,14 +84,7 @@ step "git commit -m \"release: v$VERSION\""
 step "git tag -a v$VERSION -m \"v$VERSION\""
 
 say "Publish"
-# prepublishOnly (test + build + demo) runs inside npm publish for allowance-kit.
-# Pass --userconfig so publish uses the repo .npmrc ($NPM_ACCESS_TOKEN) and never
-# falls back to a stale token in ~/.npmrc — the same reason the wallie step does
-# (memory: a 404 on PUT here is that fallback, not a dead token in .env).
 step "npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\""
-# The alias lives inside the repo, so the root .npmrc (which interpolates
-# \$NPM_ACCESS_TOKEN) applies; pass it explicitly so publish never falls back to
-# the dead token in ~/.npmrc.
 step "( cd packages/wallie && npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\" )"
 step "( cd packages/wallie-mcp && npm publish $PROV --access public --userconfig \"$ROOT/.npmrc\" )"
 

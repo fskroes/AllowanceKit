@@ -3,19 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeStateFile } from "./state-file.ts";
 
-/**
- * Money that has been authorized but has not settled yet.
- *
- * Without this, `authorize()` reads spend from the ledger while an in-flight
- * payment has not been written to it, so N parallel calls all authorize
- * against the same stale total and the velocity and budget rails overspend.
- * A reservation is created inside the same lock as the policy decision and
- * counts as spend until it either settles into a payment or is released.
- *
- * Reservations older than `ttlMs` are ignored and pruned: a process that dies
- * mid-payment must not hold an agent's allowance hostage.
- */
-
 export interface Reservation {
   id: string;
   at: string;
@@ -23,7 +10,6 @@ export interface Reservation {
   url: string;
   host: string;
   amountMicro: string;
-  /** The approval grant this payment draws on, so a failure can hand the budget back. */
   grantId?: string;
 }
 
@@ -60,7 +46,6 @@ export class ReservationStore {
     return this.read().open.filter((r) => Date.parse(r.at) >= cutoff);
   }
 
-  /** Records an authorized-but-unsettled payment. Call inside the allowance lock. */
   open(agent: string, url: string, host: string, amountMicro: bigint, grantId?: string): Reservation {
     const res: Reservation = {
       id: crypto.randomBytes(6).toString("hex"),
@@ -75,7 +60,6 @@ export class ReservationStore {
     return res;
   }
 
-  /** Drops a reservation — either it became a ledger payment, or it failed. */
   close(id: string): Reservation | undefined {
     const open = this.read().open;
     const found = open.find((r) => r.id === id);

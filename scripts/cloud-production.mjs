@@ -1,4 +1,3 @@
-/** Run a Cloud database command with only the linked production DATABASE_URL. */
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -25,8 +24,6 @@ try {
   }
   if (!link.projectId || !link.orgId) throw new Error('Invalid Vercel project link');
   await writeFile(path.join(scratch, '.vercel/project.json'), JSON.stringify(link));
-  // Vercel CLI merges local dotenv and parent variables over downloaded values.
-  // A clean cwd excludes dotenv; clearing DATABASE_URL excludes a shell override.
   const env = { ...process.env };
   delete env.DATABASE_URL;
   const command = action === 'verify'

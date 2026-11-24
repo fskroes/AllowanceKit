@@ -107,7 +107,6 @@ test("corrupt seller state fails closed without overwriting the index", async (t
   }), /seller channel state is corrupt/);
 });
 
-/** Valid account bytes, while all transaction submission remains mocked. */
 function accountData(status: number, feePayer: string): Buffer {
   const data = Buffer.alloc(256);
   data[0] = 1;
@@ -265,13 +264,11 @@ test("library cleanup retries failed settlement after process restart and refund
         } : null,
       } as never,
     });
-    // The library still performs the real scan, expiry checks and account decode;
-    // this seam replaces only the transaction broadcast and its chain effect.
     t.mock.method(manager, "submitCloseOrDistribute" as never, async (_signer: unknown, _record: unknown, _live: unknown, status: number) => {
       submissions++;
       assert.equal(status, 0, "failed atomic claim leaves an OPEN channel");
       if (failCleanup) throw new Error("RPC temporarily unavailable");
-      chain = null; // zero-charge abandon close refunded the entire deposit
+      chain = null;
       return "cleanup-signature";
     });
     managers.push(manager);
@@ -298,7 +295,6 @@ test("library cleanup retries failed settlement after process restart and refund
   assert.equal(failed.pending, 1, "failed cleanup is durable and remains retryable");
   await operator.stop();
 
-  // A fresh operator and library manager read the old process's persisted index.
   failCleanup = false;
   const restarted = await createSolanaUptoOperator(options);
   t.after(() => restarted.stop());
@@ -384,7 +380,6 @@ test("a configured seller starts cleanup at boot before receiving any HTTP reque
     solanaOperator: { feePayerKeyEnv: keyNames[0], receiverAuthorizerKeyEnv: keyNames[1], stateDir: dir },
   }, (_req, res) => res.end());
   t.after(() => gate.stop());
-  // stop() must also wait for the eagerly started asynchronous construction.
   await gate.stop();
   assert.equal(starts, 1);
   assert.equal(stops, 1);

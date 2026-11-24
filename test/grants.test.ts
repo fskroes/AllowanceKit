@@ -11,7 +11,6 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-grants-"));
 }
 
-/** An agent whose approval gate fires at $0.10 and whose other rails stay out of the way. */
 function agentWithGate(dir = tmpDir(), name?: string): AgentRuntime {
   const rt = createAgent(dir, name);
   topUp(rt, 20);
@@ -27,7 +26,6 @@ function agentWithGate(dir = tmpDir(), name?: string): AgentRuntime {
 
 const URL_A = "https://api.example.com/story";
 
-/** Queues an approval by trying to pay, and hands back the request id. */
 async function queue(rt: AgentRuntime, amount: bigint, url = URL_A): Promise<string> {
   const decision = await rt.ctx.authorize(amount, url);
   assert.equal(decision.allowed, false, "the gate should have parked this");

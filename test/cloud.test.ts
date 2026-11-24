@@ -11,14 +11,6 @@ import { createAgent } from "../src/wallet.ts";
 import { usd } from "../src/money.ts";
 import { runtimeVersion } from "../src/version.ts";
 
-/**
- * Wallie Cloud channel (ticket C-05). The cloud is a different kind of channel
- * from the human alerts: it receives *every* decision (paid, blocked, queued)
- * plus a heartbeat, and it holds the workspace key by environment-variable name,
- * never by value. These tests stand up a local http server as the cloud and
- * prove the shape on the wire, the liveness beat, and the no-key-on-disk rule.
- */
-
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 function tmpDir(): string {
@@ -34,7 +26,6 @@ interface CloudServer {
   close(): Promise<void>;
 }
 
-/** A stand-in for api.onewallie.com: captures /v1/events and /v1/heartbeat, answers /v1/me. */
 async function cloudServer(opts: { workspace?: string } = {}): Promise<CloudServer> {
   const events: Array<Record<string, any>> = [];
   const heartbeats: Array<Record<string, any>> = [];
@@ -94,7 +85,6 @@ async function cloudServer(opts: { workspace?: string } = {}): Promise<CloudServ
   };
 }
 
-/** Spawn the real CLI as a subprocess. */
 function run(args: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn("node", [CLI, ...args], {
@@ -109,7 +99,6 @@ function run(args: string[], env: Record<string, string | undefined> = {}): Prom
   });
 }
 
-/** Every file under a state dir, joined — for proving a secret is absent from all of them. */
 function readAll(dir: string): string {
   return fs
     .readdirSync(dir, { recursive: true, withFileTypes: true })
@@ -127,7 +116,6 @@ test("a paid, a blocked and a queued decision each reach the cloud with the righ
     store.save({ cloud: { enabled: true, url: srv.url, keyEnv } });
     const notifier = new Notifier(store, "research-agent", undefined, { network: "base-sepolia", mode: "live" });
 
-    // A live seller URL carries a query string that could be personal — it must be stripped.
     notifier.paid("https://seller.example/api?token=secret&city=lisbon", "seller.example", usd(0.01), "0xdeadbeef");
     notifier.blocked("evil.example", "host_not_allowed", "evil.example is not on your allowlist", usd(0.5));
     notifier.approvalQueued("req-1", "big.example", usd(10), "allowance-kit");
@@ -223,7 +211,7 @@ test("with cloud off, the runtime starts no beat and paid() is a silent no-op (d
   const dir = tmpDir();
   const rt = createAgent(dir);
   assert.equal(typeof rt.stopHeartbeat, "function", "a stop handle is always present");
-  rt.stopHeartbeat?.(); // harmless when there is no timer
+  rt.stopHeartbeat?.();
 
   const notifier = new Notifier(new NotifyStore(dir), "x");
   assert.doesNotThrow(() => notifier.paid("https://a.example/x", "a.example", usd(1)));
@@ -235,12 +223,10 @@ test("cloud on but the key unset fails safe: no throw, no network, recorded", as
   store.save({ cloud: { enabled: true, url: "https://api.onewallie.com", keyEnv: "DEFINITELY_UNSET_KEY_XYZ" } });
   const notifier = new Notifier(store, "x", undefined, { mode: "practice" });
   notifier.paid("https://a.example/x", "a.example", usd(1));
-  await new Promise((r) => setTimeout(r, 50)); // let the fire-and-forget settle
+  await new Promise((r) => setTimeout(r, 50));
   const fails = store.recentFailures(5);
   assert.ok(fails.some((f) => f.channel === "cloud" && /not set/.test(f.detail)), "an unset key is recorded, not thrown");
 });
-
-// ---- C-10 (0.5.1) runtime follow-ups -----------------------------------------
 
 test("C-10: threshold crossings reach the cloud feed even with no human channel", async () => {
   const srv = await cloudServer();
@@ -248,12 +234,11 @@ test("C-10: threshold crossings reach the cloud feed even with no human channel"
   process.env[keyEnv] = "wk_test_threshold01";
   try {
     const store = new NotifyStore(tmpDir());
-    // Cloud only — no webhook/email/sms/push. threshold must still fire to the cloud.
     store.save({ cloud: { enabled: true, url: srv.url, keyEnv } });
     const notifier = new Notifier(store, "spender", undefined, { network: "base", mode: "live" });
 
-    notifier.spendChanged(usd(5), usd(10)); // 50%
-    notifier.spendChanged(usd(10), usd(10)); // 100%
+    notifier.spendChanged(usd(5), usd(10));
+    notifier.spendChanged(usd(10), usd(10));
 
     await srv.waitFor("events", 2);
     assert.ok(srv.events.every((e) => e.kind === "threshold"), "both are threshold events");
@@ -290,9 +275,6 @@ test("C-10: createAgent's heartbeat carries the runtime version", async () => {
   }
 });
 
-// ---- SOL-08 channel events + escrow heartbeat --------------------------------
-
-/** A ChannelRecord-shaped row for the notifier; only the fields `channel()` reads matter. */
 function channelRec(over: Record<string, any> = {}) {
   return {
     channelId: "ChanPDA1111111111111111111111111111111111111",
@@ -355,7 +337,7 @@ test("SOL-08: a channel reaches the cloud in all five phases with the §6 data s
 
 test("SOL-08: channel() is a silent no-op when the cloud channel is off", async () => {
   const store = new NotifyStore(tmpDir());
-  const notifier = new Notifier(store, "solana-agent"); // no cloud config
+  const notifier = new Notifier(store, "solana-agent");
   assert.doesNotThrow(() => notifier.channel("opened", channelRec()));
 });
 
@@ -399,7 +381,7 @@ test("C-10: a cloud 429 with Retry-After is honoured and the retry can succeed",
   const server = http.createServer((req, res) => {
     hits++;
     if (hits === 1) {
-      res.writeHead(429, { "Retry-After": "0" }); // ask for an (immediate) wait, then let the retry through
+      res.writeHead(429, { "Retry-After": "0" });
       res.end("{}");
     } else {
       res.writeHead(200);
