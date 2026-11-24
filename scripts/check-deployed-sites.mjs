@@ -1,4 +1,3 @@
-/** Read-only Vercel routing checks. Authentication stays inside the Vercel CLI. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -47,8 +46,6 @@ check('site', '/sitemap.xml', 200, body => {
 check('site', '/robots.txt', 200, body => assert.match(body, /Sitemap:/i));
 check('site', '/assets/generated/dashboard-480.webp', 200, (_body, raw) => assert.equal(raw.subarray(8, 12).toString('ascii'), 'WEBP'));
 check('site', '/api/waitlist', 405, body => assert.equal(JSON.parse(body).ok, false));
-// Vercel also routes .js aliases to the functions. Verify JSON execution, not a
-// source-file response; MRR depends on optional Stripe configuration in previews.
 check('site', '/api/waitlist.js', 405, body => assert.equal(JSON.parse(body).ok, false));
 for (const pathname of ['/api/stock-monitor', '/api/stock-monitor.js']) check('site', pathname, 405, body => assert.match(JSON.parse(body).error, /Use POST/));
 check('site', '/assets/stock-monitor.mjs', 200, body => assert.match(body, /\/api\/stock-monitor/));

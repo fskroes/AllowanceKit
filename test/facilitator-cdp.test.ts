@@ -86,11 +86,6 @@ test("verify posts x402 v1 contract shape with bearer jwt", async () => {
   });
 });
 
-// x402-compat.md §6.5: the facilitator body is the same three keys in both
-// versions; a CdpFacilitator constructed with x402Version:2 posts x402Version:2
-// and passes the v2 nested paymentPayload through opaquely. Default stays 1 (the
-// "verify posts x402 v1 contract shape" test above pins that), so v1 sellers are
-// unaffected.
 test("a v2 facilitator posts x402Version:2 and passes the nested paymentPayload through", async () => {
   const captured: { body?: Record<string, unknown> } = {};
   const server = http.createServer((req, res) => {
@@ -106,7 +101,6 @@ test("a v2 facilitator posts x402Version:2 and passes the nested paymentPayload 
   const addr = server.address() as { port: number };
   try {
     const fac = new CdpFacilitator({ apiKeyId: "kid", apiKeySecret: PEM, baseUrl: `http://127.0.0.1:${addr.port}`, x402Version: 2 });
-    // A v2 nested PaymentPayload (spec §5.2.2), as the buyer would decode it.
     const v2Payload = { x402Version: 2, accepted: { scheme: "exact", network: "eip155:84532" }, payload: { signature: "0xsig", authorization: {} } };
     await fac.verify(v2Payload, { ...reqs, network: "eip155:84532", amount: "10000" });
     assert.equal(captured.body?.x402Version, 2, "posts the v2 protocol version");
@@ -116,8 +110,6 @@ test("a v2 facilitator posts x402Version:2 and passes the nested paymentPayload 
   }
 });
 
-// SOL-02: the fee payer for a Solana `exact` offer comes from CDP's v2
-// /supported advertisement. The seller copies extra.feePayer into its offer.
 test("supported() GETs /platform/v2/x402/supported with a bearer jwt and returns the kinds", async () => {
   const captured: { method?: string; path?: string; auth?: string } = {};
   const kinds = [
@@ -147,8 +139,6 @@ test("supported() GETs /platform/v2/x402/supported with a bearer jwt and returns
   }
 });
 
-// SOL-02: a v2 Solana body carries the CAIP-2 network and the USDC mint as the
-// asset. CdpFacilitator passes both through to CDP unchanged (no translation).
 test("a v2 Solana body passes the CAIP-2 network and mint asset through unchanged", async () => {
   const captured: { body?: Record<string, unknown> } = {};
   const server = http.createServer((req, res) => {
@@ -201,9 +191,6 @@ test("settle maps success/txHash/network and errorReason", async () => {
   });
 });
 
-// Regression: the live CDP API returns the settled hash as "transaction", not
-// "txHash". Reading the wrong field silently dropped the on-chain audit trail
-// from every real payment while the mock-shaped tests stayed green.
 test("settle reads the tx hash from CDP's \"transaction\" field", async () => {
   await withCaptureServer("settle", {
     success: true,

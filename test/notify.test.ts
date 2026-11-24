@@ -11,7 +11,6 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "allowance-notify-"));
 }
 
-/** A notifier that records what it would have sent instead of reaching the network. */
 function spy(dir: string, agent = "research-agent") {
   const sent: Message[] = [];
   const store = new NotifyStore(dir);
@@ -21,7 +20,6 @@ function spy(dir: string, agent = "research-agent") {
   return { sent, store, notifier };
 }
 
-/** A webhook that records bodies, and can be told to fail. */
 async function receiver(status = 200): Promise<{ url: string; bodies: unknown[]; close(): Promise<void> }> {
   const bodies: unknown[] = [];
   const server = http.createServer((req, res) => {
@@ -42,7 +40,6 @@ async function receiver(status = 200): Promise<{ url: string; bodies: unknown[];
   };
 }
 
-/** The notifier dispatches without awaiting, so give the microtask queue a turn. */
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 test("a spending threshold announces itself once, not on every payment after it", async () => {
@@ -51,24 +48,24 @@ test("a spending threshold announces itself once, not on every payment after it"
   store.save({ webhookUrl: "https://example.com/hook" });
 
   const budget = usd(10);
-  notifier.spendChanged(usd(1), budget); // 10% — below every threshold
+  notifier.spendChanged(usd(1), budget);
   await settle();
   assert.equal(sent.length, 0, "no alert below the first threshold");
 
-  notifier.spendChanged(usd(5), budget); // 50%
-  notifier.spendChanged(usd(6), budget); // still 50-band
+  notifier.spendChanged(usd(5), budget);
+  notifier.spendChanged(usd(6), budget);
   notifier.spendChanged(usd(7), budget);
   await settle();
   assert.equal(sent.length, 1, "50% is announced once, not three times");
   assert.match(sent[0]!.subject, /spent 50% of its allowance/);
   assert.match(sent[0]!.body, /\$5\.00 of \$10\.00 spent\. \$5\.00 left\./);
 
-  notifier.spendChanged(usd(8), budget); // 80%
+  notifier.spendChanged(usd(8), budget);
   await settle();
   assert.equal(sent.length, 2);
   assert.match(sent[1]!.subject, /spent 80%/);
 
-  notifier.spendChanged(usd(10), budget); // 100%
+  notifier.spendChanged(usd(10), budget);
   await settle();
   assert.equal(sent.length, 3);
   assert.match(sent[2]!.subject, /has used its whole allowance/);
@@ -80,17 +77,16 @@ test("topping up rearms the thresholds instead of going quiet forever", async ()
   const { sent, store, notifier } = spy(dir);
   store.save({ webhookUrl: "https://example.com/hook" });
 
-  notifier.spendChanged(usd(5), usd(10)); // 50% of a $10 allowance
+  notifier.spendChanged(usd(5), usd(10));
   await settle();
   assert.equal(sent.length, 1);
 
-  // A $10 top-up doubles the budget: the same $5 is now 25%, below the mark.
   notifier.spendChanged(usd(5), usd(20));
   await settle();
   assert.equal(sent.length, 1, "falling back below a mark rearms quietly, it does not alert");
   assert.equal(store.load().highWater, 0);
 
-  notifier.spendChanged(usd(10), usd(20)); // 50% again, of the larger allowance
+  notifier.spendChanged(usd(10), usd(20));
   await settle();
   assert.equal(sent.length, 2, "the next 50% is announced on its own merits");
 });
@@ -180,7 +176,6 @@ test("a webhook that errors is reported, not thrown", async () => {
 });
 
 test("a dead webhook cannot take down the caller", async () => {
-  // Bind a port, then free it, so the address is well-formed and refuses fast.
   const probe = http.createServer();
   await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
   const port = (probe.address() as { port: number }).port;
@@ -228,11 +223,6 @@ test("secrets never reach the config file", () => {
   assert.doesNotMatch(raw, /API_KEY|Bearer|token/i);
 });
 
-/* ---------------------------------------------------------------------------
- * End to end: a real agent, a real seller, a real webhook.
- * These prove the wiring, not just the message text.
- * ------------------------------------------------------------------------ */
-
 test("a live agent alerts a real webhook as it spends, is blocked, and waits", async () => {
   const { createAgent, topUp } = await import("../src/wallet.ts");
   const { payingFetch } = await import("../src/payer.ts");
@@ -252,7 +242,6 @@ test("a live agent alerts a real webhook as it spends, is blocked, and waits", a
   const hook = await receiver();
   rt.notifyStore.save({ webhookUrl: hook.url });
 
-  // A seller on the agent's own mock chain, so payments really settle.
   const payTo = rt.chain.createAccount().address;
   const gate = paymentGate(
     { priceMicro: 200_000n, description: "test", payTo, network: "mock-ledger", facilitator: rt.chain },
@@ -266,26 +255,22 @@ test("a live agent alerts a real webhook as it spends, is blocked, and waits", a
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/paid`;
 
   try {
-    // $0.20 is under the $0.25 approval threshold: it settles.
     const first = await payingFetch(rt.ctx, url);
     assert.equal(first.ok, true, "the first payment should settle");
     await settle();
 
-    // $0.20 of a $1.00 allowance is 20% — below the first threshold.
     assert.equal(hook.bodies.length, 0, "20% spent is not worth waking anyone for");
 
     const second = await payingFetch(rt.ctx, url);
     assert.equal(second.ok, true);
     await settle();
 
-    // $0.40 of $1.00 is still under 50%.
     assert.equal(hook.bodies.length, 0);
 
     const third = await payingFetch(rt.ctx, url);
     assert.equal(third.ok, true);
     await settle();
 
-    // $0.60 of $1.00 crosses 50%.
     const events = hook.bodies.map((b) => (b as Record<string, unknown>).event);
     assert.deepEqual(events, ["threshold"], "crossing 50% sends exactly one alert");
     const alert = hook.bodies[0] as Record<string, unknown>;

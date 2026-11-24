@@ -18,7 +18,6 @@ export function fmtUsdExact(micro: bigint): string {
   return `$${whole}.${frac}`;
 }
 
-/** Two decimals for normal amounts, full precision for true micropayments. */
 export function fmtUsdSmart(micro: bigint): string {
   const abs = micro < 0n ? -micro : micro;
   return abs > 0n && abs < 10_000n ? fmtUsdExact(micro) : fmtUsd(micro);

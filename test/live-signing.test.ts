@@ -4,9 +4,6 @@ import { NETWORKS, encodePaymentEvm } from "../src/live.ts";
 import { paymentGate } from "../src/seller.ts";
 import type { AcceptsEntry } from "../src/types.ts";
 
-// A signature is only spendable if the EIP-712 domain matches the token
-// contract byte for byte. These are the values reported by name()/version()
-// on the live contracts; a mismatch silently recovers a different signer.
 const ON_CHAIN_DOMAINS = {
   "base-sepolia": { name: "USDC", version: "2" },
   base: { name: "USD Coin", version: "2" },
@@ -55,8 +52,6 @@ test("encoded payment is JSON-serializable with string uint256 fields", async ()
     maxTimeoutSeconds: 300, extra: { name: net.domainName, version: net.domainVersion },
   };
 
-  // Regression: authorization fields were BigInt, so JSON.stringify threw and
-  // encodePaymentEvm could never produce a payload on any live network.
   const b64 = await encodePaymentEvm(acct as never, { x402Version: 1, requirements: reqs } as never);
   const auth = JSON.parse(Buffer.from(b64, "base64").toString()).payload.authorization;
 

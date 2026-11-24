@@ -19,19 +19,16 @@ import type { AcceptsEntry } from "../src/types.ts";
 const DEVNET_CAIP2 = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
 const DEVNET_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const SELLER = "Se11erTreasury1111111111111111111111111111";
-const CEILING = 100_000n; // $0.10
+const CEILING = 100_000n;
 
-/** A fresh, valid 32-byte base58 channel address per call. */
 function channelId(): string {
   return base58Encode(crypto.randomBytes(32));
 }
 
-/** A valid 32-byte base58 payer address. */
 function payer(): string {
   return base58Encode(crypto.randomBytes(32));
 }
 
-/** Minimal ServerResponse stand-in that records status, headers and body. */
 function fakeRes() {
   const rec: { status: number; headers: Record<string, string>; body?: string } = { status: 0, headers: {} };
   return {
@@ -50,7 +47,6 @@ function fakeRes() {
   };
 }
 
-/** The seller's own upto offer, so `accepted` echoes it. */
 function offer(amount = CEILING): AcceptsEntry {
   return {
     scheme: "upto",
@@ -64,7 +60,6 @@ function offer(amount = CEILING): AcceptsEntry {
   };
 }
 
-/** Craft an `X-PAYMENT` header for an upto deposit against `off`. */
 function header(over: Partial<{ channelId: string; from: string; maxAmount: bigint; deposit: bigint; expiresAt: number; accepted: AcceptsEntry }> = {}): string {
   const nowSec = Math.floor(Date.now() / 1000);
   const env = {
@@ -91,7 +86,7 @@ function gateOpts(over: Partial<UptoGateOptions> = {}): UptoGateOptions {
   const handler: UptoHandler =
     over.handler ??
     ((_req, res, meter) => {
-      meter.charge(30_000n); // $0.03, under the $0.10 ceiling
+      meter.charge(30_000n);
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ ok: true }));
     });
@@ -112,8 +107,6 @@ function respOf(rec: { headers: Record<string, string> }) {
   return h ? JSON.parse(Buffer.from(h, "base64").toString()) : undefined;
 }
 
-// ---------------------------------------------------------------------------
-
 test("Meter accumulates and clamps to the ceiling; refuses negatives", () => {
   const m = new Meter(100n);
   m.charge(30n);
@@ -127,21 +120,18 @@ test("Meter accumulates and clamps to the ceiling; refuses negatives", () => {
 });
 
 test("toFacilitatorUptoPayload coerces to the exact shape @x402/svm's isUptoSvmPayload accepts", () => {
-  // A buyer that sent openSlot as a NUMBER (and omitted validAfter) — the shape
-  // that would silently be rejected as unsupported_payload_type if passed raw.
   const p: UptoPayload = {
     channelId: "Chan111111111111111111111111111111111111111",
     from: "Payer11111111111111111111111111111111111111",
     maxAmount: "100000",
     deposit: "100000",
     expiresAt: 1_800_000_000,
-    openSlot: 400_000_000, // number on the wire
+    openSlot: 400_000_000,
     openTransaction: "AQABbase64",
     nonce: "12345",
   };
   const out = toFacilitatorUptoPayload(p, "deposit", "Auth11111111111111111111111111111111111111");
 
-  // Mirror isUptoSvmPayload's exact predicate (node_modules/@x402/svm chunk).
   const guardOk =
     typeof out.from === "string" &&
     typeof out.maxAmount === "string" &&
@@ -160,13 +150,11 @@ test("toFacilitatorUptoPayload coerces to the exact shape @x402/svm's isUptoSvmP
   assert.equal(out.validAfter, 0, "missing validAfter defaulted to 0");
   assert.equal(out.type, "deposit");
 
-  // On claim the authorizedSigner is forced to ours and the voucher attaches.
   const claim = toFacilitatorUptoPayload(p, "claim", "Auth11111111111111111111111111111111111111", "sigBase58");
   assert.equal(claim.authorizedSigner, "Auth11111111111111111111111111111111111111");
   assert.equal(claim.voucherSignature, "sigBase58");
   assert.equal(claim.type, "claim");
 
-  // A payload missing the open fields is a loud error, not a silent chain reject.
   assert.throws(() => toFacilitatorUptoPayload({ ...p, nonce: undefined }, "deposit", "A"), /missing openSlot, nonce/);
 });
 
@@ -227,7 +215,7 @@ test("a handler that throws refunds and never charges", async () => {
     gateOpts({
       operator: op,
       handler: (_req, _res, meter) => {
-        meter.charge(50_000n); // would have charged, but the throw discards it
+        meter.charge(50_000n);
         throw new Error("boom");
       },
     }),
@@ -287,7 +275,6 @@ test("an under-deposit is rejected before the chain is touched", async () => {
   const op = new InMemoryUptoOperator();
   const gate = uptoPaymentGate(gateOpts({ operator: op }));
   const cap = fakeRes();
-  // maxAmount below the ceiling: the buyer tried to escrow less than authorised.
   await gate({ headers: { host: "s", "x-payment": header({ maxAmount: 40_000n }) }, url: "/x" } as never, cap.res);
 
   assert.equal(cap.rec.status, 402);
@@ -339,7 +326,6 @@ test("an expired voucher window is rejected", async () => {
   assert.equal(op.calls.deposit, 0);
 });
 
-/** An operator whose settle fails, to exercise the on-chain failure branches. */
 class ClaimFailsOperator extends InMemoryUptoOperator {
   when: "always" | "positive";
   constructor(when: "always" | "positive") {
@@ -414,8 +400,6 @@ test("a handler throw whose refund also fails reports the deposit as reclaimable
   assert.match(resp.error, /reclaimable/);
 });
 
-// --- paymentGate routing: one seller, both schemes ------------------------
-
 test("paymentGate advertises both exact and upto for a Solana seller", async () => {
   const gate = paymentGate(
     {
@@ -437,8 +421,6 @@ test("paymentGate advertises both exact and upto for a Solana seller", async () 
 });
 
 test("paymentGate falls back to an exact-only 402 when the upto operator cannot be built", async () => {
-  // upto is configured with neither a ready operator nor solanaOperator env
-  // keys, so building it throws — the exact 402 must still list exact.
   const gate = paymentGate(
     {
       priceMicro: 10_000n,
@@ -520,10 +502,6 @@ test("paymentGate shutdown waits for an accepted payment before stopping cleanup
   assert.equal(stops, 1, "shutdown is idempotent");
 });
 
-// --- Sandbox: one real open-serve-settle on 402.surfnet.dev ---------------
-// Gated by SOLANA_SANDBOX=1 (docs/SOLANA-ARCHITECTURE.md §2.7, §7). Off by
-// default so CI never touches the network; it needs a hosted Surfpool fork with
-// the payment-channels program, mainnet USDC, and the treasury ATA present.
 test("SOLANA_SANDBOX: real open → serve → settle with on-chain settled == actual", { skip: process.env.SOLANA_SANDBOX !== "1" }, async (t) => {
   const { createSolanaUptoOperator } = await import("../src/seller-upto.ts");
   const { normalizeSolanaKey } = await import("../src/solana.ts");
@@ -533,15 +511,12 @@ test("SOLANA_SANDBOX: real open → serve → settle with on-chain settled == ac
 
   const rpcUrl = process.env.SOLANA_SANDBOX_RPC ?? "https://402.surfnet.dev:8899";
   const operator = await createSolanaUptoOperator({
-    network: "solana", // the sandbox forks mainnet genesis → mainnet CAIP-2
+    network: "solana",
     feePayerSecret: normalizeSolanaKey(feeEnv!),
     receiverAuthorizerSecret: normalizeSolanaKey(authEnv!),
     rpcUrl,
   });
   t.after(() => operator.stop());
-  // The full buyer open + settle loop is exercised by the SOL-05 sandbox test
-  // (test/solana-sandbox.test.ts); here we prove the operator constructs and the
-  // offer advertises against the sandbox network.
   const off = await advertiseUptoOffer(gateOpts({ operator, network: "solana", payTo: SELLER }), "http://s/x");
   assert.equal(off.scheme, "upto");
   assert.ok((off.extra as Record<string, unknown>).feePayer, "operator advertised a feePayer");

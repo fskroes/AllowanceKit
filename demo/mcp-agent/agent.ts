@@ -1,19 +1,3 @@
-/**
- * The Wallie MCP example agent (docs/SOLANA-ARCHITECTURE.md §8, SOL-07).
- *
- * A plain script — no LLM — that drives the Wallie MCP server the way an agent
- * framework would: it lists the tools, then calls them to buy from two of the
- * demo sellers. It runs the real MCP client/server protocol over a linked
- * in-process transport, so the whole story is deterministic and offline. The
- * same server is what `npx wallie-mcp` serves over stdio (see test/mcp.test.ts).
- *
- * The transcript shows the three things a judge should see:
- *   1. an `exact` buy that settles,
- *   2. a payment blocked at the ceiling, named in plain `RULE_LABELS` language,
- *   3. a Solana `upto` buy that settles below its ceiling and refunds the rest.
- *
- * Run it:  node demo/mcp-agent/agent.ts
- */
 import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
@@ -42,7 +26,6 @@ function randomAddr(): string {
   return getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32)));
 }
 
-/** A throwaway 64-byte Solana secret, JSON-array form. Never funded — the buy is offline. */
 function solanaKeyJson(): string {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }) as Buffer;
@@ -52,7 +35,6 @@ function solanaKeyJson(): string {
   return JSON.stringify(Array.from(Buffer.concat([seed, pub])));
 }
 
-/** Connect an MCP client to a server governing `binding`, over a linked transport. */
 async function connect(binding: McpBinding): Promise<{ client: Client; close(): Promise<void> }> {
   const server = await createMcpServer(binding);
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
@@ -66,7 +48,6 @@ interface ToolResult {
   structuredContent?: Record<string, unknown>;
 }
 
-/** Call a tool and print its one-line summary; return the structured payload. */
 async function call(client: Client, name: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   const label = Object.keys(args).length ? `${name}(${JSON.stringify(args)})` : `${name}()`;
   line(`  › ${label}`);
@@ -75,9 +56,6 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   return res.structuredContent ?? {};
 }
 
-// A Solana `upto` seller whose advertised `extra` pins a blockhash and slot, so
-// the buyer builds its channel-open with zero RPC — the metered demo seller of
-// docs/SOLANA-ARCHITECTURE.md §8, made fully offline.
 function pinnedUptoSeller(perRowMicro: bigint, ceilingMicro: bigint) {
   const base = new InMemoryUptoOperator({ feePayer: randomAddr(), receiverAuthorizer: randomAddr() });
   const blockhash = randomAddr();
@@ -99,15 +77,13 @@ async function main(): Promise<void> {
   line("  Wallie MCP example agent — one server, five tools, real MCP protocol");
   rule();
 
-  // ---- Phase 1: an EVM practice agent buys an `exact` API, then hits a cap ----
   line("");
   line("Phase 1 — practice USDC on the mock rail (exact scheme)");
   line("");
 
   const dirA = tmpDir();
   const buyerA = createAgent(dirA);
-  topUp(buyerA, 5); // $5 allowance
-  // A per-call cap of $1 so the $5 enterprise feed trips the ceiling — the block.
+  topUp(buyerA, 5);
   new PolicyStore(dirA, buyerA.agentName).save({ perCallMaxUsd: 1 });
   const sellers = await startSellerApis(new MockChain(path.join(dirA, "accounts.json")));
 
@@ -131,7 +107,6 @@ async function main(): Promise<void> {
     await Promise.all(sellers.servers.map((s) => s.close()));
   }
 
-  // ---- Phase 2: a Solana agent buys an `upto` API and gets a refund ----
   line("");
   rule();
   line("");
@@ -139,7 +114,7 @@ async function main(): Promise<void> {
   line("");
 
   const dirB = tmpDir();
-  const seller = pinnedUptoSeller(1000n, 100000n); // $0.001/row, $0.10 ceiling
+  const seller = pinnedUptoSeller(1000n, 100000n);
   const server = http.createServer(
     paymentGate(
       {
@@ -152,7 +127,7 @@ async function main(): Promise<void> {
       },
       (req, res, meter?: Meter) => {
         const rows = Math.max(0, Number(new URL(req.url ?? "/", "http://x").searchParams.get("rows") ?? "1") || 0);
-        meter?.charge(seller.perRowMicro * BigInt(rows)); // clamped to the ceiling by the gate
+        meter?.charge(seller.perRowMicro * BigInt(rows));
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ rows }));
       },
@@ -165,11 +140,11 @@ async function main(): Promise<void> {
     stateDir: dirB,
     privateKey: solanaKeyJson(),
     network: "solana-devnet",
-    rpcUrl: "http://127.0.0.1:1", // never reached — the open is zero-RPC
+    rpcUrl: "http://127.0.0.1:1",
     checkOnChainBalance: false,
     preferScheme: "upto",
   });
-  topUp(buyerB, 1); // $1 ceiling — the escrow deposit is $0.10
+  topUp(buyerB, 1);
 
   const b = await connect({ runtime: buyerB, network: buyerB.network, rpcUrl: buyerB.rpcUrl });
   try {

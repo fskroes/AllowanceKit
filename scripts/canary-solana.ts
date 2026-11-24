@@ -1,44 +1,3 @@
-/**
- * Solana canary: the Solana twin of `scripts/canary.ts` (SOL-09).
- *
- * Proves the Solana `upto` money path — a metered call backed by a payment
- * channel — works end to end through the real buyer runtime: the allowance, the
- * per-call cap on the *ceiling*, the escrow book, the channel store and the audit
- * ledger are all in the path.
- *
- * Phase A (always): hermetic proof. A real `createLiveAgent` on `solana-devnet`
- *   pays a real `paymentGate` `upto` seller backed by an `InMemoryUptoOperator`.
- *   Zero network — the offer pins the blockhash and slot. Proves the buyer logic
- *   and the rails without a cent or a keypair. This is the always-on check, the
- *   twin of canary.ts phase 1.
- *
- * Phase B (`--sandbox`, or SOLANA_SANDBOX=1): real settlement on the
- *   402.surfnet.dev sandbox (a mainnet fork with the program and mainnet USDC,
- *   free faucet). Broadcasts real transactions and proves the on-chain
- *   `settled == actual` watermark and that the wallet lost exactly the metered
- *   amount. Autonomous — the faucet funds both wallets — so this is the strongest
- *   proof an agent can record without a funded key.
- *
- * Phase C (`--devnet`, or `--network solana` for MAINNET): real settlement on
- *   public Solana. The buyer is `AGENT_PRIVATE_KEY` (Solana format), which must
- *   already hold USDC — there is no programmatic USDC faucet on devnet. The
- *   seller's fee payer and authorizer are generated and funded with a devnet SOL
- *   airdrop. This is the run whose signature goes into docs/canary-runs/.
- *   `--network solana` settles real money on mainnet-beta and is the human step.
- *
- * Requirements:
- *   AGENT_PRIVATE_KEY  — Solana secret, base58 (Phantom) or JSON array of 64
- *                        bytes (solana-keygen). Needed for phase C only.
- *   SOLANA_SANDBOX_URL — override the sandbox RPC (default 402.surfnet.dev:8899).
- *   SOLANA_DEVNET_RPC  — override the devnet RPC (default api.devnet.solana.com).
- *
- * Run:
- *   node scripts/canary-solana.ts                     # phase A only (no network)
- *   SOLANA_SANDBOX=1 node scripts/canary-solana.ts --sandbox   # + real sandbox settle
- *   node --env-file=.env scripts/canary-solana.ts --devnet     # + real devnet settle
- *   node --env-file=.env scripts/canary-solana.ts --devnet --network solana  # MAINNET
- *   … add --record to print a paste-ready docs/canary-runs/ block on success.
- */
 import crypto from "node:crypto";
 import http from "node:http";
 import fs from "node:fs";
@@ -87,7 +46,6 @@ const SANDBOX = process.argv.includes("--sandbox") || process.env.SOLANA_SANDBOX
 const DEVNET = process.argv.includes("--devnet");
 const RECORD = process.argv.includes("--record");
 
-/** Which cluster phase C settles on. Devnet by default; `--network solana` is real money. */
 const NETWORK = (() => {
   const i = process.argv.indexOf("--network");
   const value = i >= 0 ? process.argv[i + 1] : process.argv.find((a) => a.startsWith("--network="))?.split("=")[1];
@@ -97,21 +55,19 @@ const NETWORK = (() => {
 const SANDBOX_URL = process.env.SOLANA_SANDBOX_URL ?? "https://402.surfnet.dev:8899";
 const MAINNET_MINT = SOLANA_NETWORKS["solana"].mint;
 
-const PER_ROW_MICRO = 1000n; // $0.001 per row
-const CEILING_MICRO = 100000n; // $0.10 — the deposit the buyer escrows
-const ROWS = 30; // 30 × $0.001 = $0.03 actual, well under the ceiling (SOL-05 done-when)
+const PER_ROW_MICRO = 1000n;
+const CEILING_MICRO = 100000n;
+const ROWS = 30;
 const ACTUAL_MICRO = PER_ROW_MICRO * BigInt(ROWS);
 const REFUND_MICRO = CEILING_MICRO - ACTUAL_MICRO;
 
 const usd = (micro: bigint) => `$${(Number(micro) / 1e6).toFixed(4)}`;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Which cluster a recorded run points its explorer links at. */
 type Cluster = "devnet" | "mainnet" | "sandbox";
 
 interface Keypair { secret: Uint8Array; address: string; json: string }
 
-/** A throwaway Ed25519 keypair in the 64-byte form `solana-keygen` writes. */
 function keypair(): Keypair {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }) as Buffer;
@@ -122,7 +78,6 @@ function keypair(): Keypair {
   return { secret, address: solanaSigner(secret).address, json: JSON.stringify(Array.from(secret)) };
 }
 
-/** Build a keypair from an env var holding a Solana secret, or undefined if unset. */
 function envKeypair(name: string): Keypair | undefined {
   const v = process.env[name];
   if (!v) return undefined;
@@ -130,7 +85,6 @@ function envKeypair(name: string): Keypair | undefined {
   return { secret, address: solanaSigner(secret).address, json: JSON.stringify(Array.from(secret)) };
 }
 
-/** A real 32-byte base58 address — the buyer's `open` build validates every one. */
 function randomAddr(): string {
   return getBase58Decoder().decode(new Uint8Array(crypto.randomBytes(32)));
 }
@@ -143,7 +97,6 @@ function paymentRows(dir: string): Extract<LedgerEvent, { t: "payment" }>[] {
   return new Ledger(dir).read().filter((e): e is Extract<LedgerEvent, { t: "payment" }> => e.t === "payment");
 }
 
-/** The metered handler: charge $0.001 per requested row, clamped to the ceiling by the gate. */
 function meteredHandler(req: http.IncomingMessage, res: http.ServerResponse, meter?: Meter): void {
   const rows = Math.max(0, Number(new URL(req.url ?? "/", "http://x").searchParams.get("rows") ?? "1") || 0);
   meter?.charge(PER_ROW_MICRO * BigInt(rows));
@@ -151,7 +104,6 @@ function meteredHandler(req: http.IncomingMessage, res: http.ServerResponse, met
   res.end(JSON.stringify({ rows }));
 }
 
-/** Stand up a local `upto` seller on `network` backed by `operator`. */
 async function startSeller(
   network: string,
   operator: UptoOperator,
@@ -178,19 +130,17 @@ async function startSeller(
   };
 }
 
-/** The buyer policy every phase uses: the $0.10 ceiling fits, one host allowed. */
 function setCanaryPolicy(live: import("../src/live.ts").LiveAgentRuntime): void {
   topUp(live, 1);
   live.policyStore.save({
     totalBudgetUsd: 1,
-    perCallMaxUsd: 0.15, // above the $0.10 ceiling — the open is allowed
+    perCallMaxUsd: 0.15,
     windowLimitUsd: 1,
     requireApprovalAboveUsd: 0.5,
     allowHostSuffixes: ["localhost", "127.0.0.1"],
   });
 }
 
-/** A minimal JSON-RPC call, used for the sandbox faucet and airdrops. */
 async function rpc(url: string, method: string, params: unknown[]): Promise<unknown> {
   const res = await fetch(url, {
     method: "POST",
@@ -202,11 +152,6 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
   return j.result;
 }
 
-/**
- * Phase A — the hermetic proof. Runs everywhere, needs nothing. Proves the buyer
- * `upto` flow, the escrow arithmetic, the channel store and the ledger, with the
- * only network hop (the `open` build) made zero-RPC by pinning the blockhash.
- */
 async function phaseA(): Promise<void> {
   console.log(`\n${BOLD}Phase A${RST} — hermetic upto proof (no network, no keys)\n`);
   const dir = tmpDir();
@@ -229,7 +174,7 @@ async function phaseA(): Promise<void> {
     stateDir: dir,
     privateKey: keypair().json,
     network: "solana-devnet",
-    rpcUrl: "http://127.0.0.1:1", // never reached — the encode is zero-RPC
+    rpcUrl: "http://127.0.0.1:1",
     checkOnChainBalance: false,
     preferScheme: "upto",
   });
@@ -246,8 +191,7 @@ async function phaseA(): Promise<void> {
     if (!res.channelId) fail("no channel id reported");
     ok(`PAID ${usd(res.costMicro)} · refund ${usd(res.refundMicro!)} · channel ${res.channelId.slice(0, 8)}…`);
 
-    // The rail that matters most: the ceiling over the per-call cap must not open.
-    live.policyStore.save({ perCallMaxUsd: 0.05 }); // below the $0.10 ceiling
+    live.policyStore.save({ perCallMaxUsd: 0.05 });
     const overCap = await payingFetch(live.ctx, seller.url(ROWS));
     if (overCap.ok) fail("an upto open settled with the ceiling over the per-call cap — the rails did not hold");
     ok(`Over-cap open refused · rule=${overCap.blockedBy?.rule}`);
@@ -266,11 +210,6 @@ async function phaseA(): Promise<void> {
   }
 }
 
-/**
- * A real end-to-end settle on a real cluster. The caller has already funded the
- * buyer with USDC and the seller `feePayer` with SOL, and picked the network,
- * mint and RPC — the only difference between the sandbox and public Solana.
- */
 async function realSettle(opts: {
   label: string;
   network: string;
@@ -279,7 +218,7 @@ async function realSettle(opts: {
   buyer: Keypair;
   feePayer: Keypair;
   authorizer: Keypair;
-  cluster: Cluster; // where the record block points its explorer links
+  cluster: Cluster;
 }): Promise<void> {
   const { label, network, rpcUrl, mint, buyer, feePayer, authorizer } = opts;
   const dir = tmpDir();
@@ -309,7 +248,6 @@ async function realSettle(opts: {
     if (!res.channelId) fail("no channel id reported");
     ok(`PAID ${usd(res.costMicro)} · refund ${usd(res.refundMicro!)} · channel ${res.channelId}`);
 
-    // On-chain: the channel sealed at exactly the metered amount.
     await sleep(3000);
     const data = await solanaAccountRpc(rpcUrl).getAccountData(res.channelId);
     let onChainSettled: bigint | undefined;
@@ -321,10 +259,6 @@ async function realSettle(opts: {
       info("  channel PDA not visible at this finalized read; using the receipt amount (this does not prove closure)");
     }
 
-    // The wallet lost exactly the metered amount (deposit out, the rest refunded).
-    // Public devnet finalizes tens of seconds behind the settle, so a single read
-    // can still return the pre-settle balance; poll until the delta lands. The
-    // sandbox (mainnet-fork, instant finality) satisfies this on the first read.
     let after = before;
     for (let i = 0; i < 20; i++) {
       after = await usdcBalanceMicroSolana(rpcUrl, mint, buyer.address);
@@ -356,11 +290,9 @@ async function realSettle(opts: {
   }
 }
 
-/** Phase B — real settle on the 402.surfnet.dev sandbox, funded by the free faucet. */
 async function phaseB(): Promise<void> {
   console.log(`\n${BOLD}Phase B${RST} — real settle on the sandbox (${SANDBOX_URL})\n`);
 
-  // Health check first — a clear message beats a mid-run RPC error.
   try {
     await rpc(SANDBOX_URL, "getHealth", []);
   } catch (e) {
@@ -371,11 +303,10 @@ async function phaseB(): Promise<void> {
   const feePayer = keypair();
   const authorizer = keypair();
 
-  // Fund the buyer's USDC and the seller fee payer's SOL through the surfnet faucet.
-  await rpc(SANDBOX_URL, "surfnet_setTokenAccount", [buyer.address, MAINNET_MINT, { amount: 1_000_000 }]); // $1 USDC
+  await rpc(SANDBOX_URL, "surfnet_setTokenAccount", [buyer.address, MAINNET_MINT, { amount: 1_000_000 }]);
   await sleep(1000);
-  await rpc(SANDBOX_URL, "requestAirdrop", [buyer.address, Math.round(0.05 * 1e9)]); // dust SOL for the escape path
-  await rpc(SANDBOX_URL, "requestAirdrop", [feePayer.address, Math.round(0.5 * 1e9)]); // fees + rent
+  await rpc(SANDBOX_URL, "requestAirdrop", [buyer.address, Math.round(0.05 * 1e9)]);
+  await rpc(SANDBOX_URL, "requestAirdrop", [feePayer.address, Math.round(0.5 * 1e9)]);
   await sleep(1500);
   ok(`Buyer ${buyer.address} funded ($1 USDC, 0.05 SOL)`);
   ok(`Seller fee payer ${feePayer.address} airdropped 0.5 SOL`);
@@ -383,7 +314,6 @@ async function phaseB(): Promise<void> {
   await realSettle({ label: "Phase B (sandbox)", network: "solana", rpcUrl: SANDBOX_URL, mint: MAINNET_MINT, buyer, feePayer, authorizer, cluster: "sandbox" });
 }
 
-/** Phase C — real settle on public Solana (devnet by default, mainnet with --network solana). */
 async function phaseC(): Promise<void> {
   const netInfo = SOLANA_NETWORKS[NETWORK];
   if (!netInfo) fail(`unknown Solana network "${NETWORK}"`);
@@ -406,7 +336,6 @@ async function phaseC(): Promise<void> {
   }
   ok(`Buyer ${buyer.address}`);
 
-  // The buyer must hold USDC — there is no programmatic USDC faucet on devnet.
   const usdc = await usdcBalanceMicroSolana(rpcUrl, mint, buyer.address);
   if (usdc < CEILING_MICRO)
     fail(
@@ -417,14 +346,10 @@ async function phaseC(): Promise<void> {
     );
   info(`  buyer USDC: ${usd(usdc)}`);
 
-  // The buyer needs a little SOL for the reclaim escape path if the seller stalls.
   const sol = await solBalanceLamportsSolana(rpcUrl, buyer.address);
   if (sol < 5_000_000n)
     info(`  ${YELLOW}buyer SOL is ${(Number(sol) / 1e9).toFixed(4)} — top up ~0.01 SOL so a stalled seller can be reclaimed (devnet: airdrop)${RST}`);
 
-  // The seller's hot keys. Use SELLER_FEE_PAYER_KEY / SELLER_AUTHORIZER_KEY when
-  // set — stable, human-funded, and required on mainnet, which has no airdrop.
-  // Otherwise generate them and, on devnet only, airdrop the fee payer.
   const feePayer = envKeypair("SELLER_FEE_PAYER_KEY") ?? keypair();
   const authorizer = envKeypair("SELLER_AUTHORIZER_KEY") ?? keypair();
 
@@ -463,15 +388,12 @@ async function phaseC(): Promise<void> {
   });
 }
 
-/** Print a paste-ready docs/canary-runs/ markdown block after a real settle. */
 function printRecordBlock(r: {
   network: string; rpcUrl: string; buyer: string; channelId: string;
   txHash?: string; settledMicro: bigint; refundMicro: bigint; cluster: Cluster;
 }): void {
   const date = new Date().toISOString().slice(0, 10);
   const sandbox = r.cluster === "sandbox";
-  // Mainnet-beta is the default cluster, so its explorer links carry no ?cluster
-  // suffix; devnet needs one; the sandbox fork has no public explorer at all.
   const suffix = r.cluster === "devnet" ? "?cluster=devnet" : "";
   const filename = sandbox ? `${date}-solana-surfnet-sandbox.md` : `${date}-${r.network}-upto.md`;
   const heading = sandbox ? "solana sandbox (402.surfnet.dev)" : r.network;

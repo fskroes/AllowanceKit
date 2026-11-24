@@ -215,7 +215,6 @@ function required(value: string | undefined, usage: string): string {
   return value;
 }
 
-/** An error caused by how the command was typed — printed plainly, without a stack. */
 class UserError extends Error {}
 
 function version(): string {
@@ -226,7 +225,6 @@ function agent(stateDir: string, agentName = DEFAULT_AGENT_NAME) {
   return createAgent(stateDir, agentName);
 }
 
-/** `30m`, `2h`, `7d`, or `never`. Returns milliseconds, or null for "no expiry". */
 function parseDuration(raw: string): number | null {
   const text = raw.trim().toLowerCase();
   if (text === "never" || text === "forever") return null;
@@ -236,7 +234,6 @@ function parseDuration(raw: string): number | null {
   return Math.round(Number(m[1]) * units[m[2] as keyof typeof units]);
 }
 
-/** Largest unit that reads naturally. A grant with 7,199,812ms left has "2h" left. */
 function describeDuration(ms: number): string {
   const round = (n: number) => (Math.round(n * 10) / 10).toString();
   if (ms >= 86_400_000) return `${round(ms / 86_400_000)}d`;
@@ -245,7 +242,6 @@ function describeDuration(ms: number): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
-/** What the wallet actually holds, for a state dir wired to a live network. */
 async function liveWalletLine(stateDir: string): Promise<string | undefined> {
   const mode = readMode(stateDir);
   if (mode.mode !== "live" || !mode.address || !mode.network) return undefined;
@@ -260,7 +256,6 @@ async function liveWalletLine(stateDir: string): Promise<string | undefined> {
   }
 }
 
-/** The payer's wallet key, read from the environment only — never from disk. */
 function requireLiveKey(): string {
   const key = process.env.AGENT_PRIVATE_KEY;
   if (!key || !key.trim())
@@ -272,7 +267,6 @@ function requireLiveKey(): string {
   return key.trim();
 }
 
-/** Ask once, on a real terminal, before anything touches Base mainnet. */
 async function promptLine(question: string): Promise<string> {
   const readline = await import("node:readline/promises");
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -283,13 +277,9 @@ async function promptLine(question: string): Promise<string> {
   }
 }
 
-/** Mainnet is not practice: it takes a `--yes`, or typing the network name back. */
 async function confirmMainnet(network: string, yes: boolean): Promise<void> {
-  // The live mainnets that settle real USDC: Base and Solana. Their testnets
-  // (base-sepolia, solana-devnet) are practice money. `isMainnet` resolves the
-  // bare name AND the CAIP-2 alias, so eip155:8453 / solana:5eykt… are caught.
   if (!isMainnet(network) || yes) return;
-  const canonical = mainnetName(network); // "base" | "solana"
+  const canonical = mainnetName(network);
   const chain = canonical === "solana" ? "Solana mainnet" : "Base mainnet";
   if (!process.stdin.isTTY)
     throw new UserError(
@@ -300,7 +290,6 @@ async function confirmMainnet(network: string, yes: boolean): Promise<void> {
   if (answer.trim() !== canonical) throw new UserError(`not confirmed — nothing was changed.`);
 }
 
-/** `init --live`: derive the payer address, mark the directory live, keep the key out of it. */
 async function initLive(stateDir: string, flags: Flags): Promise<void> {
   const network = flags.network ?? "base-sepolia";
   if (!family(network))
@@ -320,7 +309,6 @@ async function initLive(stateDir: string, flags: Flags): Promise<void> {
   try {
     live = await createLiveAgent({ stateDir, agentName: flags.agent, privateKey: key, network, rpcUrl: flags.rpc });
   } catch (e) {
-    // viem missing, a malformed key, or an unknown network — surface it plainly.
     throw new UserError(e instanceof Error ? e.message : String(e));
   }
 
@@ -360,7 +348,6 @@ function shortPath(url: string): string {
   }
 }
 
-/** Parses a policy value from the command line into the shape that field expects. */
 function parsePolicyValue(field: string, raw: string): unknown {
   const kind = POLICY_FIELDS[field as PolicyField];
   if (kind === "host-list") {
@@ -411,8 +398,6 @@ function auditLine(e: LedgerEvent): string {
     case "topup":
       return `${t}  TOPUP    ${fmtUsdSmart(BigInt(e.amountMicro)).padStart(9)}  added to the allowance`;
     case "payment": {
-      // A Solana `upto` settlement shows the escrow: what was deposited and what
-      // came back. `amountMicro` is still the actual charge (SOL-03).
       const escrow =
         e.depositMicro !== undefined
           ? `  deposit ${fmtUsdSmart(BigInt(e.depositMicro))} refund ${fmtUsdSmart(BigInt(e.refundMicro ?? "0"))}`
@@ -724,7 +709,6 @@ async function main(): Promise<void> {
       if (sub !== "reconcile" && sub !== "reclaim" && sub !== "sweep")
         throw new UserError(`unknown channels command "${sub}" — try: list, reconcile, reclaim <id>, sweep`);
 
-      // reconcile / reclaim / sweep all read the chain, so they need a live Solana wallet.
       const mode = readMode(stateDir);
       if (mode.mode !== "live" || family(mode.network ?? "") !== "solana")
         throw new UserError(
@@ -734,16 +718,12 @@ async function main(): Promise<void> {
       const sinfo = solanaNetworkInfo(mode.network!)!;
       const rpcUrl = mode.rpcUrl ?? sinfo.defaultRpc;
 
-      // A channel row carries its own agent; the emitted cloud event must be
-      // tagged with that agent, so build (and reuse) one notifier per agent.
       const notifiers = new Map<string, Notifier>();
       const notifierFor = (name: string): Notifier => {
         let n = notifiers.get(name);
         if (!n) notifiers.set(name, (n = new Notifier(new NotifyStore(stateDir, name), name, undefined, { network: mode.network, mode: "live" })));
         return n;
       };
-      // Share the allowance lock with any live agent running on this state dir, so
-      // a reconcile/reclaim write cannot clobber a concurrent open/settle.
       const lockPath = path.join(stateDir, "allowance.lock");
       const lock = <T,>(fn: () => T | Promise<T>) => withLock(lockPath, fn);
 
@@ -776,7 +756,6 @@ async function main(): Promise<void> {
           if (!rec) throw new UserError(`no channel ${id} in the store`);
           targets = [rec];
         } else {
-          // sweep: read the chain first, then reclaim every orphan whose grace elapsed.
           await reconcileAndNotify(
             solanaAccountRpc(rpcUrl),
             store,
@@ -896,8 +875,6 @@ async function main(): Promise<void> {
           throw new UserError(
             `"${value.slice(0, 12)}…" is not a Wallie Cloud workspace key — it should look like wk_live_…`,
           );
-        // Store only the wiring, never the key: it is read from the environment
-        // at send time, so notifications.json stays safe to paste in a bug report.
         rt.notifyStore.save({ cloud: { enabled: true, url: CLOUD_DEFAULT_URL, keyEnv: CLOUD_ENV } });
         console.log(`cloud set — every decision and a heartbeat go to ${hostOfUrl(CLOUD_DEFAULT_URL)}`);
         console.log(`\nThe key is never written to disk. Export it so the runtime can read it:`);
@@ -1038,8 +1015,6 @@ async function main(): Promise<void> {
             `every payment your rails refuse, and every payment waiting on your approval.`,
           data: { agent: rt.agentName, test: true },
         });
-        // The cloud test verifies the key authenticates (GET /v1/me) rather than
-        // injecting a fake payment into the feed.
         if (cfg.cloud?.enabled) {
           const who = await cloudWhoami(cfg.cloud);
           results.push({
@@ -1138,9 +1113,6 @@ async function main(): Promise<void> {
       if (maj > 20 || (maj === 20 && min >= 11)) ok("node", `v${process.versions.node}`);
       else fail("node", `v${process.versions.node} — the package needs Node ≥ 20.11 (running the TS sources needs Node 24)`);
 
-      // Signing libs, one row per rail. The lib for the *live* rail is required
-      // (fail); the other rail's lib is only a warn. viem signs EVM EIP-712;
-      // @x402/svm + @solana/kit sign Solana. A practice-mode agent needs neither.
       const liveFam = mode.mode === "live" && mode.network ? family(mode.network) : undefined;
 
       try {
@@ -1165,7 +1137,6 @@ async function main(): Promise<void> {
 
       if (mode.mode === "live") {
         if (liveFam === "solana") {
-          // Solana rail (SOL-01). The key format differs from EVM, so name it.
           if (process.env.AGENT_PRIVATE_KEY?.trim())
             ok("wallet key", "AGENT_PRIVATE_KEY is set (read from the environment only, never stored)");
           else fail("wallet key", `AGENT_PRIVATE_KEY is not set — ${describeSolanaKeyFormat(mode.network!)}`);
@@ -1179,8 +1150,6 @@ async function main(): Promise<void> {
             } catch (e) {
               warn("rpc", `${hostOfUrl(rpc)} unreachable: ${e instanceof Error ? e.message : String(e)} (spend falls back to the allowance)`);
             }
-            // The happy path needs no SOL, but `channels reclaim` is payer-signed
-            // and payer-fee-paid, so warn when the wallet cannot afford it (§2.5).
             try {
               const lamports = await solBalanceLamportsSolana(rpc, mode.address);
               const sol = Number(lamports) / 1e9;
@@ -1191,13 +1160,9 @@ async function main(): Promise<void> {
                   `wallet holds ${sol.toFixed(4)} SOL — \`${CLI} channels reclaim\` needs ~0.01 SOL for fees`,
                 );
             } catch {
-              // The USDC read above already reported RPC reachability; stay quiet here.
             }
           }
 
-          // Seller-only (SOL-04): the on-chain `distribute` a claim runs needs
-          // the treasury ATA for the mint to exist, or it hard-fails. A warn,
-          // never a fail — a buyer-only wallet does not settle channels.
           if (flags.seller) {
             const t = await checkTreasuryAta(mode.network!, rpc);
             if (t.ok) ok("seller: treasury", t.detail);
@@ -1237,9 +1202,6 @@ async function main(): Promise<void> {
           : ok("sms", `${cfg.sms} — Twilio keys set`);
       }
 
-      // Cloud channel (C-10): report the key and whether the workspace answers.
-      // A warn, never a fail — the cloud is optional, so a misconfigured cloud
-      // channel must not flip `doctor`'s exit code (L-05: fail only on the wallet key).
       if (cfg.cloud?.enabled) {
         if (!process.env[cfg.cloud.keyEnv]) {
           warn("cloud", `${cfg.cloud.keyEnv} is NOT set — nothing will reach ${hostOfUrl(cfg.cloud.url)}`);

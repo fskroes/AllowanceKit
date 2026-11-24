@@ -116,7 +116,6 @@ audio{display:none}
 const $ = (id) => document.getElementById(id);
 const state = { story:null, deck:'pitch', i:0, rec:null, chunks:[], t0:0, tick:null, takes:{} };
 
-/* theme */
 const applyTheme = (t)=>{document.documentElement.dataset.theme=t;$('theme').textContent=t==='dark'?'Light':'Dark';try{localStorage.setItem('wallie-tp-theme',t)}catch{}};
 applyTheme((()=>{try{return localStorage.getItem('wallie-tp-theme')}catch{}})() || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'));
 $('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');

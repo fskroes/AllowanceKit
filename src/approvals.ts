@@ -3,18 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeStateFile } from "./state-file.ts";
 
-/**
- * The queue of payments parked for a human, and the grants those decisions
- * produce.
- *
- * A decision is not a permanent exemption. An approved grant carries an expiry
- * and a spend budget, and every payment it covers draws that budget down, so
- * "yes, pay Reuters $0.40" cannot silently become "pay Reuters $0.40 forever".
- * The budget is committed when a payment is authorized and returned if that
- * payment never settles, which keeps the grant and the reservation ledger in
- * step.
- */
-
 export interface ApprovalRequest {
   id: string;
   at: string;
@@ -24,13 +12,9 @@ export interface ApprovalRequest {
   amountMicro: string;
   status: "pending" | "approved" | "denied";
   decidedAt?: string;
-  /** Approved grants only: when this grant stops covering payments. Absent means it never expires. */
   expiresAt?: string;
-  /** Approved grants only: total spend the grant may cover. Defaults to the amount that was approved. */
   grantBudgetMicro?: string;
-  /** How much of that budget is already committed to settled or in-flight payments. */
   usedMicro?: string;
-  /** Durable keys prevent a crash/retry from returning a channel refund twice. */
   settledChannels?: string[];
 }
 
@@ -39,20 +23,16 @@ interface ApprovalFile {
 }
 
 export interface DecideOptions {
-  /** How long the grant stays usable. `null` means it never expires. Defaults to 24 hours. */
   expiresInMs?: number | null;
-  /** Total spend the grant may cover. Defaults to the amount that was requested. */
   budgetMicro?: bigint;
 }
 
-/** Grants are single-payment permissions unless a human deliberately widens them. */
 export const DEFAULT_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class ApprovalStore {
   private file: string;
   private agentName?: string;
 
-  /** Pass `agentName` to scope every read to one agent sharing this directory. */
   constructor(stateDir: string, agentName?: string) {
     fs.mkdirSync(stateDir, { recursive: true });
     this.file = path.join(stateDir, "approvals.json");
@@ -117,12 +97,10 @@ export class ApprovalStore {
     return req;
   }
 
-  /** True once the grant's window has closed. Undated grants never expire. */
   private expired(r: ApprovalRequest, now = Date.now()): boolean {
     return r.expiresAt !== undefined && Date.parse(r.expiresAt) <= now;
   }
 
-  /** What is left on a grant: its budget minus everything already committed. */
   remainingMicro(r: ApprovalRequest): bigint {
     const budget = BigInt(r.grantBudgetMicro ?? r.amountMicro);
     const used = BigInt(r.usedMicro ?? "0");
@@ -130,7 +108,6 @@ export class ApprovalStore {
     return left > 0n ? left : 0n;
   }
 
-  /** The live grant that can pay for this call, if any. */
   grantFor(host: string, amountMicro: bigint): ApprovalRequest | undefined {
     return this.list().find(
       (r) => r.status === "approved" && r.host === host && !this.expired(r) && this.remainingMicro(r) >= amountMicro,
@@ -141,26 +118,14 @@ export class ApprovalStore {
     return this.grantFor(host, amountMicro) !== undefined;
   }
 
-  /** Draws down a grant when a payment is authorized against it. */
   commit(id: string, amountMicro: bigint): void {
     this.adjust(id, amountMicro);
   }
 
-  /** Returns budget to a grant when the payment it covered never settled. */
   refund(id: string, amountMicro: bigint): void {
     this.adjust(id, -amountMicro);
   }
 
-  /**
-   * Reconcile a grant that was drawn down by a ceiling but spent less. Solana
-   * `upto` commits the whole ceiling at authorize (so a grant cannot be
-   * over-committed while the channel is in flight), then the seller settles the
-   * actual and the rest refunds. This returns `committed − actual` to the grant
-   * so its budget reflects what was truly spent, not what was escrowed (§5).
-   *
-   * A no-op when nothing came back (`exact`, where committed equals actual), so
-   * the settle path can call it for every grant-backed payment.
-   */
   settleCommitment(id: string, committedMicro: bigint, actualMicro: bigint): void {
     const back = committedMicro - actualMicro;
     if (back > 0n) this.refund(id, back);
@@ -185,7 +150,6 @@ export class ApprovalStore {
     this.write(f);
   }
 
-  /** Approved grants that can still cover a payment right now. */
   activeGrants(): ApprovalRequest[] {
     return this.list().filter((r) => r.status === "approved" && !this.expired(r) && this.remainingMicro(r) > 0n);
   }

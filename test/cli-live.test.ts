@@ -8,16 +8,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { paymentGate } from "../src/seller.ts";
 
-/**
- * These drive the real CLI as a subprocess — the only way to prove the money
- * front door (`init --live`, `pay`, `doctor`) behaves for a non-coder, and that
- * the mainnet guardrails and the no-key-on-disk promise hold end to end.
- */
-
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-/** A well-known throwaway key. Nothing here ever broadcasts a transaction. */
 const KEY = "0x" + "11".repeat(32);
-/** The address that key derives to — asserted, so a silent derivation change is caught. */
 const KEY_ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 
 function tmpDir(): string {
@@ -30,7 +22,6 @@ interface Run {
   stderr: string;
 }
 
-/** Spawn the CLI (async, so any in-process http seller keeps serving). */
 function run(args: string[], env: Record<string, string | undefined> = {}): Promise<Run> {
   return new Promise((resolve) => {
     const child = spawn("node", [CLI, ...args], {
@@ -45,7 +36,6 @@ function run(args: string[], env: Record<string, string | undefined> = {}): Prom
   });
 }
 
-/** Every file under a state dir, joined — for proving a secret is absent from all of them. */
 function readAll(dir: string): string {
   return fs
     .readdirSync(dir, { recursive: true, withFileTypes: true })
@@ -148,15 +138,13 @@ test("pay blocks a host that is not on the allowlist and exits 2", async () => {
 });
 
 test("pay settles a real 402 against a local seller and exits 0", async () => {
-  const PRICE = 25_000n; // $0.025
+  const PRICE = 25_000n;
   const server = http.createServer((req, res) => {
     void paymentGate(
       {
         priceMicro: PRICE,
         description: "test resource",
         payTo: "0xseller",
-        // An always-true facilitator: this test proves the CLI drives the whole
-        // 402 → sign → settle handshake, not that the mock chain verifies.
         facilitator: {
           verify: async () => ({ isValid: true, payer: "0xbuyer" }),
           settle: async () => ({ success: true, txHash: "0xabc123", network: "mock-ledger" }),
@@ -175,7 +163,6 @@ test("pay settles a real 402 against a local seller and exits 0", async () => {
     const dir = tmpDir();
     await run(["init", "--state", dir]);
     await run(["topup", "5", "--state", dir]);
-    // localhost is on the default allowlist; the port is stripped before matching.
     const r = await run(["pay", `http://localhost:${port}/data`, "--state", dir]);
     assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /PAID/);

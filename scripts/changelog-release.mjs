@@ -1,7 +1,3 @@
-// Promote the CHANGELOG's [Unreleased] section to a dated release, and open a
-// fresh empty [Unreleased] above it. Called by scripts/release.sh.
-//
-//   node scripts/changelog-release.mjs 0.5.0
 import fs from "node:fs";
 
 const version = process.argv[2];
@@ -19,12 +15,8 @@ if (!s.includes("## [Unreleased]")) {
   process.exit(1);
 }
 
-// The content currently under [Unreleased] *is* this version's notes; rename the
-// heading and drop a fresh, empty [Unreleased] above it.
 s = s.replace(/## \[Unreleased\]\n/, `## [Unreleased]\n\n## [${version}] - ${date}\n`);
 
-// Repoint the link refs at the bottom: [Unreleased] now compares from the new
-// tag, and a [version] ref is added pointing at the previous tag.
 const unrel = /^\[Unreleased\]: .*compare\/v([0-9][0-9A-Za-z.-]*)\.\.\.HEAD$/m;
 const m = s.match(unrel);
 if (m) {

@@ -17,7 +17,6 @@ const MSG: Message = {
   data: { host: "api.example.com" },
 };
 
-/** A server that answers with a scripted sequence of statuses. */
 async function scripted(statuses: number[]): Promise<{
   url: string;
   hits: { headers: http.IncomingHttpHeaders; body: string }[];
@@ -92,7 +91,7 @@ test("an alert that never arrives is written down", async () => {
     const notifier = new Notifier(store, "research-agent");
 
     notifier.approvalQueued("abc123", "api.example.com", 400_000n, "allowance");
-    await new Promise((r) => setTimeout(r, 2500)); // two backoffs, then give up
+    await new Promise((r) => setTimeout(r, 2500));
 
     const failures = store.recentFailures();
     assert.equal(failures.length, 1, "silence is not an acceptable record of a missed alert");

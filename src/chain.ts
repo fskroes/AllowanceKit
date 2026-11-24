@@ -3,18 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AcceptsEntry, DecodedPayment, PaymentPayload, SettleResult, VerifyResult } from "./types.ts";
 
-/**
- * Settlement rail behind the seller's paymentGate. verify/settle receive the
- * raw decoded X-PAYMENT object plus the advertised requirements, so any
- * facilitator (mock ledger, Coinbase CDP, self-hosted) can validate whatever
- * wire shape the buyer produced.
- */
-/**
- * One (scheme, network) pair a facilitator settles, from the x402 v2
- * `GET /supported` advertisement (spec §7.2). Solana entries carry the fee
- * payer the facilitator co-signs, under `extra.feePayer`; the seller copies it
- * into the offer's `extra` so the buyer can leave that signature slot unsigned.
- */
 export interface FacilitatorKind {
   x402Version?: number;
   scheme: string;
@@ -25,11 +13,6 @@ export interface FacilitatorKind {
 export interface Facilitator {
   verify(payment: DecodedPayment, requirements: AcceptsEntry): Promise<VerifyResult>;
   settle(payment: DecodedPayment, requirements: AcceptsEntry): Promise<SettleResult>;
-  /**
-   * x402 v2 `GET /supported` (spec §7.2): the (scheme, network) pairs this
-   * facilitator settles, with rail-specific `extra` (Solana → the fee payer).
-   * Optional — the mock ledger and v1-only facilitators omit it.
-   */
   supported?(): Promise<FacilitatorKind[]>;
 }
 

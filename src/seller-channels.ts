@@ -6,7 +6,6 @@ import { looksLikeAddress } from "./base58.ts";
 import { solanaNetworkInfo } from "./solana.ts";
 import { withLock } from "./lock.ts";
 
-/** Public facts required by @x402/svm's UptoChannelStorage contract. No keys or vouchers. */
 export interface SellerChannelRecord {
   channelId: string;
   payTo: string;
@@ -14,7 +13,6 @@ export interface SellerChannelRecord {
   firstSeenAt: number;
   expiresAt: number;
   network: string;
-  /** Signed open slot, retained so absence can be checked after the replay window. */
   openSlot?: number;
 }
 
@@ -32,7 +30,6 @@ function checked(value: unknown): SellerChannelRecord {
       !Number.isSafeInteger(r.firstSeenAt) || Number(r.firstSeenAt) < 0 ||
       !Number.isSafeInteger(r.expiresAt) || Number(r.expiresAt) < 0 ||
       (r.openSlot !== undefined && (!Number.isSafeInteger(r.openSlot) || Number(r.openSlot) < 0))) throw new Error("invalid channel facts");
-  // Project onto the contract so callers cannot accidentally persist secrets.
   return {
     channelId: r.channelId, payTo: r.payTo, tokenProgram: r.tokenProgram,
     network: r.network, firstSeenAt: Number(r.firstSeenAt), expiresAt: Number(r.expiresAt),
@@ -40,11 +37,6 @@ function checked(value: unknown): SellerChannelRecord {
   };
 }
 
-/**
- * Durable adapter for the library's channel index. Each mutation reloads under
- * the existing filesystem lock, then atomically replaces a mode-0600 file.
- * Missing files start empty; corrupt or unreadable files fail closed.
- */
 export class SellerChannelStorage {
   readonly file: string;
   private readonly lockPath: string;
@@ -90,7 +82,6 @@ export class SellerChannelStorage {
 
   async list(): Promise<SellerChannelRecord[]> { return this.read(); }
 
-  /** Attach the signed slot to the library's validated, pre-broadcast upsert. */
   withDeposit<T>(channelId: string, openSlot: number, work: () => Promise<T>): Promise<T> {
     if (!Number.isSafeInteger(openSlot) || openSlot < 0) throw new Error("invalid deposit openSlot");
     return this.deposit.run({ channelId, openSlot }, work);
@@ -105,7 +96,6 @@ export class SellerChannelStorage {
       if (index < 0) rows.push(next);
       else {
         const old = rows[index];
-        // Distribution preimages are immutable. Discovery must not erase them.
         if (old.network !== next.network || (old.payTo && next.payTo && old.payTo !== next.payTo) ||
             (old.tokenProgram && next.tokenProgram && old.tokenProgram !== next.tokenProgram) ||
             (old.openSlot !== undefined && next.openSlot !== undefined && old.openSlot !== next.openSlot)) {

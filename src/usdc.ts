@@ -1,24 +1,8 @@
-/**
- * Reading the wallet's real USDC balance, over plain JSON-RPC.
- *
- * The allowance ledger is bookkeeping: it records what a human said the agent
- * may spend. On a live network that says nothing about whether the money is
- * actually there. Without this check a wallet holding $0 passes every rail and
- * fails at the facilitator, which is the one place a spend-control tool should
- * never let a surprise happen.
- *
- * `eth_call` over `fetch` keeps the zero-dependency promise: no RPC client, no
- * ABI encoder. USDC is 6 decimals, which is the same unit the ledger uses, so
- * the returned number needs no scaling.
- */
-
-/** Public endpoints, overridable — they rate-limit, so bring your own for anything busy. */
 export const RPC_DEFAULTS: Record<string, string> = {
   base: "https://mainnet.base.org",
   "base-sepolia": "https://sepolia.base.org",
 };
 
-/** `balanceOf(address)` — the first 4 bytes of keccak256("balanceOf(address)"). */
 const BALANCE_OF = "0x70a08231";
 
 export class RpcError extends Error {}
@@ -63,12 +47,6 @@ function hostOf(url: string): string {
   }
 }
 
-/**
- * A balance the policy engine can consult without paying for an RPC round trip
- * on every call. Stale within `ttlMs`, and deliberately fail-open: if the RPC
- * is unreachable the rails fall back to the allowance ledger alone rather than
- * freezing an agent because someone else's node is down.
- */
 export class BalanceCache {
   private value: bigint | undefined;
   private at = 0;
@@ -84,7 +62,6 @@ export class BalanceCache {
     this.onError = onError;
   }
 
-  /** Last known balance, refreshed if older than the TTL. `undefined` when never readable. */
   async get(): Promise<bigint | undefined> {
     if (this.value !== undefined && Date.now() - this.at < this.ttlMs) return this.value;
     if (this.inFlight) return this.inFlight;
@@ -104,7 +81,6 @@ export class BalanceCache {
     return this.inFlight;
   }
 
-  /** Forces the next `get()` to hit the network. */
   invalidate(): void {
     this.at = 0;
   }

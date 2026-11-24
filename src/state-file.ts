@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-/** Replace a state snapshot without exposing a partial JSON document to readers. */
 export function writeStateFile(file: string, value: unknown): void {
   const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   try {

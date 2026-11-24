@@ -37,10 +37,6 @@ function json(res: http.ServerResponse, status: number, payload: unknown): void 
   res.end(JSON.stringify(payload));
 }
 
-/**
- * A one-line answer to "if this blows the budget at 3am, who hears about it?"
- * — the question the dashboard cannot answer just by being open.
- */
 function describeAlerts(rt: AllowanceRuntime): string[] {
   const cfg = rt.notifyStore.load();
   const out: string[] = [];
@@ -57,13 +53,9 @@ function describeAlerts(rt: AllowanceRuntime): string[] {
   return out;
 }
 
-/** One agent's slice of the dashboard state, from that agent's own stores. */
 function stateFor(rt: AllowanceRuntime): unknown {
   const policy = rt.policy();
   const totals = rt.ledger.totals(rt.agentName, 0);
-  // Escrow is a third money state (§3.3): show locked value and the channel book
-  // next to spent and remaining. Empty and zero off Solana, so this is safe for
-  // every agent. `dueForReclaim` marks the rows whose reclaim button is live.
   const channelStore = new ChannelStore(rt.stateDir);
   const channelRows = channelStore.list(rt.agentName);
   const due = new Set(channelStore.dueForReclaim(rt.agentName).map((c) => c.channelId));
@@ -109,7 +101,6 @@ function stateFor(rt: AllowanceRuntime): unknown {
       remainingMicro: rt.approvals.remainingMicro(g).toString(),
       expiresAt: g.expiresAt ?? null,
     })),
-    // Each agent sees only its own history, so the switcher actually switches.
     events: rt.ledger.read().filter((e) => e.agent === rt.agentName),
   };
 }
@@ -120,9 +111,6 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
   const html = fs.readFileSync(htmlPath, "utf8").replace("__ALLOWANCE_TOKEN__", token);
   const authorized = (req: http.IncomingMessage) => req.headers["x-allowance-token"] === token;
 
-  // One runtime per agent in the directory, built on demand and reused across
-  // polls. The stores each runtime holds always re-read from disk, so a cached
-  // runtime never goes stale — caching only spares us rebuilding it every 1.2s.
   const runtimes = new Map<string, AllowanceRuntime>([[rt.agentName, rt]]);
   const runtimeFor = (name: string): AllowanceRuntime => {
     let r = runtimes.get(name);
@@ -130,24 +118,17 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
     return r;
   };
 
-  // Every agent the directory knows about, with the one we were started for
-  // always present even if it has not spent yet. This is what the UI lists.
   const agentNames = (): string[] => {
     const names = new Set(listAgents(rt.stateDir));
     names.add(rt.agentName);
     return [...names].sort();
   };
 
-  // A mutation names its agent; fall back to the primary, reject an unknown one
-  // rather than let a stray name reprovision a runtime.
   const resolveRuntime = (name: string | undefined): AllowanceRuntime | undefined => {
     const target = name ?? rt.agentName;
     return agentNames().includes(target) ? runtimeFor(target) : undefined;
   };
 
-  // Resolve a runtime's Solana channel context, or null when it is not a live
-  // Solana wallet (channels exist nowhere else). Read from mode.json, so a cached
-  // runtime never masks a network change.
   const channelCtx = (
     target: AllowanceRuntime,
   ): { store: ChannelStore; rpcUrl: string; network: string; notifier: Notifier; lock: ChannelLock } | null => {
@@ -157,17 +138,11 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
     if (!rpcUrl) return null;
     const store = new ChannelStore(target.stateDir);
     const notifier = new Notifier(target.notifyStore, target.agentName, undefined, { network: m.network, mode: "live" });
-    // Share the allowance lock with the live agent, so a reconcile/reclaim write
-    // never clobbers a concurrent open/settle in the agent's own process.
     const lockPath = path.join(target.stateDir, "allowance.lock");
     const lock: ChannelLock = (fn) => withLock(lockPath, fn);
     return { store, rpcUrl, network: m.network, notifier, lock };
   };
 
-  // The escrow watchdog's dashboard half (§6): each state poll reconciles any
-  // in-flight channel, but no more than once every 30 s and only when something
-  // is actually open, so an idle dashboard never touches the chain. Background
-  // and swallowed — a chain read must never make /api/state slow or fail.
   const lastReconcile = new Map<string, number>();
   const RECONCILE_EVERY_MS = 30_000;
   const maybeReconcile = (target: AllowanceRuntime): void => {
@@ -184,13 +159,9 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
     ).catch((e) => console.warn(`channel reconcile failed: ${e instanceof Error ? e.message : String(e)}`));
   };
 
-  // Reclaim is the payer escape path (requestClose → grace → seal → withdrawPayer):
-  // it can take the full grace period, far longer than an HTTP request should wait.
-  // So the button starts it in the background and returns at once; the channel
-  // becomes `reclaimed` and the table updates on the next poll. Deduped per channel.
   const reclaiming = new Set<string>();
   const startReclaim = (target: AllowanceRuntime, channelId: string): { ok: boolean; error?: string } => {
-    if (reclaiming.has(channelId)) return { ok: true }; // already running — a double-click is a no-op
+    if (reclaiming.has(channelId)) return { ok: true };
     const ctx = channelCtx(target);
     if (!ctx) return { ok: false, error: "channels are live only on a Solana live wallet" };
     const rec = ctx.store.get(channelId);
@@ -221,7 +192,7 @@ export function startDashboard(rt: AllowanceRuntime, port = 4030): Promise<{ ser
       const states: Record<string, unknown> = {};
       for (const name of names) {
         const target = runtimeFor(name);
-        maybeReconcile(target); // background, throttled; safe off Solana
+        maybeReconcile(target);
         states[name] = stateFor(target);
       }
       return json(res, 200, { cli: CLI, selected: rt.agentName, agents: names, states });

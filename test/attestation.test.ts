@@ -23,8 +23,6 @@ function tmpLedger(): { ledger: Ledger; dir: string } {
   return { ledger: new Ledger(dir), dir };
 }
 
-/** A ledger with a realistic mix: two settled payments (one with a txHash), a
- * block, an approval round, and a policy change — across two hosts. */
 function seed(ledger: Ledger, agent = AGENT): void {
   ledger.append({ t: "topup", at: "2026-09-01T00:00:00.000Z", agent, amountMicro: "5000000", source: "manual", balanceAfterMicro: "5000000" });
   ledger.append({ t: "payment", at: "2026-09-02T00:00:00.000Z", agent, url: "https://api.a.com/x", host: "api.a.com", amountMicro: "1000", txHash: "0xabc", balanceAfterMicro: "4999000" });
@@ -57,7 +55,6 @@ test("summarize compresses the ledger into counts and totals, not raw rows", () 
   assert.equal(s.policyChanges, 1);
   assert.equal(s.periodStart, "2026-09-01T00:00:00.000Z");
   assert.equal(s.periodEnd, "2026-09-06T00:00:00.000Z");
-  // The summary must not carry urls or per-payment amounts (no ledger leak).
   const flat = JSON.stringify(s);
   assert.doesNotMatch(flat, /api\.a\.com\/x/, "no urls in the summary");
 });
@@ -121,7 +118,6 @@ test("a tampered summary fails verification (digest binds the contents)", async 
   seed(ledger, acct.address);
   const att = await attest(acct as never, summarize(ledger, acct.address));
 
-  // Inflate the reputation after signing.
   const forged: SignedAttestation = { ...att, summary: { ...att.summary, payments: 9999, blocks: 0 } };
   const res = await verifyAttestation(forged);
   assert.equal(res.valid, false);
@@ -135,8 +131,6 @@ test("a foreign signature fails: swapping in another agent's signature does not 
   seed(ledger, alice.address);
 
   const attAlice = await attest(alice as never, summarize(ledger, alice.address));
-  // Mallory claims Alice's numbers but the signature is Alice's over Alice's agent;
-  // rewriting the agent to Mallory breaks recovery.
   const forged: SignedAttestation = { ...attAlice, agent: mallory.address, summary: { ...attAlice.summary, agent: mallory.address } };
   const res = await verifyAttestation(forged);
   assert.equal(res.valid, false);
@@ -173,8 +167,6 @@ test("attest refuses to sign a summary that is not the signer's own", async () =
 });
 
 test("the signed struct verifies under viem's own verifyTypedData with the exported domain", async () => {
-  // Guards the domain/types constants: a seller reconstructing the envelope from
-  // the exported ATTESTATION_DOMAIN/ATTESTATION_TYPES must reach the same result.
   const { verifyTypedData } = await import("viem");
   const { ledger } = tmpLedger();
   const acct = await testAccount("66");

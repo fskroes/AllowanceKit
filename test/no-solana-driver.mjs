@@ -1,7 +1,3 @@
-// Drives a Base (EVM) buyer flow end to end: build a live agent, then sign a
-// payment through ctx.encodePayment. This exercises the viem signing path so
-// the resolve hook records `viem/accounts`; it must never reach the Solana
-// encoder, so no `@solana/kit` / `@x402/svm` specifier should be resolved.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -10,11 +10,6 @@ export interface CleanupSigner {
   getSlot(network: string, commitment?: 'processed' | 'confirmed' | 'finalized'): Promise<bigint>;
 }
 
-/**
- * Compatibility for @x402/svm 2.25.0's reversed Sealed/Closing enum. This view
- * belongs only to the cleanup worker; payment verification sees original bytes.
- * Keep the peer pinned until these integration tests pass against its successor.
- */
 export function sellerCleanupSigner<T extends CleanupSigner>(signer: T, storage: SellerChannelStorage, rpcUrl?: string): T {
   return {
     ...signer,
@@ -22,9 +17,6 @@ export function sellerCleanupSigner<T extends CleanupSigner>(signer: T, storage:
       const account = await signer.getAccountInfo(channelId, network, { commitment: 'finalized', encoding: 'base64' });
       if (account === null) {
         const row = await storage.get(channelId);
-        // The library's read API discards context and cannot set minContextSlot.
-        // Use a context-bearing RPC read to prove the signed open can no longer
-        // land. Voucher expiresAt alone is not the transaction's replay window.
         if (row?.network === network && row.openSlot !== undefined && rpcUrl) {
           const minContextSlot = row.openSlot + 1501;
           if (!Number.isSafeInteger(minContextSlot)) throw new Error('invalid channel replay window');

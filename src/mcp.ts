@@ -1,28 +1,3 @@
-/**
- * The Wallie MCP server (docs/SOLANA-ARCHITECTURE.md §8, SOL-07).
- *
- * Exposes an allowance-governed agent over the Model Context Protocol so an MCP
- * client — Claude Desktop, an agent framework, the example agent in
- * `demo/mcp-agent/` — can pay x402 APIs through the same policy rails, ledger and
- * escrow book the CLI uses. Five tools, stdio transport:
- *
- *   pay_fetch(url, method?, body?, headers?)  → pay an x402 endpoint (exact or upto)
- *   get_budget()                              → funded / spent / reserved / escrowed / remaining + window
- *   list_channels()                           → the buyer's Solana `upto` escrow book
- *   decide_approval(id, approve)              → approve or deny a queued payment (§8 `approve`/`deny`)
- *   reclaim_channel(id)                       → sweep an orphaned channel's deposit back
- *
- * The server binds ONE runtime, resolved from the state directory exactly like
- * the CLI: a live directory (`mode.json` says so) builds a `createLiveAgent`
- * from `AGENT_PRIVATE_KEY`; anything else is practice money via `createAgent`.
- * So the same server serves whichever rail the directory is wired to — a Base or
- * Solana live agent settles real USDC, a fresh directory simulates it — and
- * `pay_fetch` chooses `exact` vs `upto` per offer without the caller knowing.
- *
- * The `@modelcontextprotocol/sdk` is an optional peer, imported lazily here, so
- * the core buyer runtime stays zero-dependency: importing `allowance-kit` never
- * pulls the MCP stack in, only `allowance-kit/mcp` does.
- */
 import { createAgent, DEFAULT_AGENT_NAME, decideApproval, allowanceRemaining, type AllowanceRuntime } from "./wallet.ts";
 import { createLiveAgent, type LiveAgentRuntime } from "./live.ts";
 import { readMode } from "./mode.ts";
@@ -36,8 +11,6 @@ import type { ChannelRecord } from "./types.ts";
 import path from "node:path";
 import { withLock } from "./lock.ts";
 
-// The SDK's low-level types, declared locally so the build never depends on the
-// optional peer's type surface (the same trick solana.ts uses for @x402/svm).
 interface McpServerLike {
   setRequestHandler(schema: unknown, handler: (req: McpRequest) => Promise<McpToolResult>): void;
   connect(transport: unknown): Promise<void>;
@@ -52,40 +25,24 @@ interface McpToolResult {
   isError?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Runtime resolution — the same mock-vs-live decision the CLI makes.
-// ---------------------------------------------------------------------------
-
 export interface McpRuntimeOptions {
-  /** State directory. Defaults to `ALLOWANCE_STATE_DIR` or `.allowance`, like the CLI. */
   stateDir?: string;
   agentName?: string;
-  /** Live rails only: the payer key. Defaults to `AGENT_PRIVATE_KEY`. */
   privateKey?: string;
-  /** Skip resolution and serve this runtime directly (tests, the example agent). */
   runtime?: AllowanceRuntime;
 }
 
-/** What the tool handlers need beyond the runtime: the key, so `reclaim_channel` can sign. */
 export interface McpBinding {
   runtime: AllowanceRuntime;
   network?: string;
   rpcUrl?: string;
-  /** Present only on a Solana live agent — a key is required to build the reclaim transactions. */
   privateKey?: string;
 }
 
-/** The default state directory, matching the CLI (`ALLOWANCE_STATE_DIR` overrides). */
 export function defaultStateDir(): string {
   return process.env.ALLOWANCE_STATE_DIR ?? ".allowance";
 }
 
-/**
- * Build the runtime the server will govern. A directory a live agent has claimed
- * (`mode.json`) needs the private key and reconstructs the live agent; every
- * other directory is practice money. Mirrors `src/cli.ts` so the MCP server and
- * the CLI never disagree about what a directory means.
- */
 export async function resolveBinding(opts: McpRuntimeOptions = {}): Promise<McpBinding> {
   if (opts.runtime) {
     const rt = opts.runtime as LiveAgentRuntime;
@@ -112,19 +69,9 @@ export async function resolveBinding(opts: McpRuntimeOptions = {}): Promise<McpB
   return { runtime: createAgent(stateDir, agentName) };
 }
 
-// ---------------------------------------------------------------------------
-// Money formatting helpers — every amount goes out as micro string, a USD number
-// and a human string, so a client can display or compute without guessing.
-// ---------------------------------------------------------------------------
-
 function money(micro: bigint): { micro: string; usd: number; text: string } {
   return { micro: micro.toString(), usd: Number(micro) / 1_000_000, text: fmtUsdExact(micro) };
 }
-
-// ---------------------------------------------------------------------------
-// The five tools. Each handler is a pure function of the binding so it can be
-// tested without the MCP transport; the server just routes to them.
-// ---------------------------------------------------------------------------
 
 export const TOOL_DEFINITIONS = [
   {
@@ -196,8 +143,6 @@ async function toolPayFetch(b: McpBinding, args: Record<string, unknown>): Promi
   if (method) init.method = method;
   if (body !== undefined) {
     init.body = body;
-    // A body with no method almost always means a POST; default it, and give the
-    // body a content type unless the caller set one.
     if (!method) init.method = "POST";
     init.headers = { "content-type": "application/json", ...(headers ?? {}) };
   } else if (headers) {
@@ -221,7 +166,6 @@ async function toolPayFetch(b: McpBinding, args: Record<string, unknown>): Promi
 
   let summary: string;
   if (res.blockedBy) {
-    // The one thing judges must see: the human label for the rule, not the enum.
     const label = RULE_LABELS[res.blockedBy.rule];
     structured.blocked = {
       rule: res.blockedBy.rule,
@@ -253,10 +197,6 @@ function toolGetBudget(b: McpBinding): McpToolResult {
   const windowSpend = rt.ledger.totals(rt.agentName, windowMs).windowSpendMicro;
   const openReservations = rt.reservations.list(rt.agentName);
   const reservedMicro = openReservations.reduce((s, r) => s + BigInt(r.amountMicro), 0n);
-  // Escrow, netted the same way `allowanceRemaining` nets it (§5): a channel
-  // still backed by an open reservation has its ceiling in `reserved` already, so
-  // it is excluded here. Reserved and escrowed never overlap, which keeps
-  // `funded − spent − reserved − escrowed` equal to `remaining` even mid-payment.
   const escrowedMicro = rt.escrowedMicro?.(new Set(openReservations.map((r) => r.id))) ?? 0n;
   const remaining = allowanceRemaining(rt);
 
@@ -353,12 +293,8 @@ async function toolReclaimChannel(b: McpBinding, args: Record<string, unknown>):
   if (!id) return errorResult("reclaim_channel needs an `id`");
   const store = new ChannelStore(b.runtime.stateDir);
   const record = store.get(id) as ChannelRecord | undefined;
-  // Scope to this agent, like list_channels — one agent sharing a directory must
-  // not reclaim another's channel by id.
   if (!record || record.agent !== b.runtime.agentName) return errorResult(`no channel "${id}" in this directory`);
 
-  // Reclaim builds and sends real Solana transactions, so it needs a Solana live
-  // agent and the payer key. Say so plainly rather than throwing a library error.
   const isSolana = Boolean(solanaNetworkInfo(record.network));
   if (!isSolana) return errorResult(`channel ${id} is on "${record.network}", which has no reclaim (Solana \`upto\` only)`);
   if (!b.privateKey || !b.rpcUrl)
@@ -370,8 +306,6 @@ async function toolReclaimChannel(b: McpBinding, args: Record<string, unknown>):
   const signer = solanaSigner(normalizeSolanaKey(b.privateKey));
   const result = await reclaimChannel(record, signer, { rpcUrl: b.rpcUrl, network: b.network });
 
-  // Nothing was swept — the channel was already resolved on-chain. Reconcile the
-  // local row so it stops counting as escrow, but say plainly that no money moved.
   if (!result.reclaimed) {
     return {
       content: [{ type: "text", text: `Nothing to reclaim for ${id}: ${result.note ?? "already resolved"}.` }],
@@ -405,7 +339,6 @@ function isStringMap(v: unknown): v is Record<string, string> {
   return typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
 }
 
-/** Route one `tools/call` to its handler, turning any throw into a tool error. */
 export async function handleToolCall(
   b: McpBinding,
   name: string,
@@ -431,16 +364,6 @@ export async function handleToolCall(
   }
 }
 
-// ---------------------------------------------------------------------------
-// The server. Built on the SDK's low-level Server so tool schemas are plain
-// JSON Schema and no `zod` dependency creeps in.
-// ---------------------------------------------------------------------------
-
-/**
- * Build (but do not connect) an MCP server governing `binding`'s runtime. The
- * caller attaches a transport — {@link runMcpStdio} uses stdio; a test uses a
- * linked in-memory pair.
- */
 export async function createMcpServer(binding: McpBinding): Promise<McpServerLike> {
   let ServerCtor: new (info: { name: string; version: string }, opts: { capabilities: { tools: object } }) => McpServerLike;
   let ListToolsRequestSchema: unknown;
@@ -465,7 +388,6 @@ export async function createMcpServer(binding: McpBinding): Promise<McpServerLik
   return server;
 }
 
-/** Resolve the runtime, build the server, and serve it over stdio. Blocks until the transport closes. */
 export async function runMcpStdio(opts: McpRuntimeOptions = {}): Promise<void> {
   const binding = await resolveBinding(opts);
   const server = await createMcpServer(binding);
@@ -473,8 +395,6 @@ export async function runMcpStdio(opts: McpRuntimeOptions = {}): Promise<void> {
     StdioServerTransport: new () => unknown;
   };
   await server.connect(new StdioServerTransport());
-  // The runtime may have started a cloud heartbeat; stop it when stdio closes so
-  // the process can exit cleanly.
   const stop = (binding.runtime as { stopHeartbeat?(): void }).stopHeartbeat;
   const cleanup = () => stop?.();
   process.on("SIGINT", () => {

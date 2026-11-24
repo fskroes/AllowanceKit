@@ -2,12 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isMainnet, mainnetName, family } from "../src/live.ts";
 
-// Regression guard (SOL-01/SOL-02 review): the CLI's real-money confirmation
-// once checked the bare string `network === "base"`. Once `family()` began
-// accepting CAIP-2 ids, `eip155:8453` and `solana:5eykt…` passed validation but
-// slipped past that guard, creating a live mainnet wallet with no REAL MONEY
-// prompt. `isMainnet` must catch every spelling of a mainnet.
-
 test("isMainnet is true for Base and Solana mainnet, by bare name and CAIP-2", () => {
   assert.equal(isMainnet("base"), true);
   assert.equal(isMainnet("eip155:8453"), true);

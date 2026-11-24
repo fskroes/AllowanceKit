@@ -6,29 +6,6 @@ import { verifyAttestation } from "./attestation.ts";
 import type { OnChainPolicy, OnChainVerifyResult } from "./attestation-chain.ts";
 import type { IdentityPolicy, IdentityVerifyResult } from "./attestation-identity.ts";
 
-/**
- * Seller-side reputation gate (PoC, v1). A buyer presents a signed
- * behavior attestation (docs/attestation.md); this middleware verifies the
- * signature, checks the claim clears the seller's bar, and only then runs the
- * protected handler. It is the seller half of the two-sided trust primitive:
- * `paymentGate` gates on money, `requireAttestation` gates on track record.
- *
- * It has the same Node handler shape as a `paymentGate` handler, so it composes
- * either side of one:
- *   - reputation first:  requireAttestation(policy, paymentGate(gateOpts, h))
- *   - payment first:     paymentGate(gateOpts, requireAttestation(policy, h))
- *
- * Wire: the buyer sends the attestation as base64-encoded JSON in the
- * `X-Attestation` header (same encoding convention as `X-PAYMENT`).
- *
- * Replay: an attestation is signed but not secret, so a low-reputation buyer
- * could copy another agent's attestation. Set `bindToPayer: true` when the same
- * request also carries an `X-PAYMENT` header (payment-first composition): the
- * gate then requires the payment's payer address to equal the attestation
- * agent, so a replayed attestation from an address that did not pay is refused.
- */
-
-/** A protected handler; `meter` is forwarded untouched so this composes with `paymentGate`. */
 export type AttestedHandler = (
   req: IncomingMessage,
   res: ServerResponse,
@@ -36,59 +13,29 @@ export type AttestedHandler = (
 ) => void | Promise<void>;
 
 export interface AttestationPolicy {
-  /** Header the attestation arrives in (lowercase). Default `"x-attestation"`. */
   header?: string;
-  /** Minimum settled payments the agent must have. */
   minPayments?: number;
-  /** Minimum on-chain-checkable payments (`verifiableTxCount`). */
   minVerifiableTxCount?: number;
-  /** Minimum human-approved payments. */
   minApprovalsApproved?: number;
-  /** Minimum distinct counterparties. */
   minDistinctHosts?: number;
-  /** Minimum total spent, micro-dollars. */
   minSpendMicro?: bigint;
-  /** Reject a claim older than this many seconds, even if it has not expired. */
   maxAgeSecs?: number;
-  /** Allowlist of agent addresses (case-insensitive). Omit to accept any address that clears the bar. */
   agents?: string[];
-  /** Require the request's `X-PAYMENT` payer to equal the attestation agent (anti-replay). */
   bindToPayer?: boolean;
-  /**
-   * Re-check the txHash evidence on-chain (v2). The buyer must have attested with
-   * `includeEvidence`. Adds an RPC round-trip per evidence tx, so prefer gating
-   * before pricing and caching per agent. Names the network (or a `client`/
-   * `rpcUrl`) and how many must verify (`minVerified`/`requireAll`).
-   */
   onChain?: OnChainPolicy;
-  /**
-   * Resolve the buyer's ERC-8004 `registryAgentId` in the on-chain Identity
-   * Registry (v2) and require the attesting address to be that agent's
-   * registered wallet or owner. The buyer must have attested with
-   * `registryAgentId`. One RPC round-trip (two reads), so it runs after the cheap
-   * floors and before the per-hash `onChain` check. Names the network (or a
-   * `reader`/`rpcUrl`/`registry`).
-   */
   identity?: IdentityPolicy;
-  /** Last-word predicate; return false (or throw) to reject after all built-in checks pass. */
   accept?: (summary: BehaviorSummary, signer: string) => boolean | Promise<boolean>;
-  /** Override "now" (unix seconds), for tests. */
   now?: number;
-  /** Custom rejection response. Default: 403 JSON `{ error: "attestation_rejected", reason }`. */
   onReject?: (reason: string, req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 }
 
-/** What a passing check attaches to the request for the handler to read. */
 export interface VerifiedAttestation {
   signer: string;
   summary: BehaviorSummary;
-  /** The on-chain tally, present only when `policy.onChain` ran. */
   onChain?: OnChainVerifyResult;
-  /** The registry resolution, present only when `policy.identity` ran. */
   identity?: IdentityVerifyResult;
 }
 
-/** Read the verified attestation a `requireAttestation` gate attached to a served request. */
 export function attestationOf(req: IncomingMessage): VerifiedAttestation | undefined {
   return (req as { attestation?: VerifiedAttestation }).attestation;
 }
@@ -101,11 +48,6 @@ function decodeHeader(raw: string): SignedAttestation | null {
   }
 }
 
-/**
- * Wrap a handler so it runs only for a buyer whose signed attestation verifies
- * and clears `policy`. Returns a Node handler with the same shape `paymentGate`
- * expects and produces.
- */
 export function requireAttestation(policy: AttestationPolicy, handler: AttestedHandler): AttestedHandler {
   const headerName = policy.header ?? "x-attestation";
   const allow = policy.agents?.map((a) => a.toLowerCase());
@@ -128,9 +70,6 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
     if (!att) return deny("malformed attestation header", req, res);
 
     const now = policy.now;
-    // Signature/window/digest only here. The on-chain re-check is the expensive
-    // step (an RPC per evidence tx), so it runs last, after the cheap floors have
-    // rejected any request that would fail anyway.
     const result = await verifyAttestation(att, now === undefined ? {} : { now });
     if (!result.valid) return deny(result.reason, req, res);
 
@@ -180,12 +119,8 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
       if (!ok) return deny("rejected by the seller's policy predicate", req, res);
     }
 
-    // Registry identity is one RPC round-trip (two reads); the on-chain payment
-    // re-check is one RPC per evidence tx. Resolve identity first so an
-    // unregistered agent fails before the more expensive per-hash loop runs.
     let identity: IdentityVerifyResult | undefined;
     if (policy.identity) {
-      // Lazy import: a gate without an identity policy never pulls an RPC client in.
       const { enforceIdentity } = await import("./attestation-identity.ts");
       let id: Awaited<ReturnType<typeof enforceIdentity>>;
       try {
@@ -199,7 +134,6 @@ export function requireAttestation(policy: AttestationPolicy, handler: AttestedH
 
     let onChain: OnChainVerifyResult | undefined;
     if (policy.onChain) {
-      // Lazy import: a gate without an onChain policy never pulls an RPC client in.
       const { enforceOnChain } = await import("./attestation-chain.ts");
       let chain: Awaited<ReturnType<typeof enforceOnChain>>;
       try {

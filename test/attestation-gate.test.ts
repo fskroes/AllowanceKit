@@ -12,8 +12,6 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "wallie-gate-"));
 }
 
-/** Seed a realistic ledger under `agent`: 3 settled payments (2 with a txHash),
- * a block, an approved round, across two hosts. */
 function seed(ledger: Ledger, agent: string): void {
   ledger.append({ t: "topup", at: "2026-09-01T00:00:00.000Z", agent, amountMicro: "5000000", source: "manual", balanceAfterMicro: "5000000" });
   ledger.append({ t: "payment", at: "2026-09-02T00:00:00.000Z", agent, url: "https://a.com/x", host: "a.com", amountMicro: "1000", txHash: "0xaa", balanceAfterMicro: "4999000" });
@@ -29,7 +27,6 @@ async function testAccount(seedByte = "44") {
   return privateKeyToAccount(`0x${seedByte.repeat(32)}` as `0x${string}`);
 }
 
-/** A signed attestation from a fresh account whose ledger was seeded. */
 async function signedFor(seedByte: string): Promise<{ att: SignedAttestation; agent: string }> {
   const dir = tmpDir();
   const account = await testAccount(seedByte);
@@ -52,7 +49,6 @@ function res() {
   return r;
 }
 
-/** A handler that records that it ran and returns 200. */
 function okHandler() {
   const state = { served: false, req: undefined as unknown };
   const handler = (rq: unknown, rs: { writeHead: (c: number, h?: Record<string, unknown>) => unknown; end: (b?: string) => void }) => {
@@ -78,7 +74,7 @@ async function run(policy: AttestationPolicy, headers: Record<string, string>) {
 
 test("summarize honors ledgerKey: filter by the ledger key, stamp identity as the address", () => {
   const ledger = new Ledger(tmpDir());
-  seed(ledger, "agent");                        // rows keyed by the runtime agentName
+  seed(ledger, "agent");
   const s = summarize(ledger, "0xWALLET", { ledgerKey: "agent" });
   assert.equal(s.agent, "0xWALLET", "identity is the wallet address");
   assert.equal(s.payments, 3, "rows are still read under the ledger key");
@@ -118,7 +114,7 @@ test("a claim below the payment floor is refused", async () => {
 });
 
 test("the verifiableTxCount floor counts only chain-checkable payments", async () => {
-  const { att } = await signedFor("47"); // 3 payments, 2 with a txHash
+  const { att } = await signedFor("47");
   const pass = await run({ minVerifiableTxCount: 2 }, { "x-attestation": headerFor(att) });
   assert.equal(pass.state.served, true);
   const fail = await run({ minVerifiableTxCount: 3 }, { "x-attestation": headerFor(att) });
@@ -139,7 +135,6 @@ test("a stale claim is refused by maxAgeSecs", async () => {
   const account = await testAccount("49");
   const ledger = new Ledger(tmpDir());
   seed(ledger, account.address);
-  // Issued an hour ago.
   const nowSecs = Math.floor(Date.now() / 1000);
   const att = await attestFromLedger(account as never, ledger, account.address, { now: nowSecs - 3600 });
   const { state, r } = await run({ maxAgeSecs: 600 }, { "x-attestation": headerFor(att) });
@@ -174,7 +169,7 @@ test("bindToPayer requires the paying address to match the attestation agent", a
 
 test("a custom accept predicate has the last word", async () => {
   const { att } = await signedFor("4c");
-  const denied = await run({ accept: (s) => s.blocks === 0 }, { "x-attestation": headerFor(att) }); // seed has 1 block
+  const denied = await run({ accept: (s) => s.blocks === 0 }, { "x-attestation": headerFor(att) });
   assert.equal(denied.state.served, false);
   assert.match(JSON.parse(denied.r.body).reason, /policy predicate/);
   const allowed = await run({ accept: (s) => s.approvalsApproved >= 1 }, { "x-attestation": headerFor(att) });
@@ -204,7 +199,6 @@ test("runtime.attest() signs from the live agent's own ledger and a seller gate 
     checkOnChainBalance: false,
   });
   try {
-    // The rows a running agent would leave, keyed by its agentName (not the address).
     seed(runtime.ledger, runtime.agentName);
 
     const att = await runtime.attest();
@@ -215,7 +209,6 @@ test("runtime.attest() signs from the live agent's own ledger and a seller gate 
     const verified = await verifyAttestation(att);
     assert.equal(verified.valid, true, "the payer key's signature recovers");
 
-    // End to end: the seller gate accepts the agent's own attestation.
     const { state } = await run({ minPayments: 2, minVerifiableTxCount: 2 }, { "x-attestation": headerFor(att) });
     assert.equal(state.served, true);
   } finally {

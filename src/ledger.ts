@@ -12,15 +12,9 @@ export type LedgerEvent =
       amountMicro: string;
       txHash: string;
       balanceAfterMicro: string;
-      // Solana `upto` only (SOL-03/SOL-05). `amountMicro` stays the actual charge,
-      // so budget and velocity are unchanged; these annotate an escrow settlement.
-      /** "exact" | "upto"; absent on EVM and Solana `exact` rows. */
       scheme?: string;
-      /** The channel deposit ceiling the buyer escrowed. */
       depositMicro?: string;
-      /** What came back to the wallet (`deposit − actual`). */
       refundMicro?: string;
-      /** The channel this payment settled. */
       channelId?: string;
     }
   | { t: "blocked"; at: string; agent: string; url: string; host: string; rule: string; detail: string; attemptedMicro: string }
@@ -56,11 +50,6 @@ export class Ledger {
     this.cache = null;
   }
 
-  /**
-   * The whole log. Re-parsed only when the file actually changed — `authorize()`
-   * needs several totals per call and the audit log is append-only, so parsing
-   * it once per mutation instead of once per question keeps a busy agent linear.
-   */
   read(): LedgerEvent[] {
     let key = "";
     try {
@@ -88,7 +77,6 @@ export class Ledger {
     return events;
   }
 
-  /** Every figure the policy engine needs, in one pass. */
   totals(agent: string, windowMs: number): LedgerTotals {
     const cutoff = new Date(Date.now() - windowMs).toISOString();
     let topupsMicro = 0n;
